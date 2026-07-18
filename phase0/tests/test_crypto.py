@@ -5,9 +5,18 @@ Vector sources (cross-checked, two independent implementations each):
   https://github.com/bluez/bluez/blob/master/unit/test-mesh-crypto.c
 - Silvair python-bluetooth-mesh-network tests/test_security.py
   https://github.com/SilvairGit/python-bluetooth-mesh-network/blob/master/tests/test_security.py
+
+CCM vector sources:
+- Mesh §8.3.1 Message #1: BlueZ unit/test-mesh-crypto.c (s8_3_1) and
+  btstack test/mesh/mesh_message_test.py
+  https://github.com/bluekitchen/btstack/blob/master/test/mesh/mesh_message_test.py
+- RFC 3610 Packet Vector #1: https://www.rfc-editor.org/rfc/rfc3610.txt
 """
 
-from btmesh_min.crypto import k1, k2, k3, k4, s1
+import pytest
+from cryptography.exceptions import InvalidTag
+
+from btmesh_min.crypto import ccm_decrypt, ccm_encrypt, k1, k2, k3, k4, s1
 
 # Spec sample data §8.1.2 / §8.1.3 use these keys (also §8.1.5, §8.1.6).
 APP_KEY = bytes.fromhex("3216d1509884b533248541792b877f98")
@@ -49,3 +58,64 @@ def test_k3_spec_8_1_5():
 def test_k4_spec_8_1_6():
     """Spec §8.1.6: k4(AppKey) -> 6-bit AID."""
     assert k4(APP_KEY) == 0x38
+
+
+# --- AES-CCM ---
+
+# Spec §8.3.1 Message #1: network-layer encryption intermediates.
+# EncryptionKey (from k2 of NetKey 7dd7364c...), network nonce,
+# plaintext = DST || TransportPDU, CTL=1 so NetMIC is 64-bit.
+MSG1_ENC_KEY = bytes.fromhex("0953fa93e7caac9638f58820220a398e")
+MSG1_NET_NONCE = bytes.fromhex("00800000011201000012345678")
+MSG1_PLAINTEXT = bytes.fromhex("fffd034b50057e400000010000")
+MSG1_CIPHERTEXT_MIC = bytes.fromhex(
+    "b5e5bfdacbaf6cb7fb6bff871f035444ce83a670df"
+)
+
+
+def test_ccm_encrypt_spec_8_3_1():
+    """Spec §8.3.1 Message #1 network encryption (mic_len=8, no AAD)."""
+    out = ccm_encrypt(MSG1_ENC_KEY, MSG1_NET_NONCE, MSG1_PLAINTEXT, mic_len=8)
+    assert out == MSG1_CIPHERTEXT_MIC
+
+
+def test_ccm_decrypt_spec_8_3_1():
+    """Spec §8.3.1 Message #1 network decryption."""
+    out = ccm_decrypt(MSG1_ENC_KEY, MSG1_NET_NONCE, MSG1_CIPHERTEXT_MIC, mic_len=8)
+    assert out == MSG1_PLAINTEXT
+
+
+def test_ccm_rfc3610_packet_vector_1():
+    """RFC 3610 Packet Vector #1 (with AAD, M=8)."""
+    key = bytes.fromhex("c0c1c2c3c4c5c6c7c8c9cacbcccdcecf")
+    nonce = bytes.fromhex("00000003020100a0a1a2a3a4a5")
+    aad = bytes.fromhex("0001020304050607")
+    plaintext = bytes.fromhex("08090a0b0c0d0e0f101112131415161718191a1b1c1d1e")
+    expected = bytes.fromhex(
+        "588c979a61c663d2f066d0c2c0f989806d5f6b61dac38417e8d12cfdf926e0"
+    )
+    assert ccm_encrypt(key, nonce, plaintext, mic_len=8, aad=aad) == expected
+    assert ccm_decrypt(key, nonce, expected, mic_len=8, aad=aad) == plaintext
+
+
+def test_ccm_decrypt_tampered_raises():
+    """Flipping any bit of ciphertext or MIC must raise InvalidTag."""
+    tampered = bytearray(MSG1_CIPHERTEXT_MIC)
+    tampered[0] ^= 0x01
+    with pytest.raises(InvalidTag):
+        ccm_decrypt(MSG1_ENC_KEY, MSG1_NET_NONCE, bytes(tampered), mic_len=8)
+    tampered = bytearray(MSG1_CIPHERTEXT_MIC)
+    tampered[-1] ^= 0x80  # MIC byte
+    with pytest.raises(InvalidTag):
+        ccm_decrypt(MSG1_ENC_KEY, MSG1_NET_NONCE, bytes(tampered), mic_len=8)
+
+
+@pytest.mark.parametrize("mic_len", [4, 8])
+def test_ccm_round_trip(mic_len):
+    key = bytes(range(16))
+    nonce = bytes(range(13))
+    plaintext = b"btmesh round trip"
+    aad = b"aad"
+    data = ccm_encrypt(key, nonce, plaintext, mic_len=mic_len, aad=aad)
+    assert len(data) == len(plaintext) + mic_len
+    assert ccm_decrypt(key, nonce, data, mic_len=mic_len, aad=aad) == plaintext

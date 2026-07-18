@@ -1,5 +1,6 @@
 """Mesh security functions (Mesh Profile spec §3.8.2)."""
 
+from cryptography.hazmat.primitives.ciphers.aead import AESCCM
 from cryptography.hazmat.primitives.ciphers.algorithms import AES
 from cryptography.hazmat.primitives.cmac import CMAC
 
@@ -48,3 +49,17 @@ def k4(n: bytes) -> int:
     salt = s1(b"smk4")
     t = aes_cmac(salt, n)
     return aes_cmac(t, b"id6\x01")[15] & 0x3F
+
+
+def ccm_encrypt(
+    key: bytes, nonce: bytes, plaintext: bytes, mic_len: int, aad: bytes = b""
+) -> bytes:
+    """AES-CCM encrypt; returns ciphertext || MIC (spec §3.8.2.3)."""
+    return AESCCM(key, tag_length=mic_len).encrypt(nonce, plaintext, aad)
+
+
+def ccm_decrypt(
+    key: bytes, nonce: bytes, data: bytes, mic_len: int, aad: bytes = b""
+) -> bytes:
+    """AES-CCM decrypt of ciphertext || MIC; raises InvalidTag on MIC mismatch."""
+    return AESCCM(key, tag_length=mic_len).decrypt(nonce, data, aad)
