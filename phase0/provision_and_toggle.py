@@ -39,6 +39,7 @@ from btmesh_min.access import (
     parse_generic_onoff_status,
 )
 from btmesh_min.bearer import (
+    IDENTIFICATION_NODE_IDENTITY,
     BearerError,
     EsphomeTransport,
     GattBearer,
@@ -135,7 +136,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 raise ValueError
         except ValueError:
             parser.error("--device-uuid must be 16 bytes of hex")
-    if args.static_oob:
+    if args.static_oob is not None:  # explicit "" must error, not mean no-OOB
         try:
             if not 1 <= len(bytes.fromhex(args.static_oob)) <= 16:
                 raise ValueError
@@ -163,9 +164,48 @@ def setup_logging(verbose: bool) -> None:
     logger.info("---- provision_and_toggle run started ----")
 
 
+_STATE_FIELD_TYPES = {
+    "netkey": str,
+    "appkey": str,
+    "iv_index": int,
+    "netkey_index": int,
+    "appkey_index": int,
+    "provisioner_addr": int,
+    "next_unicast": int,
+    "seq": int,
+    "devices": dict,
+}
+
+
+def _validate_state(state: dict) -> None:
+    for field, expected in _STATE_FIELD_TYPES.items():
+        if not isinstance(state.get(field), expected):
+            raise ValueError(
+                f"field {field!r} is missing or not a {expected.__name__}"
+            )
+    for key_field in ("netkey", "appkey"):
+        if len(bytes.fromhex(state[key_field])) != 16:  # ValueError on bad hex
+            raise ValueError(f"field {key_field!r} is not 16 bytes of hex")
+
+
 def load_or_create_state(path: Path) -> dict:
     if path.exists():
-        state = json.loads(path.read_text())
+        # The triage texts invite hand-editing this file, so a typo must come
+        # back as a diagnostic, not a raw traceback.
+        try:
+            state = json.loads(path.read_text())
+            _validate_state(state)
+        except (ValueError, TypeError) as exc:
+            raise Phase0Failure(
+                "startup",
+                f"state file {path} is unreadable: {exc}",
+                [
+                    "fix the field named in the error (the file is hand-editable "
+                    "JSON), or",
+                    "delete the file to start over with fresh keys — the node "
+                    "must then be factory-reset and reprovisioned",
+                ],
+            ) from exc
         logger.info(
             "loaded state %s (seq=%d, %d device(s))",
             path, state["seq"], len(state["devices"]),
@@ -236,7 +276,9 @@ class BearerPump:
 
     The provisioner and MeshNode emit PDUs from synchronous callbacks; the
     bearer's send() is async. An asyncio.Queue drained by a single task
-    preserves emission order. Send failures land in ``on_error``.
+    preserves emission order (and serializes send(): concurrent sends would
+    interleave SAR frames). A send failure kills the pump: it is recorded in
+    ``failure``, passed to ``on_error``, and nothing further is transmitted.
     """
 
     def __init__(self, bearer: GattBearer, msg_type: int) -> None:
@@ -244,6 +286,7 @@ class BearerPump:
         self._msg_type = msg_type
         self._queue: asyncio.Queue[bytes] = asyncio.Queue()
         self._task: asyncio.Task | None = None
+        self.failure: BaseException | None = None
         self.on_error = None  # Callable[[BaseException], None]
 
     def put(self, pdu: bytes) -> None:
@@ -260,6 +303,7 @@ class BearerPump:
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
+            self.failure = exc
             logger.error("bearer TX pump died: %s", exc)
             if self.on_error is not None:
                 self.on_error(exc)
@@ -269,6 +313,22 @@ class BearerPump:
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
             self._task = None
+
+
+def _timeout_causes(pump: BearerPump, extra: list[str] | None = None) -> list[str]:
+    """Triage list for a request timeout, truthful about a dead TX pump.
+
+    If the pump died, nothing was actually transmitted — that fact must come
+    FIRST, before the on-air explanations, or the diagnostic lies.
+    """
+    causes = list(CONFIG_TIMEOUT_CAUSES) + (extra or [])
+    if pump.failure is not None:
+        causes.insert(
+            0,
+            f"bearer TX pump died: {pump.failure} — the request was never "
+            "transmitted; the causes below do not apply",
+        )
+    return causes
 
 
 async def _disconnect_quietly(client) -> None:
@@ -286,7 +346,7 @@ def _provisioning_causes(message: str) -> list[str]:
     if "OOB" in message:
         causes += [
             "the device demands OOB authentication this provisioner cannot do "
-            "(output/input OOB) — check the capabilities dump above",
+            "(output/input OOB) — see the 'capabilities:' line logged above",
             "if it lists static OOB, rerun with --static-oob HEX (value from "
             "the vendor app/label)",
         ]
@@ -408,7 +468,12 @@ async def provision(args, state: dict, state_path: Path, transport) -> int:
         await bearer.stop()
         await _disconnect_quietly(client)
 
-    assert prov.done and prov.device_key is not None
+    if not prov.done or prov.device_key is None:  # no assert: dies under -O
+        raise Phase0Failure(
+            "provisioning",
+            f"session ended without Complete (state {prov.state.name})",
+            ["internal error — check the hex dumps for the last exchange"],
+        )
     print()
     print("=== MILESTONE A: PROVISIONING COMPLETE ===")
     print(f"  unicast address: 0x{unicast:04x}")
@@ -460,13 +525,18 @@ async def _find_proxy_target(state: dict, transport, unicast: int):
     if match is not None:
         print(f"  Network ID match from {match.device.address}")
         return match.device
-    if len(candidates) == 1:
+    # Single-candidate fallback ONLY for Node Identity: a type-0x00 advert
+    # with a non-matching Network ID is cryptographically proven foreign,
+    # so it must never be "assumed ours" no matter how alone it is.
+    if (
+        len(candidates) == 1
+        and candidates[0].identification_type == IDENTIFICATION_NODE_IDENTITY
+    ):
         cand = candidates[0]
         print(
             f"  no Network ID match; single 0x1828 advertiser "
-            f"{cand.device.address} (identification type "
-            f"0x{cand.identification_type:02x}) — assuming it is our node "
-            "(Node Identity verification needs crypto outside Phase 0 scope)"
+            f"{cand.device.address} uses Node Identity — assuming it is our "
+            "node (identity verification needs crypto outside Phase 0 scope)"
         )
         return cand.device
     if candidates:
@@ -480,8 +550,11 @@ async def _find_proxy_target(state: dict, transport, unicast: int):
             f"{len(candidates)} 0x1828 advertisers, none matching our Network ID",
             [
                 f"candidates seen: {listing}",
-                "other mesh networks nearby; ours may not advertise Network ID "
-                "— rerun, or power the other networks down for the test",
+                "type-0x00 candidates with a different Network ID are "
+                "cryptographically proven foreign (neighbor's mesh)",
+                "our node may advertise Node Identity alongside other "
+                "advertisers — rerun, or power the other networks down for "
+                "the test",
             ],
         )
     # Nothing advertised 0x1828 at all: capture what the airwaves DID carry.
@@ -506,7 +579,9 @@ async def _find_proxy_target(state: dict, transport, unicast: int):
     )
 
 
-async def configure(node: MeshNode, unicast: int, appkey: bytes, state: dict) -> None:
+async def configure(
+    node: MeshNode, unicast: int, appkey: bytes, state: dict, pump: BearerPump
+) -> None:
     print("Config: AppKey Add (netkey idx 0, appkey idx 0)...")
     t0 = time.perf_counter()
     try:
@@ -518,7 +593,7 @@ async def configure(node: MeshNode, unicast: int, appkey: bytes, state: dict) ->
             timeout=10,
         )
     except TimeoutError as exc:
-        raise Phase0Failure("config AppKey Add", str(exc), CONFIG_TIMEOUT_CAUSES)
+        raise Phase0Failure("config AppKey Add", str(exc), _timeout_causes(pump))
     status = parse_config_appkey_status(_full_payload(resp))
     if status.status != 0x00:
         name = STATUS_NAMES.get(status.status, "Unknown")
@@ -548,7 +623,9 @@ async def configure(node: MeshNode, unicast: int, appkey: bytes, state: dict) ->
             timeout=10,
         )
     except TimeoutError as exc:
-        raise Phase0Failure("config Model App Bind", str(exc), CONFIG_TIMEOUT_CAUSES)
+        raise Phase0Failure(
+            "config Model App Bind", str(exc), _timeout_causes(pump)
+        )
     status = parse_config_model_app_status(_full_payload(resp))
     if status.status != 0x00:
         name = STATUS_NAMES.get(status.status, "Unknown")
@@ -568,7 +645,7 @@ async def configure(node: MeshNode, unicast: int, appkey: bytes, state: dict) ->
     print(f"  Model App Status: Success ({(time.perf_counter() - t0) * 1000:.0f} ms)")
 
 
-async def toggle_loop(node: MeshNode, unicast: int) -> None:
+async def toggle_loop(node: MeshNode, unicast: int, pump: BearerPump) -> None:
     print("Toggling Generic OnOff: 3 ON/OFF cycles, 2 s apart...")
     tid = 0
     for cycle in range(1, 4):
@@ -585,8 +662,10 @@ async def toggle_loop(node: MeshNode, unicast: int) -> None:
                 raise Phase0Failure(
                     f"toggle (cycle {cycle}, {'ON' if onoff else 'OFF'})",
                     str(exc),
-                    CONFIG_TIMEOUT_CAUSES
-                    + ["AppKey bind lost (rerun without --toggle-only)"],
+                    _timeout_causes(
+                        pump,
+                        ["AppKey bind lost (rerun without --toggle-only)"],
+                    ),
                 )
             ms = (time.perf_counter() - t0) * 1000
             status = parse_generic_onoff_status(_full_payload(resp))
@@ -645,8 +724,8 @@ async def mesh_session(
         await bearer.start(on_message)
         pump.start()
         if not args.toggle_only:
-            await configure(node, unicast, appkey, state)
-        await toggle_loop(node, unicast)
+            await configure(node, unicast, appkey, state, pump)
+        await toggle_loop(node, unicast, pump)
     finally:
         await pump.stop()
         await bearer.stop()
@@ -658,7 +737,11 @@ async def mesh_session(
 
 async def async_main(args: argparse.Namespace) -> int:
     state_path = Path(args.state)
-    state = load_or_create_state(state_path)
+    try:
+        state = load_or_create_state(state_path)
+    except Phase0Failure as failure:
+        print_diagnostic(failure.phase, failure, failure.causes)
+        return 1
 
     if args.transport == "esphome":
         transport = EsphomeTransport(args.esphome_host, args.esphome_key)

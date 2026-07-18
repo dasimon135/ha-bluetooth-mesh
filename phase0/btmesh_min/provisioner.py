@@ -168,6 +168,8 @@ class Provisioner:
 
         self.state = State.IDLE
         self.device_key: bytes | None = None
+        #: The device's Capabilities PDU, kept once received (interop evidence).
+        self.capabilities: Capabilities | None = None
         #: Optional zero-argument callback invoked when Complete is received.
         self.on_done: Callable[[], None] | None = None
 
@@ -249,6 +251,10 @@ class Provisioner:
     # -- handlers ----------------------------------------------------------
 
     def _on_capabilities(self, caps: Capabilities) -> None:
+        # Log on the happy path too: the Capabilities PDU is core interop
+        # evidence and must land in the run log whether or not we fail.
+        logger.info("capabilities: %s", caps.describe())
+        self.capabilities = caps
         if not caps.algorithms & 0x0001:
             raise ProvisioningError(
                 "device does not support the FIPS P-256 Elliptic Curve algorithm; "

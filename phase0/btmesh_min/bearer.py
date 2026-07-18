@@ -114,7 +114,12 @@ class GattBearer:
             logger.debug("stop_notify failed (ignored): %s", exc)
 
     async def send(self, msg_type: int, payload: bytes) -> None:
-        """SAR-segment ``payload`` and write each frame without response."""
+        """SAR-segment ``payload`` and write each frame without response.
+
+        Callers must serialize send() calls: two concurrent sends would
+        interleave their SAR frames and corrupt reassembly at the peer.
+        (The Phase 0 script serializes through its single-task BearerPump.)
+        """
         max_frame = self.max_frame
         try:
             frames = segment(msg_type, payload, max_frame)
