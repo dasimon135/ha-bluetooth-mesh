@@ -107,15 +107,25 @@ def parse_access(payload: bytes) -> tuple[int, bytes]:
     return int.from_bytes(payload[:size], "big"), payload[size:]
 
 
-def _expect_params(payload: bytes, opcode: int, length: int) -> bytes:
+def _format_opcode(opcode: int) -> str:
+    """Format an opcode with the width of its on-air form (0x00, 0x8003, ...)."""
+    width = 4 if opcode <= 0x7E else 6 if opcode <= 0xBFFF else 8
+    return f"{opcode:#0{width}x}"
+
+
+def _expect_params(
+    payload: bytes, opcode: int, lengths: tuple[int, ...]
+) -> bytes:
     got_opcode, params = parse_access(payload)
     if got_opcode != opcode:
         raise AccessError(
-            f"expected opcode {opcode:#06x}, got {got_opcode:#06x}"
+            f"expected opcode {_format_opcode(opcode)}, "
+            f"got {_format_opcode(got_opcode)}"
         )
-    if len(params) != length:
+    if len(params) not in lengths:
         raise AccessError(
-            f"opcode {opcode:#06x} expects {length} parameter bytes, "
+            f"opcode {_format_opcode(opcode)} expects "
+            f"{' or '.join(map(str, lengths))} parameter bytes, "
             f"got {len(params)}"
         )
     return params
@@ -196,7 +206,7 @@ def generic_onoff_set(onoff: bool, tid: int) -> bytes:
 
 def parse_config_appkey_status(payload: bytes) -> AppKeyStatus:
     """Parse a Config AppKey Status access payload (spec §4.3.2.40)."""
-    params = _expect_params(payload, OP_CONFIG_APPKEY_STATUS, 4)
+    params = _expect_params(payload, OP_CONFIG_APPKEY_STATUS, (4,))
     netkey_idx, appkey_idx = _unpack_key_indexes(params[1:4])
     return AppKeyStatus(
         status=params[0], netkey_idx=netkey_idx, appkey_idx=appkey_idx
@@ -209,7 +219,7 @@ def parse_config_model_app_status(payload: bytes) -> ModelAppStatus:
     Vendor-model responses (9 parameter bytes, extra company ID) are out of
     Phase 0 scope and rejected.
     """
-    params = _expect_params(payload, OP_CONFIG_MODEL_APP_STATUS, 7)
+    params = _expect_params(payload, OP_CONFIG_MODEL_APP_STATUS, (7,))
     return ModelAppStatus(
         status=params[0],
         element_addr=int.from_bytes(params[1:3], "little"),
@@ -220,21 +230,13 @@ def parse_config_model_app_status(payload: bytes) -> ModelAppStatus:
 
 def parse_generic_onoff_status(payload: bytes) -> GenericOnOffStatus:
     """Parse a Generic OnOff Status (Model spec §3.2.1.4)."""
-    opcode, params = parse_access(payload)
-    if opcode != OP_GENERIC_ONOFF_STATUS:
-        raise AccessError(
-            f"expected opcode {OP_GENERIC_ONOFF_STATUS:#06x}, got {opcode:#06x}"
-        )
+    params = _expect_params(payload, OP_GENERIC_ONOFF_STATUS, (1, 3))
     if len(params) == 1:
         return GenericOnOffStatus(
             present_onoff=params[0], target_onoff=None, remaining_time=None
         )
-    if len(params) == 3:
-        return GenericOnOffStatus(
-            present_onoff=params[0],
-            target_onoff=params[1],
-            remaining_time=params[2],
-        )
-    raise AccessError(
-        f"Generic OnOff Status expects 1 or 3 parameter bytes, got {len(params)}"
+    return GenericOnOffStatus(
+        present_onoff=params[0],
+        target_onoff=params[1],
+        remaining_time=params[2],
     )

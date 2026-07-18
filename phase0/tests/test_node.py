@@ -13,6 +13,7 @@ import pytest
 from btmesh_min import network
 from btmesh_min.access import (
     OP_CONFIG_APPKEY_ADD,
+    OP_CONFIG_APPKEY_STATUS,
     OP_GENERIC_ONOFF_SET,
     OP_GENERIC_ONOFF_STATUS,
     config_appkey_add,
@@ -110,6 +111,18 @@ def test_send_access_without_device_key_raises():
         a.send_access(0x0005, b"\x00", dev_key=True)
 
 
+def test_raising_on_message_does_not_break_rx_path():
+    a, b, _ = make_pair()
+
+    def bad_handler(msg: ReceivedMessage) -> None:
+        raise RuntimeError("buggy user handler")
+
+    b.on_message = bad_handler
+    a.send_access(0x0002, generic_onoff_set(True, 0x0A))  # must not raise
+    a.send_access(0x0002, generic_onoff_set(False, 0x0B))
+    assert [m.params for m in b.received] == [b"\x01\x0a", b"\x00\x0b"]
+
+
 # ---------------------------------------------------------- request/response
 
 
@@ -145,7 +158,62 @@ async def test_request_timeout_after_retries_raises():
             timeout=0.01, retries=1,
         )
     assert len(a_sent) == 2  # original + one retransmission
-    assert not a._waiters  # waiter cleaned up
+    # White-box cleanup check: the internal waiter list must not leak entries.
+    assert not a._waiters
+
+
+async def test_concurrent_same_opcode_requests_matched_fifo():
+    """No correlation ID in mesh: two same-(dst, opcode) requests pair FIFO."""
+    a, b, _ = make_pair()
+    t1 = asyncio.create_task(
+        a.request(0x0002, generic_onoff_set(True, 0x10),
+                  OP_GENERIC_ONOFF_STATUS, timeout=1.0)
+    )
+    t2 = asyncio.create_task(
+        a.request(0x0002, generic_onoff_set(True, 0x11),
+                  OP_GENERIC_ONOFF_STATUS, timeout=1.0)
+    )
+    await asyncio.sleep(0)  # let both tasks send and register their waiters
+    b.send_access(0x0001, bytes.fromhex("8204" "00"))  # first response: off
+    b.send_access(0x0001, bytes.fromhex("8204" "01"))  # second response: on
+    r1, r2 = await asyncio.gather(t1, t2)
+    assert r1.params == b"\x00"  # oldest waiter got the first response
+    assert r2.params == b"\x01"
+
+
+async def test_request_cancellation_cleans_up_waiter():
+    a, _, _ = make_pair(a_send_filter=lambda pdu, n: False)  # black hole
+    task = asyncio.create_task(
+        a.request(0x0002, generic_onoff_set(True, 0x12),
+                  OP_GENERIC_ONOFF_STATUS, timeout=5.0)
+    )
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # White-box cleanup check: cancellation must not leak the waiter.
+    assert not a._waiters
+
+
+async def test_request_with_device_key():
+    """Segmented Config AppKey Add request answered under B's device key."""
+    a, b, a_sent = make_pair()
+
+    def handler(msg: ReceivedMessage) -> None:
+        if msg.opcode == OP_CONFIG_APPKEY_ADD:
+            # B answers with its own device key (AKF=0, own-address fallback).
+            b.send_access(msg.src, bytes.fromhex("8003" "00" "563412"),
+                          dev_key=True)
+
+    b.on_message = handler
+    msg = await a.request(
+        0x0002, config_appkey_add(0x456, 0x123, APP_KEY),
+        OP_CONFIG_APPKEY_STATUS, dev_key=True,
+    )
+    assert msg == ReceivedMessage(
+        src=0x0002, opcode=OP_CONFIG_APPKEY_STATUS, params=bytes.fromhex("00563412")
+    )
+    assert len(a_sent) == 2  # the request itself went out as two segments
 
 
 # ------------------------------------------------------------------ control

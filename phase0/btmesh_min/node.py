@@ -66,9 +66,12 @@ def _seq_auth(seq: int, seq_zero: int) -> int:
 class MeshNode:
     """Send and receive access messages over one mesh subnet.
 
-    ``send_network_pdu`` receives every outgoing raw network PDU; feed every
-    incoming raw network PDU to :meth:`handle_network_pdu`. Decrypted messages
-    land in :attr:`received` (newest last) and, when set, are passed to
+    ``send_network_pdu`` receives every outgoing raw network PDU and must not
+    block: it is called synchronously from :meth:`send_access` /
+    :meth:`request`, so an async bearer should enqueue the PDU and return
+    (TODO Phase 1: native async callback support). Feed every incoming raw
+    network PDU to :meth:`handle_network_pdu`. Decrypted messages land in
+    :attr:`received` (newest last) and, when set, are passed to
     :attr:`on_message`.
     """
 
@@ -114,10 +117,14 @@ class MeshNode:
         """Encrypt and send one access payload to ``dst``.
 
         ``dev_key=True`` uses the device key registered for ``dst`` (AKF=0,
-        Foundation/Config messages); the default uses the shared AppKey (AKF=1).
+        Foundation/Config messages), falling back to the key registered for
+        our own address — a node answering its provisioner encrypts with its
+        own device key. The default uses the shared AppKey (AKF=1).
         """
         if dev_key:
             key = self._device_keys.get(dst)
+            if key is None:
+                key = self._device_keys.get(self._src)
             if key is None:
                 raise NodeError(f"no device key registered for {dst:#06x}")
             akf, aid = False, 0
@@ -240,11 +247,17 @@ class MeshNode:
 
     def _deliver(self, msg: ReceivedMessage) -> None:
         self.received.append(msg)
+        # Mesh has no correlation ID: resolve only the OLDEST matching waiter
+        # so N concurrent same-(dst, opcode) requests pair FIFO with N responses.
         for dst, opcode, fut in self._waiters:
             if msg.src == dst and msg.opcode == opcode and not fut.done():
                 fut.set_result(msg)
+                break
         if self.on_message is not None:
-            self.on_message(msg)
+            try:
+                self.on_message(msg)
+            except Exception:  # never let a user handler break the bearer RX path
+                logger.exception("on_message callback raised")
 
     # -------------------------------------------------------------- request
 
@@ -262,10 +275,15 @@ class MeshNode:
         """Send ``payload`` and await the matching response from ``dst``.
 
         A response matches when its source is ``dst`` and its opcode equals
-        ``expected_opcode``. On timeout the request is retransmitted up to
-        ``retries`` times; :class:`TimeoutError` is raised when all attempts
-        are exhausted.
+        ``expected_opcode``. Mesh access messages carry no correlation ID, so
+        concurrent requests with the same ``(dst, expected_opcode)`` are
+        matched to responses in FIFO order; callers that need strict
+        request/response pairing must serialize such requests themselves.
+        On timeout the request is retransmitted up to ``retries`` times;
+        :class:`TimeoutError` is raised when all attempts are exhausted.
         """
+        if retries < 0:
+            raise NodeError(f"retries must be >= 0, got {retries}")
         fut: asyncio.Future[ReceivedMessage] = (
             asyncio.get_running_loop().create_future()
         )
@@ -279,6 +297,8 @@ class MeshNode:
                     return await asyncio.wait_for(asyncio.shield(fut), timeout)
                 except TimeoutError:
                     continue
+            if fut.done():  # response landed in the post-timeout race window
+                return fut.result()
             raise TimeoutError(
                 f"no {expected_opcode:#06x} response from {dst:#06x} "
                 f"after {retries + 1} attempts"
