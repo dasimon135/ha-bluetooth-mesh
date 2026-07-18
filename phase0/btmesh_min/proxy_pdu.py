@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from typing import NoReturn
 
+from .errors import BtMeshError
 
-class ProxyPDUError(Exception):
+
+class ProxyPDUError(BtMeshError):
     """Malformed Proxy PDU frame or invalid SAR sequence."""
 
 

@@ -235,6 +235,7 @@ dependencies = [
     { name = "bleak" },
     { name = "bleak-esphome" },
     { name = "cryptography" },
+    { name = "habluetooth" },
 ]
 
 [package.dev-dependencies]
@@ -249,6 +250,7 @@ requires-dist = [
     { name = "bleak", specifier = ">=0.22" },
     { name = "bleak-esphome", specifier = ">=2.0" },
     { name = "cryptography", specifier = ">=42" },
+    { name = "habluetooth", specifier = ">=3" },
 ]
 
 [package.metadata.requires-dev]

@@ -484,7 +484,9 @@ async def provision(args, state: dict, state_path: Path, transport) -> int:
         "uuid": target.uuid.hex(),
         "address": target.device.address,
     }
-    state["next_unicast"] = unicast + 1
+    # Advance past every element of the node so a future device in this state
+    # file cannot overlap the lamp's secondary elements.
+    state["next_unicast"] = unicast + max(1, prov.capabilities.num_elements)
     save_state(state_path, state)
     return unicast
 
