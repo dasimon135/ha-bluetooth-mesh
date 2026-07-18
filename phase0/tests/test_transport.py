@@ -115,6 +115,20 @@ def test_transport_error_is_btmesh_error():
     assert issubclass(TransportError, BtMeshError)
 
 
+def test_bad_label_uuid_length_raises():
+    for bad_uuid in (b"\x00", MSG22_LABEL_UUID + b"\x00"):
+        with pytest.raises(TransportError):
+            encrypt_access(
+                APP_KEY, akf=True, seq=0, src=0x0001, dst=0x8000,
+                iv_index=IV_INDEX, access_pdu=b"\x00", label_uuid=bad_uuid,
+            )
+        with pytest.raises(TransportError):
+            decrypt_access(
+                APP_KEY, akf=True, seq=0, src=0x0001, dst=0x8000,
+                iv_index=IV_INDEX, upper_pdu=bytes(5), label_uuid=bad_uuid,
+            )
+
+
 # ------------------------------------------------------- lower layer, access
 
 
@@ -144,6 +158,34 @@ def test_segment_seq_zero_is_13_lsbs():
     )
     header = int.from_bytes(segments[0][1][1:4], "big")
     assert (header >> 10) & 0x1FFF == 0x3129AB & 0x1FFF == 0x09AB
+
+
+def test_segment_max_segments_exceeded_raises():
+    with pytest.raises(TransportError):
+        segment_access_message(
+            bytes(12 * 32 + 1), akf=False, aid=0, first_seq=0
+        )
+
+
+def test_segment_seq_overflow_raises():
+    with pytest.raises(TransportError):
+        segment_access_message(
+            bytes(13), akf=False, aid=0, first_seq=0xFFFFFF  # needs 2 SEQs
+        )
+
+
+def test_aid_out_of_range_raises():
+    with pytest.raises(TransportError):
+        unsegmented_access(b"\x00", akf=True, aid=0x40)
+    with pytest.raises(TransportError):
+        segment_access_message(bytes(13), akf=True, aid=0x40, first_seq=0)
+
+
+def test_nonzero_aid_with_device_key_raises():
+    with pytest.raises(TransportError):
+        unsegmented_access(b"\x00", akf=False, aid=1)
+    with pytest.raises(TransportError):
+        segment_access_message(bytes(13), akf=False, aid=1, first_seq=0)
 
 
 def test_parse_unsegmented_access_message22():
@@ -183,6 +225,16 @@ def test_reassemble_out_of_order_and_duplicates():
     assert assembler.add(seg0) == MSG6_UPPER
     # assembler resets after completion
     assert assembler.add(seg1) is None
+
+
+def test_reassemble_short_non_final_segment_raises():
+    assembler = SegmentAssembler()
+    short = AccessSegment(
+        akf=False, aid=0, szmic=0, seq_zero=0x09AB, seg_o=0, seg_n=1,
+        segment=bytes(11),  # non-final segments must be exactly 12 bytes
+    )
+    with pytest.raises(TransportError):
+        assembler.add(short)
 
 
 def test_reassemble_restarts_on_new_seq_zero():
@@ -235,7 +287,8 @@ def test_end_to_end_message6_on_air():
     ctx = network.NetworkContext(
         net_key=NET_KEY, iv_index=IV_INDEX, seq=MSG6_FIRST_SEQ
     )
-    first_seq = ctx.seq
+    first_seq = ctx.next_seq(2)  # one atomic block, one SEQ per segment
+    assert first_seq == MSG6_FIRST_SEQ
     upper = encrypt_access(
         DEV_KEY, akf=False, seq=first_seq, src=0x0003, dst=0x1201,
         iv_index=ctx.iv_index, access_pdu=MSG6_ACCESS,
@@ -250,6 +303,7 @@ def test_end_to_end_message6_on_air():
         )
     ]
     assert packets == MSG6_PACKETS
+    assert ctx.seq == MSG6_FIRST_SEQ + 2  # 2-segment send advanced SEQ by 2
 
 
 def test_end_to_end_message6_receive():

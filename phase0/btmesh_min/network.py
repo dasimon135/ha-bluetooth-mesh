@@ -38,6 +38,10 @@ class NetworkContext:
 
     ``seq`` is the next sequence number to use; the caller persists it across
     restarts (reusing a SEQ with the same IV Index breaks nonce uniqueness).
+
+    ``net_key`` must not be reassigned after construction: the derived
+    NID/EncryptionKey/PrivacyKey are computed once in ``__post_init__``.
+    Build a new context for a new key.
     """
 
     net_key: bytes
@@ -50,10 +54,19 @@ class NetworkContext:
     def __post_init__(self) -> None:
         self.nid, self.encryption_key, self.privacy_key = k2(self.net_key, b"\x00")
 
-    def next_seq(self) -> int:
-        """Return the current sequence number and advance the counter."""
+    def next_seq(self, count: int = 1) -> int:
+        """Atomically allocate ``count`` consecutive sequence numbers.
+
+        Returns the first SEQ of the block and advances the counter past it.
+        Segmented sends allocate one block (one SEQ per segment) instead of
+        doing manual ``seq`` bookkeeping.
+        """
+        if count < 1:
+            raise NetworkError(f"count must be >= 1, got {count}")
+        if self.seq + count - 1 > 0xFFFFFF:
+            raise NetworkError("SEQ space exhausted (24-bit overflow)")
         seq = self.seq
-        self.seq += 1
+        self.seq += count
         return seq
 
 
@@ -93,6 +106,10 @@ def encode(
         raise NetworkError(f"TTL out of range: {ttl}")
     if not 0 <= seq <= 0xFFFFFF:
         raise NetworkError(f"SEQ out of range: {seq:#x}")
+    if not 0 <= src <= 0xFFFF:
+        raise NetworkError(f"SRC out of range: {src:#x}")
+    if not 0 <= dst <= 0xFFFF:
+        raise NetworkError(f"DST out of range: {dst:#x}")
     if not transport_pdu:
         raise NetworkError("empty transport PDU")
 

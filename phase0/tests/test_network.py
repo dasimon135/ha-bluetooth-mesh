@@ -60,6 +60,38 @@ def test_next_seq_is_persistable_counter():
     assert c.seq == 7  # caller can persist the next value to use
 
 
+def test_next_seq_block_allocation():
+    """A segmented send allocates one atomic block of consecutive SEQs."""
+    c = NetworkContext(net_key=NET_KEY, iv_index=IV_INDEX, seq=0x100)
+    assert c.next_seq(2) == 0x100
+    assert c.seq == 0x102
+    assert c.next_seq() == 0x102
+
+
+def test_next_seq_overflow_raises():
+    c = NetworkContext(net_key=NET_KEY, iv_index=IV_INDEX, seq=0xFFFFFF)
+    assert c.next_seq() == 0xFFFFFF  # last valid SEQ is still usable
+    with pytest.raises(NetworkError):
+        c.next_seq()
+    c2 = NetworkContext(net_key=NET_KEY, iv_index=IV_INDEX, seq=0xFFFFFF)
+    with pytest.raises(NetworkError):
+        c2.next_seq(2)
+
+
+def test_next_seq_bad_count_raises():
+    with pytest.raises(NetworkError):
+        ctx().next_seq(0)
+
+
+def test_encode_src_dst_out_of_range_raise():
+    for kwargs in ({"src": 0x10000, "dst": 0x0002}, {"src": 0x0001, "dst": -1}):
+        with pytest.raises(NetworkError):
+            encode(
+                ctx(), ctl=False, ttl=0, seq=0, transport_pdu=b"\x66\x00",
+                **kwargs,
+            )
+
+
 def test_aes_ecb_pecb_vector():
     """btstack message #1 PECB: e(PrivacyKey, 0^40 || IV Index || Privacy Random)."""
     priv_key = bytes.fromhex("8b84eedec100067d670971dd2aa700cf")

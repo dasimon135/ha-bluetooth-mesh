@@ -77,6 +77,13 @@ def _access_nonce(
     )
 
 
+def _check_label_uuid(label_uuid: bytes) -> None:
+    if label_uuid and len(label_uuid) != 16:
+        raise TransportError(
+            f"Label UUID must be 16 bytes, got {len(label_uuid)}"
+        )
+
+
 def encrypt_access(
     key: bytes,
     *,
@@ -94,6 +101,7 @@ def encrypt_access(
     the SEQ of the (first) network PDU carrying this message. For virtual
     destination addresses pass the Label UUID (CCM additional data).
     """
+    _check_label_uuid(label_uuid)
     nonce = _access_nonce(akf, seq, src, dst, iv_index)
     return ccm_encrypt(key, nonce, access_pdu, TRANS_MIC_LEN, aad=label_uuid)
 
@@ -113,6 +121,7 @@ def decrypt_access(
 
     Raises :class:`TransportError` if the TransMIC does not verify.
     """
+    _check_label_uuid(label_uuid)
     nonce = _access_nonce(akf, seq, src, dst, iv_index)
     try:
         return ccm_decrypt(key, nonce, upper_pdu, TRANS_MIC_LEN, aad=label_uuid)
@@ -208,13 +217,18 @@ class SegmentAssembler:
     """
 
     def __init__(self) -> None:
-        self._key: tuple | None = None
+        self._key: tuple[bool, int, int, int, int] | None = None
         self._parts: dict[int, bytes] = {}
 
     def add(self, seg: AccessSegment) -> bytes | None:
         """Add one segment; returns the full upper-transport PDU when complete."""
         if seg.seg_o > seg.seg_n:
             raise TransportError(f"SegO {seg.seg_o} > SegN {seg.seg_n}")
+        if seg.seg_o < seg.seg_n and len(seg.segment) != SEGMENT_SIZE:
+            raise TransportError(
+                f"non-final segment must be {SEGMENT_SIZE} bytes, "
+                f"got {len(seg.segment)}"
+            )
         key = (seg.akf, seg.aid, seg.szmic, seg.seq_zero, seg.seg_n)
         if key != self._key:
             self._key = key
