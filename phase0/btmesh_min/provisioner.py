@@ -20,12 +20,14 @@ ProvisioningManager.swift.
 from __future__ import annotations
 
 import enum
+import logging
 import os
 from typing import Callable
 
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from .crypto import aes_cmac, ccm_encrypt, k1, s1
+from .errors import BtMeshError
 from .prov_pdu import (
     Capabilities,
     Complete,
@@ -40,7 +42,12 @@ from .prov_pdu import (
     decode,
 )
 
+logger = logging.getLogger(__name__)
+
 AUTH_VALUE_LEN = 16
+
+# Provisioning Data MIC length in bytes (spec §5.4.1.7)
+DATA_MIC_LEN = 8
 
 # Start PDU field values (spec §5.4.1.3, Tables 5.25-5.28)
 ALGORITHM_FIPS_P256 = 0x00
@@ -62,7 +69,7 @@ ERROR_NAMES = {
 }
 
 
-class ProvisioningError(Exception):
+class ProvisioningError(BtMeshError):
     """Provisioning cannot proceed (protocol violation, bad input, mismatch)."""
 
 
@@ -145,6 +152,10 @@ class Provisioner:
             )
         if random is not None and len(random) != 16:
             raise ProvisioningError(f"random must be 16 bytes, got {len(random)}")
+        if static_oob is not None and not 1 <= len(static_oob) <= AUTH_VALUE_LEN:
+            raise ProvisioningError(
+                f"static_oob must be 1-{AUTH_VALUE_LEN} bytes, got {len(static_oob)}"
+            )
 
         self._netkey = bytes(netkey)
         self._key_index = key_index
@@ -156,10 +167,19 @@ class Provisioner:
         self._static_oob = static_oob
 
         self.state = State.IDLE
-        self.done = False
         self.device_key: bytes | None = None
         #: Optional zero-argument callback invoked when Complete is received.
         self.on_done: Callable[[], None] | None = None
+
+        self._dispatch: dict[
+            State, tuple[type[ProvisioningPDU], Callable[[ProvisioningPDU], None]]
+        ] = {
+            State.WAIT_CAPABILITIES: (Capabilities, self._on_capabilities),
+            State.WAIT_PUBLIC_KEY: (PublicKey, self._on_public_key),
+            State.WAIT_CONFIRMATION: (Confirmation, self._on_confirmation),
+            State.WAIT_RANDOM: (Random, self._on_random),
+            State.WAIT_COMPLETE: (Complete, self._on_complete),
+        }
 
         nums = self._key.public_key().public_numbers()
         self._public_key = nums.x.to_bytes(32, "big") + nums.y.to_bytes(32, "big")
@@ -174,6 +194,16 @@ class Provisioner:
         self._conf_key = b""
         self._device_confirmation = b""
 
+    @property
+    def done(self) -> bool:
+        """True once the device acknowledged provisioning with Complete."""
+        return self.state is State.DONE
+
+    def _set_state(self, new: State) -> None:
+        if new is not self.state:
+            logger.debug("provisioning state %s -> %s", self.state.name, new.name)
+            self.state = new
+
     # -- outgoing ----------------------------------------------------------
 
     def _emit(self, pdu: ProvisioningPDU) -> bytes:
@@ -187,29 +217,34 @@ class Provisioner:
             raise ProvisioningError(f"start() called in state {self.state.name}")
         invite = Invite(attention_duration=0)
         self._invite_params = self._emit(invite)[1:]
-        self.state = State.WAIT_CAPABILITIES
+        self._set_state(State.WAIT_CAPABILITIES)
 
     # -- incoming ----------------------------------------------------------
 
     def handle_pdu(self, data: bytes) -> None:
-        """Process one Provisioning PDU received from the device."""
-        pdu = decode(data)
-        if isinstance(pdu, Failed):
-            self.state = State.FAILED
-            raise ProvisioningFailed(pdu.error_code)
-        expected: dict[State, tuple[type, Callable]] = {
-            State.WAIT_CAPABILITIES: (Capabilities, self._on_capabilities),
-            State.WAIT_PUBLIC_KEY: (PublicKey, self._on_public_key),
-            State.WAIT_CONFIRMATION: (Confirmation, self._on_confirmation),
-            State.WAIT_RANDOM: (Random, self._on_random),
-            State.WAIT_COMPLETE: (Complete, self._on_complete),
-        }
-        entry = expected.get(self.state)
-        if entry is None or not isinstance(pdu, entry[0]):
-            raise ProvisioningError(
-                f"unexpected {type(pdu).__name__} PDU in state {self.state.name}"
-            )
-        entry[1](pdu)
+        """Process one Provisioning PDU received from the device.
+
+        Any BtMeshError raised while processing (malformed PDU, unexpected
+        PDU, confirmation mismatch, device-reported failure, ...) is fatal:
+        the session transitions to FAILED before the exception propagates
+        (spec §5.4.4 — provisioning protocol errors abort the session).
+        Once DONE, the state is terminal; stray PDUs still raise but do not
+        demote the session.
+        """
+        try:
+            pdu = decode(data)
+            if isinstance(pdu, Failed):
+                raise ProvisioningFailed(pdu.error_code)
+            entry = self._dispatch.get(self.state)
+            if entry is None or not isinstance(pdu, entry[0]):
+                raise ProvisioningError(
+                    f"unexpected {type(pdu).__name__} PDU in state {self.state.name}"
+                )
+            entry[1](pdu)
+        except BtMeshError:
+            if self.state is not State.DONE:
+                self._set_state(State.FAILED)
+            raise
 
     # -- handlers ----------------------------------------------------------
 
@@ -224,6 +259,10 @@ class Provisioner:
             self._auth_value = static_auth_value(self._static_oob)
         elif caps.static_oob_type & 0x01:
             # Device offers static OOB but we have no value; attempt No OOB.
+            logger.warning(
+                "device advertises static OOB but no static_oob value was "
+                "supplied; attempting No OOB authentication"
+            )
             auth_method = AUTH_METHOD_NO_OOB
             self._auth_value = bytes(AUTH_VALUE_LEN)
         elif caps.output_oob_size or caps.input_oob_size:
@@ -246,7 +285,7 @@ class Provisioner:
         )
         self._start_params = self._emit(start)[1:]
         self._emit(PublicKey(x=self._public_key[:32], y=self._public_key[32:]))
-        self.state = State.WAIT_PUBLIC_KEY
+        self._set_state(State.WAIT_PUBLIC_KEY)
 
     def _on_public_key(self, pk: PublicKey) -> None:
         device_public_key = pk.x + pk.y
@@ -277,12 +316,12 @@ class Provisioner:
         self._conf_key = k1(self._secret, self._conf_salt, b"prck")
         confirmation = aes_cmac(self._conf_key, self._random + self._auth_value)
         self._emit(Confirmation(value=confirmation))
-        self.state = State.WAIT_CONFIRMATION
+        self._set_state(State.WAIT_CONFIRMATION)
 
     def _on_confirmation(self, conf: Confirmation) -> None:
         self._device_confirmation = conf.value
         self._emit(Random(value=self._random))
-        self.state = State.WAIT_RANDOM
+        self._set_state(State.WAIT_RANDOM)
 
     def _on_random(self, rand: Random) -> None:
         expected = aes_cmac(self._conf_key, rand.value + self._auth_value)
@@ -304,12 +343,15 @@ class Provisioner:
             + self._iv_index.to_bytes(4, "big")
             + self.unicast_addr.to_bytes(2, "big")
         )
-        ciphertext = ccm_encrypt(session_key, session_nonce, plaintext, mic_len=8)
-        self._emit(Data(encrypted=ciphertext[:25], mic=ciphertext[25:]))
-        self.state = State.WAIT_COMPLETE
+        ciphertext = ccm_encrypt(
+            session_key, session_nonce, plaintext, mic_len=DATA_MIC_LEN
+        )
+        self._emit(
+            Data(encrypted=ciphertext[:-DATA_MIC_LEN], mic=ciphertext[-DATA_MIC_LEN:])
+        )
+        self._set_state(State.WAIT_COMPLETE)
 
     def _on_complete(self, _: Complete) -> None:
-        self.state = State.DONE
-        self.done = True
+        self._set_state(State.DONE)
         if self.on_done is not None:
             self.on_done()

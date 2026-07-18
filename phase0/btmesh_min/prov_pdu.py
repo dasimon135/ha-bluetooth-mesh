@@ -11,8 +11,10 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
+from .errors import BtMeshError
 
-class ProvisioningPDUError(Exception):
+
+class ProvisioningPDUError(BtMeshError):
     """Malformed or unknown Provisioning PDU.
 
     ``data`` carries the raw bytes when raised while decoding; it is empty

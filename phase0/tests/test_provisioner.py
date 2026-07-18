@@ -30,8 +30,10 @@ AuthValue formatting is asserted (no fabricated "expected" bytes).
 """
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
 
-from btmesh_min.prov_pdu import Capabilities, Complete, Failed
+from btmesh_min.errors import BtMeshError
+from btmesh_min.prov_pdu import Capabilities, Complete, Failed, ProvisioningPDUError
 from btmesh_min.provisioner import (
     Provisioner,
     ProvisioningError,
@@ -78,6 +80,15 @@ DATA_PDU = bytes.fromhex(
     "07" + "d0bd7f4a89a2ff6222af59a90a60ad58acfe3123356f5cec29" + "73e0ec50783b10c7"
 )
 COMPLETE_PDU = Complete().encode()
+
+
+DEVICE_SESSION_PDUS = [
+    CAPABILITIES_PDU,
+    DEVICE_PUBLIC_KEY_PDU,
+    DEVICE_CONFIRMATION_PDU,
+    DEVICE_RANDOM_PDU,
+    COMPLETE_PDU,
+]
 
 
 def make_provisioner(sent, **kwargs):
@@ -160,6 +171,7 @@ def test_out_of_order_pdu_raises_with_state_and_type():
         p.handle_pdu(DEVICE_PUBLIC_KEY_PDU)
     assert "PublicKey" in str(excinfo.value)
     assert "WAIT_CAPABILITIES" in str(excinfo.value)
+    assert p.state is State.FAILED
 
 
 def test_pdu_before_start_raises():
@@ -195,6 +207,40 @@ def test_device_confirmation_mismatch_raises():
     assert "confirmation" in str(excinfo.value).lower()
     # Data must NOT have been sent
     assert sent[-1] == PROV_RANDOM_PDU
+    # §5.4.4: a mismatch aborts the session; the failure is terminal and a
+    # retransmitted (correct) Random must not be re-verified.
+    assert p.state is State.FAILED
+    with pytest.raises(ProvisioningError):
+        p.handle_pdu(DEVICE_RANDOM_PDU)
+    assert sent[-1] == PROV_RANDOM_PDU
+    assert p.device_key is None
+
+
+def test_malformed_pdu_is_fatal_and_shares_error_base():
+    sent: list[bytes] = []
+    p = make_provisioner(sent)
+    p.start()
+    with pytest.raises(ProvisioningPDUError):
+        p.handle_pdu(bytes.fromhex("2aff"))  # unknown opcode
+    assert p.state is State.FAILED
+    # Bearer layers can catch every provisioning-related error via one base.
+    assert issubclass(ProvisioningPDUError, BtMeshError)
+    assert issubclass(ProvisioningError, BtMeshError)
+    assert issubclass(ProvisioningFailed, ProvisioningError)
+
+
+def test_handle_pdu_after_done_raises_but_state_stays_done():
+    sent: list[bytes] = []
+    p = make_provisioner(sent)
+    p.start()
+    for pdu in DEVICE_SESSION_PDUS:
+        p.handle_pdu(pdu)
+    assert p.state is State.DONE
+    with pytest.raises(ProvisioningError):
+        p.handle_pdu(COMPLETE_PDU)
+    assert p.state is State.DONE
+    assert p.done
+    assert p.device_key == DEVICE_KEY
 
 
 def test_output_input_oob_only_capabilities_raises_diagnostic():
@@ -330,3 +376,20 @@ def test_init_rejects_bad_arguments():
             unicast_addr=0,  # unassigned address
             send=lambda _: None,
         )
+    with pytest.raises(ProvisioningError):
+        make_provisioner([], static_oob=b"")  # empty static OOB
+    with pytest.raises(ProvisioningError):
+        make_provisioner([], static_oob=bytes(17))  # longer than AuthValue
+
+
+def test_keypair_on_wrong_curve_rejected():
+    with pytest.raises(ProvisioningError) as excinfo:
+        Provisioner(
+            netkey=NET_KEY,
+            key_index=KEY_INDEX,
+            iv_index=IV_INDEX,
+            unicast_addr=UNICAST,
+            send=lambda _: None,
+            keypair=ec.generate_private_key(ec.SECP384R1()),
+        )
+    assert "P-256" in str(excinfo.value)
