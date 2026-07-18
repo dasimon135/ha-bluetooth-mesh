@@ -100,8 +100,18 @@ class MeshNode:
 
     # ------------------------------------------------------------------- TX
 
+    @property
+    def ctx(self) -> NetworkContext:
+        """Network context; ``ctx.seq`` is the persistable sequence cursor."""
+        return self._ctx
+
     def add_device(self, unicast: int, device_key: bytes) -> None:
-        """Register the device key of the node whose primary address is ``unicast``."""
+        """Register the device key of the node whose primary address is ``unicast``.
+
+        Caveat: registering a key for your own address disables the
+        unregistered-dst typo guard for outgoing dev-key traffic, because
+        :meth:`send_access` falls back to the own-address key for any ``dst``.
+        """
         if len(device_key) != 16:
             raise NodeError(f"device key must be 16 bytes, got {len(device_key)}")
         self._device_keys[unicast] = device_key
@@ -124,6 +134,9 @@ class MeshNode:
         if dev_key:
             key = self._device_keys.get(dst)
             if key is None:
+                logger.debug(
+                    "no device key for %#06x, encrypting with own device key", dst
+                )
                 key = self._device_keys.get(self._src)
             if key is None:
                 raise NodeError(f"no device key registered for {dst:#06x}")
