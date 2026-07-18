@@ -1,0 +1,17 @@
+# phase0/pyproject.toml
+[project]
+name = "btmesh-phase0"
+version = "0.0.1"
+requires-python = ">=3.12"
+dependencies = [
+    "cryptography>=42",
+    "bleak>=0.22",
+    "bleak-esphome>=2.0",
+    "aioesphomeapi>=24",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
