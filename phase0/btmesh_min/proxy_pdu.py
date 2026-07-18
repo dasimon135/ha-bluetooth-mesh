@@ -7,6 +7,8 @@ Cross-checked against Zephyr subsys/bluetooth/mesh/proxy_msg.c.
 
 from __future__ import annotations
 
+from typing import NoReturn
+
 
 class ProxyPDUError(Exception):
     """Malformed Proxy PDU frame or invalid SAR sequence."""
@@ -67,7 +69,7 @@ class Reassembler:
         self._msg_type = None
         self._buffer = bytearray()
 
-    def _fail(self, message: str) -> None:
+    def _fail(self, message: str) -> NoReturn:
         self._reset()
         raise ProxyPDUError(message)
 

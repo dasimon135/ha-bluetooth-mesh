@@ -13,11 +13,24 @@ from dataclasses import dataclass
 
 
 class ProvisioningPDUError(Exception):
-    """Malformed or unknown Provisioning PDU.  Carries the raw bytes."""
+    """Malformed or unknown Provisioning PDU.
+
+    ``data`` carries the raw bytes when raised while decoding; it is empty
+    for encode-side field validation errors.
+    """
 
     def __init__(self, message: str, data: bytes = b"") -> None:
         super().__init__(message)
         self.data = data
+
+
+def _check_uint(name: str, value: int, bits: int) -> int:
+    """Validate an unsigned integer field before encoding."""
+    if not isinstance(value, int) or not 0 <= value < (1 << bits):
+        raise ProvisioningPDUError(
+            f"{name} must be an unsigned {bits}-bit integer, got {value!r}"
+        )
+    return value
 
 
 # Provisioning PDU types (spec §5.4.1, Table 5.18).
@@ -68,7 +81,9 @@ class Invite:
     attention_duration: int
 
     def encode(self) -> bytes:
-        return bytes([INVITE, self.attention_duration])
+        return bytes(
+            [INVITE, _check_uint("attention_duration", self.attention_duration, 8)]
+        )
 
 
 @dataclass(frozen=True)
@@ -87,14 +102,14 @@ class Capabilities:
     def encode(self) -> bytes:
         return bytes([CAPABILITIES]) + struct.pack(
             ">BHBBBHBH",
-            self.num_elements,
-            self.algorithms,
-            self.public_key_type,
-            self.static_oob_type,
-            self.output_oob_size,
-            self.output_oob_actions,
-            self.input_oob_size,
-            self.input_oob_actions,
+            _check_uint("num_elements", self.num_elements, 8),
+            _check_uint("algorithms", self.algorithms, 16),
+            _check_uint("public_key_type", self.public_key_type, 8),
+            _check_uint("static_oob_type", self.static_oob_type, 8),
+            _check_uint("output_oob_size", self.output_oob_size, 8),
+            _check_uint("output_oob_actions", self.output_oob_actions, 16),
+            _check_uint("input_oob_size", self.input_oob_size, 8),
+            _check_uint("input_oob_actions", self.input_oob_actions, 16),
         )
 
     def describe(self) -> str:
@@ -132,11 +147,11 @@ class Start:
         return bytes(
             [
                 START,
-                self.algorithm,
-                self.public_key,
-                self.auth_method,
-                self.auth_action,
-                self.auth_size,
+                _check_uint("algorithm", self.algorithm, 8),
+                _check_uint("public_key", self.public_key, 8),
+                _check_uint("auth_method", self.auth_method, 8),
+                _check_uint("auth_action", self.auth_action, 8),
+                _check_uint("auth_size", self.auth_size, 8),
             ]
         )
 
@@ -215,7 +230,7 @@ class Failed:
     error_code: int
 
     def encode(self) -> bytes:
-        return bytes([FAILED, self.error_code])
+        return bytes([FAILED, _check_uint("error_code", self.error_code, 8)])
 
 
 ProvisioningPDU = (
@@ -280,4 +295,6 @@ def decode(data: bytes) -> ProvisioningPDU:
         return Data(encrypted=params[:25], mic=params[25:])
     if cls is Complete:
         return Complete()
-    return Failed(error_code=params[0])
+    if cls is Failed:
+        return Failed(error_code=params[0])
+    raise AssertionError(f"unhandled PDU class {cls.__name__}")

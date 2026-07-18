@@ -224,6 +224,28 @@ def test_decode_padding_bits_must_be_zero():
         decode(bytes.fromhex("4000"))
 
 
+def test_encode_out_of_range_int_field_raises():
+    with pytest.raises(ProvisioningPDUError):
+        Invite(attention_duration=300).encode()
+    with pytest.raises(ProvisioningPDUError):
+        Failed(error_code=-1).encode()
+    with pytest.raises(ProvisioningPDUError):
+        Start(
+            algorithm=256, public_key=0, auth_method=0, auth_action=0, auth_size=0
+        ).encode()
+    with pytest.raises(ProvisioningPDUError):
+        Capabilities(
+            num_elements=1,
+            algorithms=0x10000,  # wider than 16 bits
+            public_key_type=0,
+            static_oob_type=0,
+            output_oob_size=0,
+            output_oob_actions=0,
+            input_oob_size=0,
+            input_oob_actions=0,
+        ).encode()
+
+
 def test_public_key_rejects_bad_coordinate_length():
     with pytest.raises(ProvisioningPDUError):
         PublicKey(x=bytes(31), y=bytes(32)).encode()
