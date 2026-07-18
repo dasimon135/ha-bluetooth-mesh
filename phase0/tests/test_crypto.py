@@ -11,12 +11,18 @@ CCM vector sources:
   btstack test/mesh/mesh_message_test.py
   https://github.com/bluekitchen/btstack/blob/master/test/mesh/mesh_message_test.py
 - RFC 3610 Packet Vector #1: https://www.rfc-editor.org/rfc/rfc3610.txt
+
+Additional sources:
+- k2 friendship vector (§8.1.4): BlueZ unit/test-mesh-crypto.c (s8_1_4),
+  cross-checked against AndrewGi/BluetoothMeshRust src/crypto/k_funcs.rs
+  https://github.com/AndrewGi/BluetoothMeshRust/blob/master/src/crypto/k_funcs.rs
+- AES-CMAC Example 1: https://www.rfc-editor.org/rfc/rfc4493.txt
 """
 
 import pytest
 from cryptography.exceptions import InvalidTag
 
-from btmesh_min.crypto import ccm_decrypt, ccm_encrypt, k1, k2, k3, k4, s1
+from btmesh_min.crypto import aes_cmac, ccm_decrypt, ccm_encrypt, k1, k2, k3, k4, s1
 
 # Spec sample data §8.1.2 / §8.1.3 use these keys (also §8.1.5, §8.1.6).
 APP_KEY = bytes.fromhex("3216d1509884b533248541792b877f98")
@@ -48,6 +54,26 @@ def test_k2_master_spec_8_1_3():
     assert nid == 0x7F
     assert enc_key == bytes.fromhex("9f589181a0f50de73c8070c7a6d27f46")
     assert priv_key == bytes.fromhex("4c715bd4a64b938f99b453351653124f")
+
+
+def test_k2_friendship_spec_8_1_4():
+    """Spec §8.1.4: k2 with 9-byte friendship P.
+
+    P = 0x01 || LPNAddress(0203) || FriendAddress(0405) ||
+        LPNCounter(0607) || FriendCounter(0809).
+    Exercises multi-byte P in the T1/T2/T3 concatenations.
+    """
+    p = bytes.fromhex("010203040506070809")
+    nid, enc_key, priv_key = k2(NET_KEY, p)
+    assert nid == 0x73
+    assert enc_key == bytes.fromhex("11efec0642774992510fb5929646df49")
+    assert priv_key == bytes.fromhex("d4d7cc0dfa772d836a8df9df5510d7a7")
+
+
+def test_aes_cmac_rfc4493_example_1():
+    """RFC 4493 §4 Example 1: empty message, pins aes_cmac independently."""
+    key = bytes.fromhex("2b7e151628aed2a6abf7158809cf4f3c")
+    assert aes_cmac(key, b"") == bytes.fromhex("bb1d6929e95937287fa37d129b756746")
 
 
 def test_k3_spec_8_1_5():
