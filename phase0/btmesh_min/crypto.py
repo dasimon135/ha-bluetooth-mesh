@@ -1,5 +1,6 @@
 """Mesh security functions (Mesh Profile spec §3.8.2)."""
 
+from cryptography.hazmat.primitives.ciphers import Cipher, modes
 from cryptography.hazmat.primitives.ciphers.aead import AESCCM
 from cryptography.hazmat.primitives.ciphers.algorithms import AES
 from cryptography.hazmat.primitives.cmac import CMAC
@@ -13,6 +14,15 @@ def aes_cmac(key: bytes, data: bytes) -> bytes:
     c = CMAC(AES(key))
     c.update(data)
     return c.finalize()
+
+
+def aes_ecb(key: bytes, block: bytes) -> bytes:
+    """AES-128 encryption of a single 16-byte block (spec 'e' function §3.8.2.1).
+
+    Used by the network layer to compute the PECB for header obfuscation.
+    """
+    encryptor = Cipher(AES(key), modes.ECB()).encryptor()
+    return encryptor.update(block) + encryptor.finalize()
 
 
 def s1(m: bytes) -> bytes:
