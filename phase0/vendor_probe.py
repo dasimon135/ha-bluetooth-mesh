@@ -22,11 +22,15 @@ import logging
 
 from btmesh_min.access import (
     HAEFELE_COMPANY_ID,
+    MODEL_HEALTH_SERVER,
+    OP_ATTENTION_STATUS,
     OP_CONFIG_APPKEY_STATUS,
     OP_CONFIG_MODEL_APP_STATUS,
     STATUS_NAMES,
     VD_GROUP_G_STATUS,
+    attention_get,
     config_appkey_add,
+    config_model_app_bind,
     config_model_app_bind_vendor,
     parse_config_appkey_status,
     parse_config_model_app_status,
@@ -183,6 +187,30 @@ async def probe(args, state, state_path, transport, unicast: int) -> None:
             )
         state["vendor_bound_models"] = bound
         save_state(state_path, state)
+
+        # First prove our APP-KEY path works at all: every successful exchange
+        # so far used the device key. Bind the app key to the Health Server
+        # (present on every node) and do an app-keyed Attention Get → Status.
+        # If THIS is silent, the vendor silence is our bug, not Häfele's opcode.
+        print()
+        print("Sanity: app-keyed Attention Get on Health Server (0x0002)...")
+        try:
+            await node.request(
+                unicast,
+                config_model_app_bind(unicast, state["appkey_index"], MODEL_HEALTH_SERVER),
+                OP_CONFIG_MODEL_APP_STATUS,
+                dev_key=True,
+                timeout=10,
+            )
+            resp = await node.request(
+                unicast, attention_get(), OP_ATTENTION_STATUS, timeout=6, retries=1
+            )
+            print(f"  ✓ APP-KEY PATH WORKS — Attention Status params={resp.params.hex()}")
+            appkey_ok = True
+        except TimeoutError:
+            print("  ✗ NO Attention Status — our APP-KEY send/receive path is "
+                  "the problem, not the vendor opcode. Fix that first.")
+            appkey_ok = False
 
         # Sweep candidate vendor op-bytes. Stock Telink SET is 0xC2; Häfele may
         # instead use the customer range (0xE0-0xFF, per the Telink SDK). Any

@@ -26,6 +26,11 @@ OP_GENERIC_ONOFF_STATUS = 0x8204
 # Light Lightness model opcodes (Mesh Model spec §7.1).
 OP_LIGHT_LIGHTNESS_SET = 0x824C
 OP_LIGHT_LIGHTNESS_STATUS = 0x824E
+# Health model — Attention Get/Status (app-keyed; every node has a Health
+# Server, so this is the app-key round-trip sanity check).
+OP_ATTENTION_GET = 0x8004
+OP_ATTENTION_STATUS = 0x8007
+MODEL_HEALTH_SERVER = 0x0002
 
 # SIG model IDs of interest (Mesh Model spec §7.3).
 MODEL_GENERIC_ONOFF_SERVER = 0x1000
@@ -316,6 +321,11 @@ def vendor_group_set(
         raise AccessError(f"sub-op out of range: {sub_op:#x}")
     op_byte = VD_GROUP_G_SET if ack else VD_GROUP_G_SET_NOACK
     return bytes([op_byte]) + company_id.to_bytes(2, "little") + bytes([sub_op]) + params
+
+
+def attention_get() -> bytes:
+    """Health Attention Get (opcode 0x8004, no params) — app-keyed."""
+    return encode_opcode(OP_ATTENTION_GET)
 
 
 def config_composition_data_get(page: int = 0) -> bytes:
