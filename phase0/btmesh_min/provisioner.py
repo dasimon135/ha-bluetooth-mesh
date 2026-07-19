@@ -271,13 +271,16 @@ class Provisioner:
             )
             auth_method = AUTH_METHOD_NO_OOB
             self._auth_value = bytes(AUTH_VALUE_LEN)
-        elif caps.output_oob_size or caps.input_oob_size:
-            raise ProvisioningError(
-                "device supports only output/input OOB authentication, which "
-                "this provisioner cannot perform (provide static_oob or use a "
-                f"No OOB capable device); capabilities: {caps.describe()}"
-            )
         else:
+            # No OOB (0x00) is always selectable by the provisioner (§5.4.2.2)
+            # even when the device also offers output/input OOB — the nRF Mesh
+            # app does the same. A device that truly insists on OOB will
+            # answer with an explicit Provisioning Failed.
+            if caps.output_oob_size or caps.input_oob_size:
+                logger.warning(
+                    "device offers output/input OOB we cannot perform; "
+                    "attempting No OOB authentication"
+                )
             auth_method = AUTH_METHOD_NO_OOB
             self._auth_value = bytes(AUTH_VALUE_LEN)
 

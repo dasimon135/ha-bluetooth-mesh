@@ -243,7 +243,13 @@ def test_handle_pdu_after_done_raises_but_state_stays_done():
     assert p.device_key == DEVICE_KEY
 
 
-def test_output_input_oob_only_capabilities_raises_diagnostic():
+def test_output_input_oob_only_capabilities_falls_back_to_no_oob():
+    """No OOB (0x00) is always selectable by the provisioner (§5.4.2.2).
+
+    A device advertising only output/input OOB (the Häfele/Telink lamps do
+    exactly this: Blink + Push) must not abort the session — we select
+    No OOB and let the device answer Provisioning Failed if it insists.
+    """
     caps = Capabilities(
         num_elements=1,
         algorithms=0x0001,
@@ -254,14 +260,15 @@ def test_output_input_oob_only_capabilities_raises_diagnostic():
         input_oob_size=0,
         input_oob_actions=0x0000,
     )
-    p = make_provisioner([])
+    sent: list[bytes] = []
+    p = make_provisioner(sent)
     p.start()
-    with pytest.raises(ProvisioningError) as excinfo:
-        p.handle_pdu(caps.encode())
-    msg = str(excinfo.value)
-    # Diagnostic must carry the human-readable capability description
-    assert "Output Numeric" in msg
-    assert "output" in msg.lower() and "OOB" in msg
+    p.handle_pdu(caps.encode())
+    assert p.state is State.WAIT_PUBLIC_KEY
+    start_pdu = sent[1]  # Invite, Start, PublicKey
+    assert start_pdu[0] == 0x02  # Start opcode
+    assert start_pdu[3] == 0x00  # auth_method = No OOB
+    assert start_pdu[4] == 0 and start_pdu[5] == 0  # auth_action/size zero
 
 
 def test_missing_fips_p256_algorithm_raises_diagnostic():
