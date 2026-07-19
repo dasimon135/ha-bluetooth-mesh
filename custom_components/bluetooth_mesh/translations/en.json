@@ -1,0 +1,20 @@
+{
+  "title": "Bluetooth Mesh",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Bluetooth Mesh",
+        "description": "Import a Bluetooth SIG Mesh network to expose its lamps in Home Assistant.",
+        "data": {
+          "network_name": "Network name"
+        },
+        "data_description": {
+          "network_name": "A friendly name for this mesh network."
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This mesh network is already configured."
+    }
+  }
+}

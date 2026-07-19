@@ -1,0 +1,8 @@
+# Test dependencies for the bluetooth_mesh Home Assistant integration.
+#
+# The core btmesh library test suite needs none of these; the HA-integration
+# tests under tests/ha/ that require a running Home Assistant are guarded with
+# pytest.importorskip and stay skipped until these are installed. Full CI
+# wiring lands in Task B5.
+homeassistant
+pytest-homeassistant-custom-component
