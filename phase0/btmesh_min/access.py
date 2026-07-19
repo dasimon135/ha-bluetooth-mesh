@@ -31,6 +31,9 @@ OP_LIGHT_LIGHTNESS_STATUS = 0x824E
 OP_ATTENTION_GET = 0x8004
 OP_ATTENTION_STATUS = 0x8007
 MODEL_HEALTH_SERVER = 0x0002
+# Config Node Reset — device-keyed; unprovisions the node (spec §4.3.2.53).
+OP_NODE_RESET = 0x8049
+OP_NODE_RESET_STATUS = 0x804A
 
 # SIG model IDs of interest (Mesh Model spec §7.3).
 MODEL_GENERIC_ONOFF_SERVER = 0x1000
@@ -326,6 +329,11 @@ def vendor_group_set(
 def attention_get() -> bytes:
     """Health Attention Get (opcode 0x8004, no params) — app-keyed."""
     return encode_opcode(OP_ATTENTION_GET)
+
+
+def config_node_reset() -> bytes:
+    """Config Node Reset (opcode 0x8049, no params) — device-keyed."""
+    return encode_opcode(OP_NODE_RESET)
 
 
 def config_composition_data_get(page: int = 0) -> bytes:

@@ -6,3 +6,5 @@ phase0_state.json
 *.apk
 *.dex
 apk_extract/
+*.connect
+network.connect

@@ -28,12 +28,14 @@ from btmesh_min.access import (
     OP_CONFIG_MODEL_APP_STATUS,
     OP_GENERIC_ONOFF_STATUS,
     OP_LIGHT_LIGHTNESS_STATUS,
+    OP_NODE_RESET_STATUS,
     STATUS_NAMES,
     VD_GROUP_G_STATUS,
     attention_get,
     config_appkey_add,
     config_model_app_bind,
     config_model_app_bind_vendor,
+    config_node_reset,
     generic_onoff_set,
     light_lightness_set,
     parse_config_appkey_status,
@@ -81,6 +83,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--models", default=",".join(hex(m) for m in DEFAULT_VENDOR_MODELS),
         help="comma-separated vendor model IDs to bind",
+    )
+    p.add_argument(
+        "--reset", action="store_true",
+        help="send Config Node Reset (unprovision the lamp) and exit",
     )
     p.add_argument("--cycles", type=int, default=2, help="ON/OFF cycles")
     p.add_argument(
@@ -147,6 +153,24 @@ async def probe(args, state, state_path, transport, unicast: int) -> None:
     try:
         session_handler.append(on_message)
         pump.start()
+
+        if args.reset:
+            print("Config Node Reset (unprovisioning the lamp)...")
+            try:
+                await node.request(
+                    unicast, config_node_reset(), OP_NODE_RESET_STATUS,
+                    dev_key=True, timeout=6, retries=1,
+                )
+                print("  ✓ Node Reset Status received — lamp is unprovisioned.")
+            except TimeoutError:
+                # The node often resets before replying; that is still success.
+                print("  (no status reply — node likely reset before replying, "
+                      "which is normal)")
+            state["devices"].pop(f"0x{unicast:04x}", None)
+            save_state(state_path, state)
+            print("  Removed from local state. The lamp should now beacon as "
+                  "unprovisioned (0x1827) and be addable in the Häfele app.")
+            return
 
         # AppKey Add (idempotent — same key re-Add is Success per §4.3.2.37).
         print("Config: AppKey Add (idempotent)...")
