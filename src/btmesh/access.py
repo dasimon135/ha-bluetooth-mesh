@@ -22,6 +22,7 @@ __all__ = [
     "OP_CONFIG_COMPOSITION_DATA_GET",
     "OP_CONFIG_MODEL_APP_BIND",
     "OP_CONFIG_MODEL_APP_STATUS",
+    "OP_GENERIC_ONOFF_GET",
     "OP_GENERIC_ONOFF_SET",
     "OP_GENERIC_ONOFF_STATUS",
     "OP_LIGHT_LIGHTNESS_SET",
@@ -73,6 +74,7 @@ __all__ = [
     "attention_get",
     "config_node_reset",
     "config_composition_data_get",
+    "generic_onoff_get",
     "generic_onoff_set",
     "light_lightness_set",
     "light_ctl_set",
@@ -95,6 +97,7 @@ OP_CONFIG_COMPOSITION_DATA_GET = 0x8008
 OP_CONFIG_MODEL_APP_BIND = 0x803D
 OP_CONFIG_MODEL_APP_STATUS = 0x803E
 # Generic OnOff model opcodes (Mesh Model spec §7.1, Zephyr mesh sample).
+OP_GENERIC_ONOFF_GET = 0x8201
 OP_GENERIC_ONOFF_SET = 0x8202
 OP_GENERIC_ONOFF_STATUS = 0x8204
 # Light Lightness model opcodes (Mesh Model spec §7.1).
@@ -453,6 +456,11 @@ def config_composition_data_get(page: int = 0) -> bytes:
     if not 0 <= page <= 0xFF:
         raise AccessError(f"page out of range: {page:#x}")
     return encode_opcode(OP_CONFIG_COMPOSITION_DATA_GET) + bytes([page])
+
+
+def generic_onoff_get() -> bytes:
+    """Generic OnOff Get (opcode 0x8201, no params) — app-keyed (Model spec §3.2.1.1)."""
+    return encode_opcode(OP_GENERIC_ONOFF_GET)
 
 
 def generic_onoff_set(onoff: bool, tid: int) -> bytes:

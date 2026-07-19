@@ -60,6 +60,7 @@ from btmesh.errors import BtMeshError
 from btmesh.node import MeshNode, ReceivedMessage
 from btmesh.provisioner import Provisioner
 from btmesh.proxy_pdu import MSG_TYPE_NETWORK_PDU, MSG_TYPE_PROVISIONING_PDU
+from btmesh.pump import BearerPump
 
 logger = logging.getLogger("phase0")
 
@@ -276,50 +277,6 @@ class LocalTransport:
 
     async def stop(self) -> None:
         pass
-
-
-class BearerPump:
-    """Ordered bridge from sync producers to the async bearer.
-
-    The provisioner and MeshNode emit PDUs from synchronous callbacks; the
-    bearer's send() is async. An asyncio.Queue drained by a single task
-    preserves emission order (and serializes send(): concurrent sends would
-    interleave SAR frames). A send failure kills the pump: it is recorded in
-    ``failure``, passed to ``on_error``, and nothing further is transmitted.
-    """
-
-    def __init__(self, bearer: GattBearer, msg_type: int) -> None:
-        self._bearer = bearer
-        self._msg_type = msg_type
-        self._queue: asyncio.Queue[bytes] = asyncio.Queue()
-        self._task: asyncio.Task | None = None
-        self.failure: BaseException | None = None
-        self.on_error = None  # Callable[[BaseException], None]
-
-    def put(self, pdu: bytes) -> None:
-        self._queue.put_nowait(pdu)
-
-    def start(self) -> None:
-        self._task = asyncio.create_task(self._run())
-
-    async def _run(self) -> None:
-        try:
-            while True:
-                pdu = await self._queue.get()
-                await self._bearer.send(self._msg_type, pdu)
-        except asyncio.CancelledError:
-            raise
-        except BaseException as exc:
-            self.failure = exc
-            logger.error("bearer TX pump died: %s", exc)
-            if self.on_error is not None:
-                self.on_error(exc)
-
-    async def stop(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
-            self._task = None
 
 
 def _timeout_causes(pump: BearerPump, extra: list[str] | None = None) -> list[str]:

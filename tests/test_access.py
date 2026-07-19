@@ -26,6 +26,7 @@ from btmesh.access import (
     config_appkey_add,
     config_composition_data_get,
     config_model_app_bind,
+    generic_onoff_get,
     generic_onoff_set,
     parse_access,
     parse_config_appkey_status,
@@ -74,6 +75,11 @@ def test_config_model_app_bind_validates():
         config_model_app_bind(0, 0x1000, 0)  # AppKeyIndex is 12-bit
     with pytest.raises(AccessError):
         config_model_app_bind(0, 0, 0x10000)
+
+
+def test_generic_onoff_get():
+    """Generic OnOff Get (opcode 0x8201) is a bare 2-octet opcode, no params."""
+    assert generic_onoff_get() == bytes.fromhex("8201")
 
 
 def test_generic_onoff_set():
