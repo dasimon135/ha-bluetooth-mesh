@@ -253,3 +253,55 @@ def test_parse_composition_data_truncated_raises():
         parse_composition_data_status(
             bytes.fromhex("02" + "001102010002000a000700" + "000103000000")
         )
+
+
+# ------------------------------------------------------ vendor (Telink/Häfele)
+
+
+def test_vendor_group_onoff_set_bytes():
+    from btmesh_min.access import vendor_group_onoff_set, HAEFELE_COMPANY_ID
+
+    # C2 (SET) + E9 07 (company 0x07E9 LE) + 01 (ON) + 05 (tid)
+    assert vendor_group_onoff_set(HAEFELE_COMPANY_ID, True, 5) == bytes.fromhex("c2e9070105")
+    # C2 + E9 07 + 00 (OFF) + 00
+    assert vendor_group_onoff_set(HAEFELE_COMPANY_ID, False, 0) == bytes.fromhex("c2e9070000")
+    # NoAck uses C3
+    assert vendor_group_onoff_set(HAEFELE_COMPANY_ID, True, 0, ack=False) == bytes.fromhex("c3e9070100")
+
+
+def test_vendor_opcode_roundtrips_through_parse_access():
+    from btmesh_min.access import vendor_opcode, parse_access, VD_GROUP_G_STATUS, HAEFELE_COMPANY_ID
+
+    op = vendor_opcode(VD_GROUP_G_STATUS, HAEFELE_COMPANY_ID)
+    # Status on the wire: C4 E9 07 <sub_op>
+    opcode, params = parse_access(bytes.fromhex("c4e90701"))
+    assert opcode == op
+    assert params == b"\x01"
+
+
+def test_config_model_app_bind_vendor_bytes():
+    from btmesh_min.access import config_model_app_bind_vendor, HAEFELE_COMPANY_ID
+
+    # 803D + elem 0003 LE + appidx 0000 LE + company E9 07 LE + model 0010 LE
+    got = config_model_app_bind_vendor(0x0003, 0, HAEFELE_COMPANY_ID, 0x1000)
+    assert got == bytes.fromhex("803d") + bytes.fromhex("0300") + bytes.fromhex("0000") + bytes.fromhex("e907") + bytes.fromhex("0010")
+
+
+def test_parse_model_app_status_vendor_clean():
+    from btmesh_min.access import parse_config_model_app_status
+
+    payload = bytes.fromhex("803e") + bytes([0x00]) + bytes.fromhex("0300") + bytes.fromhex("0000") + bytes.fromhex("e907") + bytes.fromhex("0010")
+    s = parse_config_model_app_status(payload)
+    assert s.status == 0x00
+    assert s.element_addr == 0x0003
+    assert s.company_id == 0x07E9
+    assert s.model_id == 0x1000
+
+
+def test_parse_model_app_status_sig_form_unchanged():
+    from btmesh_min.access import parse_config_model_app_status
+
+    payload = bytes.fromhex("803e") + bytes([0x00]) + bytes.fromhex("0300") + bytes.fromhex("0000") + bytes.fromhex("0010")
+    s = parse_config_model_app_status(payload)
+    assert s.company_id is None
+    assert s.model_id == 0x1000

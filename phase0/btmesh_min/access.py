@@ -31,6 +31,19 @@ OP_LIGHT_LIGHTNESS_STATUS = 0x824E
 MODEL_GENERIC_ONOFF_SERVER = 0x1000
 MODEL_LIGHT_LIGHTNESS_SERVER = 0x1300
 
+# Telink SIG Mesh SDK vendor "group generic" opcodes (vendor_model.h). On the
+# wire a vendor opcode is 1 op-byte (0xC0-0xFF) + 2-byte company ID
+# little-endian. 0xC0-0xDF is Telink's range. Häfele (company 0x07E9) builds
+# its Connect Mesh firmware on this SDK.
+VD_GROUP_G_GET = 0xC1
+VD_GROUP_G_SET = 0xC2
+VD_GROUP_G_SET_NOACK = 0xC3
+VD_GROUP_G_STATUS = 0xC4
+# vd_light onoff sub-ops (two separate sub-ops, legacy-compatible).
+VD_SUB_OP_OFF = 0x00
+VD_SUB_OP_ON = 0x01
+HAEFELE_COMPANY_ID = 0x07E9
+
 # Foundation status codes (spec §4.3.5, names per Zephyr foundation.h).
 STATUS_NAMES = {
     0x00: "Success",
@@ -67,12 +80,16 @@ class AppKeyStatus(NamedTuple):
 
 
 class ModelAppStatus(NamedTuple):
-    """Config Model App Status for a SIG model (opcode 0x803E, spec §4.3.2.48)."""
+    """Config Model App Status (opcode 0x803E, spec §4.3.2.48).
+
+    ``company_id`` is None for a SIG model, set for a vendor model.
+    """
 
     status: int
     element_addr: int
     appkey_idx: int
     model_id: int
+    company_id: int | None = None
 
 
 class GenericOnOffStatus(NamedTuple):
@@ -237,6 +254,70 @@ def config_model_app_bind(
     )
 
 
+def config_model_app_bind_vendor(
+    element_addr: int, appkey_idx: int, company_id: int, model_id: int
+) -> bytes:
+    """Config Model App Bind for a VENDOR model (spec §4.3.2.46).
+
+    Same opcode as the SIG form but the model identifier is 4 bytes:
+    company ID (2 LE) + model ID (2 LE).
+    """
+    if not 0 <= element_addr <= 0xFFFF:
+        raise AccessError(f"element address out of range: {element_addr:#x}")
+    _check_key_index("AppKeyIndex", appkey_idx)
+    if not 0 <= company_id <= 0xFFFF:
+        raise AccessError(f"company ID out of range: {company_id:#x}")
+    if not 0 <= model_id <= 0xFFFF:
+        raise AccessError(f"vendor model ID out of range: {model_id:#x}")
+    return (
+        encode_opcode(OP_CONFIG_MODEL_APP_BIND)
+        + element_addr.to_bytes(2, "little")
+        + appkey_idx.to_bytes(2, "little")
+        + company_id.to_bytes(2, "little")
+        + model_id.to_bytes(2, "little")
+    )
+
+
+def vendor_opcode(op_byte: int, company_id: int) -> int:
+    """Assemble a 3-octet vendor opcode as parse_access returns it.
+
+    On air: op_byte (0xC0-0xFF) then company ID little-endian. As a big-endian
+    int that is ``op_byte<<16 | company_lo<<8 | company_hi``.
+    """
+    if not 0xC0 <= op_byte <= 0xFF:
+        raise AccessError(f"vendor op byte out of range: {op_byte:#x}")
+    if not 0 <= company_id <= 0xFFFF:
+        raise AccessError(f"company ID out of range: {company_id:#x}")
+    return int.from_bytes(bytes([op_byte]) + company_id.to_bytes(2, "little"), "big")
+
+
+def vendor_group_onoff_set(
+    company_id: int, on: bool, tid: int, *, ack: bool = True
+) -> bytes:
+    """Telink vendor VD_GROUP_G_SET on/off message.
+
+    Payload: op-byte + company(2 LE) + sub_op(1: 1=on/0=off) + tid(1).
+    """
+    if not 0 <= tid <= 0xFF:
+        raise AccessError(f"TID out of range: {tid:#x}")
+    op_byte = VD_GROUP_G_SET if ack else VD_GROUP_G_SET_NOACK
+    sub_op = VD_SUB_OP_ON if on else VD_SUB_OP_OFF
+    return bytes([op_byte]) + company_id.to_bytes(2, "little") + bytes([sub_op, tid])
+
+
+def vendor_group_set(
+    company_id: int, sub_op: int, params: bytes = b"", *, ack: bool = True
+) -> bytes:
+    """Generic Telink vendor VD_GROUP_G_SET with an arbitrary sub-op + params.
+
+    Used by the vendor probe to try sub-ops beyond on/off (level, lightness…).
+    """
+    if not 0 <= sub_op <= 0xFF:
+        raise AccessError(f"sub-op out of range: {sub_op:#x}")
+    op_byte = VD_GROUP_G_SET if ack else VD_GROUP_G_SET_NOACK
+    return bytes([op_byte]) + company_id.to_bytes(2, "little") + bytes([sub_op]) + params
+
+
 def config_composition_data_get(page: int = 0) -> bytes:
     """Config Composition Data Get access payload (spec §4.3.2.4)."""
     if not 0 <= page <= 0xFF:
@@ -277,17 +358,28 @@ def parse_config_appkey_status(payload: bytes) -> AppKeyStatus:
 
 
 def parse_config_model_app_status(payload: bytes) -> ModelAppStatus:
-    """Parse a Config Model App Status for a SIG model (spec §4.3.2.48).
+    """Parse a Config Model App Status (spec §4.3.2.48).
 
-    Vendor-model responses (9 parameter bytes, extra company ID) are out of
-    Phase 0 scope and rejected.
+    7 parameter bytes for a SIG model; 9 for a vendor model (2-byte company ID
+    before the model ID).
     """
-    params = _expect_params(payload, OP_CONFIG_MODEL_APP_STATUS, (7,))
+    params = _expect_params(payload, OP_CONFIG_MODEL_APP_STATUS, (7, 9))
+    status = params[0]
+    element_addr = int.from_bytes(params[1:3], "little")
+    appkey_idx = int.from_bytes(params[3:5], "little")
+    if len(params) == 7:
+        return ModelAppStatus(
+            status=status,
+            element_addr=element_addr,
+            appkey_idx=appkey_idx,
+            model_id=int.from_bytes(params[5:7], "little"),
+        )
     return ModelAppStatus(
-        status=params[0],
-        element_addr=int.from_bytes(params[1:3], "little"),
-        appkey_idx=int.from_bytes(params[3:5], "little"),
-        model_id=int.from_bytes(params[5:7], "little"),
+        status=status,
+        element_addr=element_addr,
+        appkey_idx=appkey_idx,
+        company_id=int.from_bytes(params[5:7], "little"),
+        model_id=int.from_bytes(params[7:9], "little"),
     )
 
 
