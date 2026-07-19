@@ -19,5 +19,11 @@
     "abort": {
       "already_configured": "Ce réseau mesh est déjà configuré."
     }
+  },
+  "issues": {
+    "proxy_unreachable": {
+      "title": "Aucun proxy Bluetooth pour le réseau mesh {network}",
+      "description": "Home Assistant ne trouve aucun proxy Bluetooth diffusant le réseau mesh « {network} ». Un nœud mesh n'offre qu'un seul emplacement de connexion proxy : si l'application Häfele Connect Mesh (ou un autre client) est connectée à une lampe, elle occupe cet emplacement et Home Assistant est bloqué. Fermez l'application et libérez la lampe, et assurez-vous qu'au moins une lampe est alimentée et à portée d'un proxy Bluetooth. Home Assistant réessaie en continu et efface automatiquement ce problème dès qu'un proxy est joignable."
+    }
   }
 }

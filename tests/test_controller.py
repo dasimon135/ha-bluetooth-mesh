@@ -276,3 +276,10 @@ async def test_seq_increments_and_is_exposed():
     finally:
         await controller.stop()
     assert after > before
+
+
+def test_seq_param_seeds_node_cursor():
+    """A ``seq`` seed is handed to the underlying node (replay safety)."""
+    network = Network.from_connect_file(FIXTURE)
+    controller = MeshController(network, FakeBearer(), seq=0x4321)
+    assert controller.seq == 0x4321

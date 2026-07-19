@@ -56,10 +56,19 @@ class MeshController:
     :meth:`start` it (subscribes the bearer, starts the TX pump), issue the
     high-level commands, and :meth:`stop` it. All commands are best-effort:
     they return ``None`` on timeout instead of raising.
+
+    ``seq`` seeds the underlying node's sequence cursor: pass the last persisted
+    :attr:`seq` (plus a safety margin) when reconstructing a controller so the
+    network never reuses a SEQ the mesh has already seen (replay safety).
     """
 
     def __init__(
-        self, network: Network, bearer: GattBearer, *, src_addr: int = 0x7FFF
+        self,
+        network: Network,
+        bearer: GattBearer,
+        *,
+        src_addr: int = 0x7FFF,
+        seq: int = 0,
     ) -> None:
         self._bearer = bearer
         self._pump = BearerPump(bearer, MSG_TYPE_NETWORK_PDU)
@@ -69,6 +78,7 @@ class MeshController:
             iv_index=network.iv_index,
             src_addr=src_addr,
             send_network_pdu=self._pump.put,
+            seq=seq,
         )
         self._tid = 0
 

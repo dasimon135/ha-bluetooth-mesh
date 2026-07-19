@@ -6,19 +6,24 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
+from .coordinator import MeshCoordinator
+
 PLATFORMS: list[Platform] = [Platform.LIGHT]
 
-# The runtime data type is a placeholder for now. A later task replaces this
-# with the mesh coordinator instance.
-type BluetoothMeshConfigEntry = ConfigEntry[dict]
+# The runtime data is the mesh coordinator: it owns the proxy connection, the
+# controller, and the parsed network model the entities enumerate.
+type BluetoothMeshConfigEntry = ConfigEntry[MeshCoordinator]
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: BluetoothMeshConfigEntry
 ) -> bool:
     """Set up Bluetooth Mesh from a config entry."""
-    # Placeholder runtime data. Replaced by the coordinator in a later task.
-    entry.runtime_data = {}
+    coordinator = MeshCoordinator(hass, entry)
+    # Never hard-fails: async_start marks the coordinator unavailable and
+    # retries in the background if no proxy is reachable yet.
+    await coordinator.async_start()
+    entry.runtime_data = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
@@ -28,4 +33,7 @@ async def async_unload_entry(
     hass: HomeAssistant, entry: BluetoothMeshConfigEntry
 ) -> bool:
     """Unload a config entry."""
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unloaded:
+        await entry.runtime_data.async_stop()
+    return unloaded

@@ -101,10 +101,16 @@ def test_platforms_includes_light() -> None:
 
 
 async def test_setup_and_unload_entry() -> None:
-    """Full config-entry setup/unload round trip (skipped without HA)."""
+    """Full config-entry setup/unload round trip (skipped without HA).
+
+    The coordinator itself is mocked (its own behaviour is covered by
+    test_coordinator.py); this only asserts __init__ wires it up: build it,
+    ``async_start`` it, store it in ``runtime_data``, forward the platforms,
+    and ``async_stop`` it on a successful unload.
+    """
     pytest.importorskip("pytest_homeassistant_custom_component")
 
-    from unittest.mock import AsyncMock, MagicMock
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     import importlib
 
@@ -117,13 +123,23 @@ async def test_setup_and_unload_entry() -> None:
     entry = MagicMock()
     entry.runtime_data = None
 
-    assert await module.async_setup_entry(hass, entry) is True
-    assert entry.runtime_data == {}
-    hass.config_entries.async_forward_entry_setups.assert_awaited_once_with(
-        entry, module.PLATFORMS
-    )
+    fake_coordinator = MagicMock()
+    fake_coordinator.async_start = AsyncMock(return_value=None)
+    fake_coordinator.async_stop = AsyncMock(return_value=None)
 
-    assert await module.async_unload_entry(hass, entry) is True
-    hass.config_entries.async_unload_platforms.assert_awaited_once_with(
-        entry, module.PLATFORMS
-    )
+    with patch.object(
+        module, "MeshCoordinator", return_value=fake_coordinator
+    ) as coordinator_cls:
+        assert await module.async_setup_entry(hass, entry) is True
+        coordinator_cls.assert_called_once_with(hass, entry)
+        fake_coordinator.async_start.assert_awaited_once()
+        assert entry.runtime_data is fake_coordinator
+        hass.config_entries.async_forward_entry_setups.assert_awaited_once_with(
+            entry, module.PLATFORMS
+        )
+
+        assert await module.async_unload_entry(hass, entry) is True
+        hass.config_entries.async_unload_platforms.assert_awaited_once_with(
+            entry, module.PLATFORMS
+        )
+        fake_coordinator.async_stop.assert_awaited_once()
