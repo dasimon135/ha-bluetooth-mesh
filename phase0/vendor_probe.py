@@ -26,12 +26,16 @@ from btmesh_min.access import (
     OP_ATTENTION_STATUS,
     OP_CONFIG_APPKEY_STATUS,
     OP_CONFIG_MODEL_APP_STATUS,
+    OP_GENERIC_ONOFF_STATUS,
+    OP_LIGHT_LIGHTNESS_STATUS,
     STATUS_NAMES,
     VD_GROUP_G_STATUS,
     attention_get,
     config_appkey_add,
     config_model_app_bind,
     config_model_app_bind_vendor,
+    generic_onoff_set,
+    light_lightness_set,
     parse_config_appkey_status,
     parse_config_model_app_status,
     vendor_group_onoff_set,
@@ -212,7 +216,36 @@ async def probe(args, state, state_path, transport, unicast: int) -> None:
                   "the problem, not the vendor opcode. Fix that first.")
             appkey_ok = False
 
-        # Sweep candidate vendor op-bytes. Stock Telink SET is 0xC2; Häfele may
+        # APK finding: the Connect Mesh v2 app (React Native / ThingOS) sends
+        # STANDARD SIG model messages (GenericOnOffSet, LightLightnessSet, …).
+        # The ThingOS vendor models register the standard opcodes, so — with
+        # the app key now bound to the vendor models — a standard SIG Set
+        # should drive the lamp. This is the promising test.
+        print()
+        print("=== STANDARD SIG CONTROL TEST — WATCH THE LAMP ===")
+        tid = 0
+        sig_ok = False
+        for label, payload, status_op in [
+            ("GenericOnOff ON ", generic_onoff_set(True, 0), OP_GENERIC_ONOFF_STATUS),
+            ("GenericOnOff OFF", generic_onoff_set(False, 1), OP_GENERIC_ONOFF_STATUS),
+            ("Lightness FULL  ", light_lightness_set(0xFFFF, 2), OP_LIGHT_LIGHTNESS_STATUS),
+            ("Lightness ZERO  ", light_lightness_set(0x0000, 3), OP_LIGHT_LIGHTNESS_STATUS),
+        ]:
+            print(f"  sending {label} ({payload.hex()}) — watch now")
+            try:
+                resp = await node.request(unicast, payload, status_op, timeout=4, retries=1)
+                sig_ok = True
+                print(f"    → STATUS reply {resp.opcode:#x}: params={resp.params.hex()}")
+            except TimeoutError:
+                node.send_access(unicast, payload)  # also fire unacked
+                print("    → no status (sent again unacked; watch the lamp)")
+            await asyncio.sleep(3.0)
+        if sig_ok:
+            print("  *** STANDARD SIG OPCODES WORK — this is the control path. ***")
+        print()
+
+        # Fallback: sweep candidate vendor op-bytes. Stock Telink SET is 0xC2;
+        # Häfele may
         # instead use the customer range (0xE0-0xFF, per the Telink SDK). Any
         # inbound message during a send reveals the real opcode (logged above).
         op_bytes = [int(x, 0) for x in args.op_bytes.split(",")]

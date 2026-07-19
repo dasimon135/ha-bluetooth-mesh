@@ -2,3 +2,7 @@
 __pycache__/
 phase0_state.json
 *.log
+
+*.apk
+*.dex
+apk_extract/
