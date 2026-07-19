@@ -255,22 +255,41 @@ def proxy_candidates_from_discoveries(
 
 
 async def scan_unprovisioned(
-    scanner: Any, timeout: float = 10.0
+    scanner: Any,
+    timeout: float = 10.0,
+    *,
+    stop_on: bytes | None = None,
+    stop_on_any: bool = False,
+    poll_interval: float = 0.5,
 ) -> list[UnprovisionedDevice]:
     """Scan for unprovisioned-device beacons (0x1827 service data).
 
     ``scanner`` is any BleakScanner-compatible object (plain bleak or
     habluetooth's ``HaBleakScannerWrapper``): ``start()``, ``stop()`` and the
     ``discovered_devices_and_advertisement_data`` mapping are used.
+
+    ``stop_on`` (a 16-byte Device UUID) or ``stop_on_any`` end the scan as
+    soon as a matching beacon appears: Telink mesh nodes only accept
+    connections in a short window after power-up, so every second between
+    beacon and connect attempt counts.
     """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
     await scanner.start()
     try:
-        await asyncio.sleep(timeout)
+        while True:
+            found = unprovisioned_from_discoveries(
+                scanner.discovered_devices_and_advertisement_data
+            )
+            if stop_on is not None and any(d.uuid == stop_on for d in found):
+                return found
+            if stop_on_any and found:
+                return found
+            if loop.time() >= deadline:
+                return found
+            await asyncio.sleep(poll_interval)
     finally:
         await scanner.stop()
-    return unprovisioned_from_discoveries(
-        scanner.discovered_devices_and_advertisement_data
-    )
 
 
 async def find_proxy_node(

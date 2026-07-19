@@ -411,7 +411,14 @@ async def provision(args, state: dict, state_path: Path, transport) -> int:
     netkey = bytes.fromhex(state["netkey"])
     scanner = transport.scanner()
     print(f"Scanning {SCAN_UNPROVISIONED_S:.0f} s for unprovisioned devices (0x1827)...")
-    beacons = await scan_unprovisioned(scanner, timeout=SCAN_UNPROVISIONED_S)
+    # Connect as soon as the (matching) beacon shows up: Telink lamps only
+    # accept connections in a short window after power-up.
+    beacons = await scan_unprovisioned(
+        scanner,
+        timeout=SCAN_UNPROVISIONED_S,
+        stop_on=bytes.fromhex(args.device_uuid) if args.device_uuid else None,
+        stop_on_any=not args.device_uuid,
+    )
     for b in beacons:
         print(
             f"  0x1827 beacon {b.device.address}: "
