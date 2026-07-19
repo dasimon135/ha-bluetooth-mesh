@@ -70,17 +70,37 @@ engineering + a bit of reverse engineering, not open-ended research.
 
 ## Getting the vendor opcodes (Phase 1, options)
 
-1. **Sniff our own traffic** — now that the lamp is in *our* mesh with *our*
-   keys, drive it from the Häfele Connect app is not possible (it's out of
-   their network). Instead: pair a Häfele wall remote into our network and
-   capture the vendor messages it publishes (we can decrypt them — we hold
-   the keys). Cleanest, fully legitimate.
-2. **Telink SIG Mesh SDK headers** — `vendor/common/vendor_model.h` defines
-   the `VD_GROUP_G_*` opcodes and sub-op values; Häfele likely kept the
-   Telink defaults. Obtain via the Telink wiki SDK zip.
-3. **Existing HA integrations** (guillaumeseur / qnimbus haefele_connect_mesh)
-   send "rawMessage" vendor payloads through the Häfele gateway — those raw
-   bytes are the vendor access payloads; read the opcodes from their source.
+Investigated 2026-07-19:
+
+- ❌ **Häfele wall remote sniff** — user has no remote (controls via the phone
+  app only).
+- ❌ **Existing HA integrations** (guillaumeseur / qnimbus haefele_connect_mesh)
+  — read their source: both proxy through the Häfele **gateway** (cloud REST
+  or local MQTT) and send high-level JSON (`{"lightness": 0.75}`); the gateway
+  firmware builds the vendor mesh message, so the raw vendor opcodes are never
+  in their code. Also require the gateway the user does not have. Dead end.
+  Useful semantic finding: control maps to OnOff + Lightness (0–65535), so the
+  vendor models 0x1000/0x1002 mirror the generic/lightness semantics closely.
+
+Remaining viable paths:
+
+- **A — Probe our own lamp (no new tools, recommended first).** The lamp is in
+  *our* mesh with *our* keys. Add vendor-model support to the stack: (1) Config
+  Model App Bind for the **vendor** model `0x07E9:0x1000` (4-byte model ID form
+  with company ID), then (2) send candidate vendor access messages
+  (3-octet opcode `0b11xxxxxx E9 07` + Telink-style sub-op) and watch the lamp
+  physically react. Small, bounded opcode space; fully legitimate; needs the
+  user only to watch the lamp. Telink SDK vendor model = `VENDOR_MD_LIGHT_S`
+  with `VD_GROUP_G_SET/_GET/_STATUS` + 1-octet sub-op (0x00–0x7F) — Häfele
+  likely kept the Telink structure.
+- **B — Capture the phone app + extract keys.** Factory-reset the lamp back
+  into the Häfele app, capture the app↔lamp GATT traffic (Android HCI snoop
+  log), and decrypt it with the app's netkey/appkey (extractable from the
+  app's own data on the user's phone). Yields the exact bytes Häfele sends,
+  but needs phone tooling and key extraction. Fallback if A stalls.
+- **C — Telink SIG Mesh SDK headers** (`vendor/common/vendor_model.h`) for the
+  `VD_GROUP_G_*` numeric values, to seed the probe in A. Obtain via the Telink
+  wiki SDK zip.
 
 ## Fixes made during this run (all committed, 203 tests green)
 
