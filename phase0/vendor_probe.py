@@ -117,6 +117,17 @@ async def probe(args, state, state_path, transport, unicast: int) -> None:
     )
     node.add_device(unicast, device_key)
 
+    # Log EVERY inbound access message, not just the request()-matched one:
+    # if the lamp replies with an unexpected vendor opcode/format, we must see
+    # it — that reveals Häfele's actual vendor protocol.
+    def log_inbound(msg):
+        print(
+            f"    << inbound from {msg.src:#06x}: opcode {msg.opcode:#x} "
+            f"params {msg.params.hex()}"
+        )
+
+    node.on_message = log_inbound
+
     def on_message(msg_type, payload):
         if msg_type == MSG_TYPE_NETWORK_PDU:
             node.handle_network_pdu(payload)
