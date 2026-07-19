@@ -1,4 +1,4 @@
-"""Tests for btmesh_min.prov_pdu (Mesh Profile spec §5.4.1 Provisioning PDUs).
+"""Tests for btmesh.prov_pdu (Mesh Profile spec §5.4.1 Provisioning PDUs).
 
 Layout sources:
 - Mesh Profile 1.0.1 §5.4.1 (opcode in first byte, 2 padding bits = 0)
@@ -12,7 +12,7 @@ Layout sources:
 
 import pytest
 
-from btmesh_min.prov_pdu import (
+from btmesh.prov_pdu import (
     Capabilities,
     Complete,
     Confirmation,

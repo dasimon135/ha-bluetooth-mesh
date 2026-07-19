@@ -20,7 +20,7 @@ import argparse
 import asyncio
 import logging
 
-from btmesh_min.access import (
+from btmesh.access import (
     HAEFELE_COMPANY_ID,
     MODEL_HEALTH_SERVER,
     OP_ATTENTION_STATUS,
@@ -43,9 +43,9 @@ from btmesh_min.access import (
     vendor_group_onoff_set,
     vendor_opcode,
 )
-from btmesh_min.errors import BtMeshError
-from btmesh_min.node import MeshNode
-from btmesh_min.proxy_pdu import MSG_TYPE_NETWORK_PDU
+from btmesh.errors import BtMeshError
+from btmesh.node import MeshNode
+from btmesh.proxy_pdu import MSG_TYPE_NETWORK_PDU
 
 # Reuse the provisioned-session plumbing from the main harness.
 from provision_and_toggle import (

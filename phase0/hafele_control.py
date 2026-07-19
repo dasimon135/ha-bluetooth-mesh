@@ -21,7 +21,7 @@ import asyncio
 import json
 import logging
 
-from btmesh_min.access import (
+from btmesh.access import (
     OP_GENERIC_ONOFF_STATUS,
     OP_LIGHT_LIGHTNESS_STATUS,
     generic_onoff_set,
@@ -29,11 +29,11 @@ from btmesh_min.access import (
     parse_generic_onoff_status,
     parse_light_lightness_status,
 )
-from btmesh_min.bearer import find_proxy_node
-from btmesh_min.crypto import k3
-from btmesh_min.errors import BtMeshError
-from btmesh_min.node import MeshNode
-from btmesh_min.proxy_pdu import MSG_TYPE_NETWORK_PDU
+from btmesh.bearer import find_proxy_node
+from btmesh.crypto import k3
+from btmesh.errors import BtMeshError
+from btmesh.node import MeshNode
+from btmesh.proxy_pdu import MSG_TYPE_NETWORK_PDU
 
 from provision_and_toggle import (
     SCAN_PROXY_S,

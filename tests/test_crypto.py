@@ -1,4 +1,4 @@
-"""Tests for btmesh_min.crypto against Mesh Profile 1.0.1 spec sample data (Section 8).
+"""Tests for btmesh.crypto against Mesh Profile 1.0.1 spec sample data (Section 8).
 
 Vector sources (cross-checked, two independent implementations each):
 - BlueZ unit/test-mesh-crypto.c
@@ -22,7 +22,7 @@ Additional sources:
 import pytest
 from cryptography.exceptions import InvalidTag
 
-from btmesh_min.crypto import aes_cmac, ccm_decrypt, ccm_encrypt, k1, k2, k3, k4, s1
+from btmesh.crypto import aes_cmac, ccm_decrypt, ccm_encrypt, k1, k2, k3, k4, s1
 
 # Spec sample data §8.1.2 / §8.1.3 use these keys (also §8.1.5, §8.1.6).
 APP_KEY = bytes.fromhex("3216d1509884b533248541792b877f98")

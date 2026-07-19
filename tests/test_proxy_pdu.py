@@ -1,4 +1,4 @@
-"""Tests for btmesh_min.proxy_pdu (Mesh Profile spec §6.3 Proxy PDU SAR).
+"""Tests for btmesh.proxy_pdu (Mesh Profile spec §6.3 Proxy PDU SAR).
 
 Layout source: Mesh Profile 1.0.1 §6.3.1 — first octet = SAR (2 high bits)
 | message type (6 low bits); SAR 0b00 complete, 0b01 first, 0b10
@@ -8,7 +8,7 @@ subsys/bluetooth/mesh/proxy_msg.c.
 
 import pytest
 
-from btmesh_min.proxy_pdu import (
+from btmesh.proxy_pdu import (
     MSG_TYPE_MESH_BEACON,
     MSG_TYPE_NETWORK_PDU,
     MSG_TYPE_PROVISIONING_PDU,

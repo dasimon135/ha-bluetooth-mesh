@@ -10,8 +10,8 @@ import asyncio
 
 import pytest
 
-from btmesh_min import network
-from btmesh_min.access import (
+from btmesh import network
+from btmesh.access import (
     OP_CONFIG_APPKEY_ADD,
     OP_CONFIG_APPKEY_STATUS,
     OP_GENERIC_ONOFF_SET,
@@ -19,10 +19,10 @@ from btmesh_min.access import (
     config_appkey_add,
     generic_onoff_set,
 )
-from btmesh_min.crypto import k4
-from btmesh_min.errors import BtMeshError
-from btmesh_min.node import MeshNode, ReceivedMessage
-from btmesh_min.transport import SegmentAck, encrypt_access, unsegmented_access
+from btmesh.crypto import k4
+from btmesh.errors import BtMeshError
+from btmesh.node import MeshNode, ReceivedMessage
+from btmesh.transport import SegmentAck, encrypt_access, unsegmented_access
 
 NET_KEY = bytes.fromhex("7dd7364cd842ad18c17c2b820c84c3d6")
 APP_KEY = bytes.fromhex("63964771734fbd76e3b40519d1d94a48")

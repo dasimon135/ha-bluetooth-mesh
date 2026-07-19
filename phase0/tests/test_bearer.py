@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from btmesh_min.bearer import (
+from btmesh.bearer import (
     DEFAULT_MAX_FRAME,
     IDENTIFICATION_NETWORK_ID,
     IDENTIFICATION_NODE_IDENTITY,
@@ -28,7 +28,7 @@ from btmesh_min.bearer import (
     scan_unprovisioned,
     unprovisioned_from_discoveries,
 )
-from btmesh_min.proxy_pdu import Reassembler
+from btmesh.proxy_pdu import Reassembler
 
 UUID = bytes(range(16))
 NETWORK_ID = bytes.fromhex("3ecaff672f673370")

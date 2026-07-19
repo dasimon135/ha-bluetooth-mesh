@@ -1,4 +1,4 @@
-"""Tests for btmesh_min.transport against Mesh Profile 1.0.1 §8.3 message samples.
+"""Tests for btmesh.transport against Mesh Profile 1.0.1 §8.3 message samples.
 
 Vector sources:
 - BlueZ unit/test-mesh-crypto.c (structs s8_3_1, s8_3_6, s8_3_7, s8_3_22)
@@ -12,10 +12,10 @@ Label UUID as CCM additional data — passed via ``label_uuid``.
 
 import pytest
 
-from btmesh_min import network
-from btmesh_min.crypto import k4
-from btmesh_min.errors import BtMeshError
-from btmesh_min.transport import (
+from btmesh import network
+from btmesh.crypto import k4
+from btmesh.errors import BtMeshError
+from btmesh.transport import (
     AccessSegment,
     SegmentAck,
     SegmentAssembler,

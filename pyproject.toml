@@ -1,0 +1,34 @@
+[project]
+name = "btmesh"
+version = "0.1.0"
+description = "Pure-Python Bluetooth SIG Mesh stack (rides on an existing mesh network)"
+requires-python = ">=3.12"
+dependencies = ["cryptography>=42"]
+
+[project.optional-dependencies]
+ble = ["bleak>=0.22", "bleak-retry-connector>=3"]
+# Extra deps the phase0 hardware scripts need to actually talk to an ESP proxy.
+# Not required for the test suite or `--help` (bleak/habluetooth are imported
+# lazily inside btmesh.bearer), so a default `uv sync` stays lean.
+harness = [
+    "bleak>=0.22",
+    "bleak-esphome>=2.0",
+    "aioesphomeapi>=24",
+    "habluetooth>=3",
+    "bleak-retry-connector>=3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/btmesh"]
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests", "phase0/tests"]
+pythonpath = ["src", "phase0"]

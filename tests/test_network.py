@@ -1,4 +1,4 @@
-"""Tests for btmesh_min.network against Mesh Profile 1.0.1 §8.3 message samples.
+"""Tests for btmesh.network against Mesh Profile 1.0.1 §8.3 message samples.
 
 Vector sources (cross-checked, two independent implementations):
 - BlueZ unit/test-mesh-crypto.c (structs s8_3_1, s8_3_6, s8_3_22)
@@ -9,9 +9,9 @@ Vector sources (cross-checked, two independent implementations):
 
 import pytest
 
-from btmesh_min.crypto import aes_ecb
-from btmesh_min.errors import BtMeshError
-from btmesh_min.network import NetworkContext, NetworkError, decode, encode
+from btmesh.crypto import aes_ecb
+from btmesh.errors import BtMeshError
+from btmesh.network import NetworkContext, NetworkError, decode, encode
 
 # §8.3 sample security material (same NetKey for all message samples).
 NET_KEY = bytes.fromhex("7dd7364cd842ad18c17c2b820c84c3d6")

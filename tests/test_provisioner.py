@@ -1,4 +1,4 @@
-"""Tests for btmesh_min.provisioner against the Mesh Profile 1.0.1 §8.7 sample.
+"""Tests for btmesh.provisioner against the Mesh Profile 1.0.1 §8.7 sample.
 
 The full provisioning session sample (§8.7.1 invite/capabilities/start,
 §8.7.2 confirmation values, §8.7.3 provisioning data encryption) is
@@ -13,7 +13,7 @@ reproduced from two independent public sources and cross-checked:
   (provisioner private key, ConfirmationInputs, session key/nonce, device key)
 
 The chain was additionally re-derived end-to-end from the provisioner
-private key with btmesh_min.crypto before these constants were committed:
+private key with btmesh.crypto before these constants were committed:
 every intermediate value (public key, ECDH secret, salts, keys, MIC)
 reproduces the sample exactly, which also confirms the ConfirmationInputs
 layout: PDU *parameters without the opcode byte* of
@@ -32,9 +32,9 @@ AuthValue formatting is asserted (no fabricated "expected" bytes).
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from btmesh_min.errors import BtMeshError
-from btmesh_min.prov_pdu import Capabilities, Complete, Failed, ProvisioningPDUError
-from btmesh_min.provisioner import (
+from btmesh.errors import BtMeshError
+from btmesh.prov_pdu import Capabilities, Complete, Failed, ProvisioningPDUError
+from btmesh.provisioner import (
     Provisioner,
     ProvisioningError,
     ProvisioningFailed,

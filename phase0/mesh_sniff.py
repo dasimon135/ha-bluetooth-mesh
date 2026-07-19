@@ -21,11 +21,11 @@ import argparse
 import asyncio
 import logging
 
-from btmesh_min.access import parse_access
-from btmesh_min.crypto import k3
-from btmesh_min.errors import BtMeshError
-from btmesh_min.node import MeshNode
-from btmesh_min.proxy_pdu import MSG_TYPE_NETWORK_PDU
+from btmesh.access import parse_access
+from btmesh.crypto import k3
+from btmesh.errors import BtMeshError
+from btmesh.node import MeshNode
+from btmesh.proxy_pdu import MSG_TYPE_NETWORK_PDU
 
 from provision_and_toggle import (
     EsphomeTransport,
@@ -36,7 +36,7 @@ from provision_and_toggle import (
     print_diagnostic,
     setup_logging,
 )
-from btmesh_min.bearer import find_proxy_node
+from btmesh.bearer import find_proxy_node
 
 logger = logging.getLogger("phase0")
 

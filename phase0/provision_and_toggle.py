@@ -25,7 +25,7 @@ import sys
 import time
 from pathlib import Path
 
-from btmesh_min.access import (
+from btmesh.access import (
     MODEL_GENERIC_ONOFF_SERVER,
     MODEL_LIGHT_LIGHTNESS_SERVER,
     OP_CONFIG_APPKEY_STATUS,
@@ -46,7 +46,7 @@ from btmesh_min.access import (
     parse_generic_onoff_status,
     parse_light_lightness_status,
 )
-from btmesh_min.bearer import (
+from btmesh.bearer import (
     IDENTIFICATION_NODE_IDENTITY,
     BearerError,
     EsphomeTransport,
@@ -55,11 +55,11 @@ from btmesh_min.bearer import (
     find_proxy_node,
     scan_unprovisioned,
 )
-from btmesh_min.crypto import k3
-from btmesh_min.errors import BtMeshError
-from btmesh_min.node import MeshNode, ReceivedMessage
-from btmesh_min.provisioner import Provisioner
-from btmesh_min.proxy_pdu import MSG_TYPE_NETWORK_PDU, MSG_TYPE_PROVISIONING_PDU
+from btmesh.crypto import k3
+from btmesh.errors import BtMeshError
+from btmesh.node import MeshNode, ReceivedMessage
+from btmesh.provisioner import Provisioner
+from btmesh.proxy_pdu import MSG_TYPE_NETWORK_PDU, MSG_TYPE_PROVISIONING_PDU
 
 logger = logging.getLogger("phase0")
 

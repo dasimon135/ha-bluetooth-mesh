@@ -10,7 +10,7 @@ big-endian).
 
 import pytest
 
-from btmesh_min.access import (
+from btmesh.access import (
     OP_CONFIG_APPKEY_ADD,
     OP_CONFIG_APPKEY_STATUS,
     OP_CONFIG_COMPOSITION_DATA_GET,
@@ -205,14 +205,14 @@ def test_status_names_cover_spec_table():
 
 
 def test_light_lightness_set_layout():
-    from btmesh_min.access import light_lightness_set
+    from btmesh.access import light_lightness_set
 
     assert light_lightness_set(0xFFFF, 5) == bytes.fromhex("824cffff05")
     assert light_lightness_set(0, 0) == bytes.fromhex("824c000000")
 
 
 def test_parse_light_lightness_status_short_and_full():
-    from btmesh_min.access import parse_light_lightness_status
+    from btmesh.access import parse_light_lightness_status
 
     s = parse_light_lightness_status(bytes.fromhex("824e3412"))
     assert s.present_lightness == 0x1234
@@ -224,7 +224,7 @@ def test_parse_light_lightness_status_short_and_full():
 
 
 def test_parse_composition_data_status():
-    from btmesh_min.access import parse_composition_data_status
+    from btmesh.access import parse_composition_data_status
 
     # Synthetic page 0: CID 0x0211 (Telink), PID 1, VID 2, CRPL 10,
     # features 0x0007; one element: loc 0x0100, 2 SIG models (0x0000 Config
@@ -244,7 +244,7 @@ def test_parse_composition_data_status():
 
 
 def test_parse_composition_data_truncated_raises():
-    from btmesh_min.access import AccessError, parse_composition_data_status
+    from btmesh.access import AccessError, parse_composition_data_status
 
     with pytest.raises(AccessError):
         parse_composition_data_status(bytes.fromhex("0200110201000200"))
@@ -259,7 +259,7 @@ def test_parse_composition_data_truncated_raises():
 
 
 def test_vendor_group_onoff_set_bytes():
-    from btmesh_min.access import vendor_group_onoff_set, HAEFELE_COMPANY_ID
+    from btmesh.access import vendor_group_onoff_set, HAEFELE_COMPANY_ID
 
     # C2 (SET) + E9 07 (company 0x07E9 LE) + 01 (ON) + 05 (tid)
     assert vendor_group_onoff_set(HAEFELE_COMPANY_ID, True, 5) == bytes.fromhex("c2e9070105")
@@ -270,7 +270,7 @@ def test_vendor_group_onoff_set_bytes():
 
 
 def test_vendor_opcode_roundtrips_through_parse_access():
-    from btmesh_min.access import vendor_opcode, parse_access, VD_GROUP_G_STATUS, HAEFELE_COMPANY_ID
+    from btmesh.access import vendor_opcode, parse_access, VD_GROUP_G_STATUS, HAEFELE_COMPANY_ID
 
     op = vendor_opcode(VD_GROUP_G_STATUS, HAEFELE_COMPANY_ID)
     # Status on the wire: C4 E9 07 <sub_op>
@@ -280,7 +280,7 @@ def test_vendor_opcode_roundtrips_through_parse_access():
 
 
 def test_config_model_app_bind_vendor_bytes():
-    from btmesh_min.access import config_model_app_bind_vendor, HAEFELE_COMPANY_ID
+    from btmesh.access import config_model_app_bind_vendor, HAEFELE_COMPANY_ID
 
     # 803D + elem 0003 LE + appidx 0000 LE + company E9 07 LE + model 0010 LE
     got = config_model_app_bind_vendor(0x0003, 0, HAEFELE_COMPANY_ID, 0x1000)
@@ -288,7 +288,7 @@ def test_config_model_app_bind_vendor_bytes():
 
 
 def test_parse_model_app_status_vendor_clean():
-    from btmesh_min.access import parse_config_model_app_status
+    from btmesh.access import parse_config_model_app_status
 
     payload = bytes.fromhex("803e") + bytes([0x00]) + bytes.fromhex("0300") + bytes.fromhex("0000") + bytes.fromhex("e907") + bytes.fromhex("0010")
     s = parse_config_model_app_status(payload)
@@ -299,7 +299,7 @@ def test_parse_model_app_status_vendor_clean():
 
 
 def test_parse_model_app_status_sig_form_unchanged():
-    from btmesh_min.access import parse_config_model_app_status
+    from btmesh.access import parse_config_model_app_status
 
     payload = bytes.fromhex("803e") + bytes([0x00]) + bytes.fromhex("0300") + bytes.fromhex("0000") + bytes.fromhex("0010")
     s = parse_config_model_app_status(payload)

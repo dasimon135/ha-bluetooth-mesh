@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 import provision_and_toggle as pt
-from btmesh_min.bearer import BearerError
+from btmesh.bearer import BearerError
 
 
 # ------------------------------------------------------------------- state
