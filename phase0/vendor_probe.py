@@ -75,6 +75,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="comma-separated vendor model IDs to bind",
     )
     p.add_argument("--cycles", type=int, default=2, help="ON/OFF cycles")
+    p.add_argument(
+        "--op-bytes", default="0xc2,0xe0,0xe1,0xe2,0xe3",
+        help="candidate vendor op-bytes to sweep (Telink 0xC2 + customer range)",
+    )
     p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
 
@@ -180,43 +184,39 @@ async def probe(args, state, state_path, transport, unicast: int) -> None:
         state["vendor_bound_models"] = bound
         save_state(state_path, state)
 
-        # Send the Telink vendor on/off. The opcode is model-independent at the
-        # access layer; binding above authorized our app key on the vendor
-        # model that registers VD_GROUP_G_SET.
-        status_op = vendor_opcode(VD_GROUP_G_STATUS, company)
+        # Sweep candidate vendor op-bytes. Stock Telink SET is 0xC2; Häfele may
+        # instead use the customer range (0xE0-0xFF, per the Telink SDK). Any
+        # inbound message during a send reveals the real opcode (logged above).
+        op_bytes = [int(x, 0) for x in args.op_bytes.split(",")]
         print()
-        print("=== VENDOR ON/OFF PROBE — WATCH THE LAMP ===")
-        print(f"    opcode VD_GROUP_G_SET = C2 {company & 0xFF:02X} "
-              f"{(company >> 8) & 0xFF:02X}, sub_op 1=ON/0=OFF + tid")
+        print("=== VENDOR ON/OFF SWEEP — WATCH THE LAMP THROUGHOUT ===")
+        print(f"    trying op-bytes {[hex(o) for o in op_bytes]} + company "
+              f"{company:#06x} (LE {company & 0xFF:02X} {(company >> 8) & 0xFF:02X})")
         tid = 0
-        got_status = False
-        for cycle in range(1, args.cycles + 1):
+        any_inbound_before = 0
+        for op_byte in op_bytes:
+            print(f"\n  -- op-byte {op_byte:#04x} --")
             for on in (True, False):
                 label = "ON " if on else "OFF"
-                payload = vendor_group_onoff_set(company, on, tid)
-                print(f"  cycle {cycle}: sending VENDOR {label} "
-                      f"({payload.hex()}) — watch now")
-                try:
-                    resp = await node.request(
-                        unicast, payload, status_op, timeout=4, retries=1
-                    )
-                    got_status = True
-                    print(f"    → VD_GROUP_G_STATUS reply: params={resp.params.hex()}")
-                except TimeoutError:
-                    # Fire-and-forget still may have driven the lamp; the user's
-                    # eyes are the oracle. Send NoAck too in case ack form is
-                    # what the firmware dislikes.
-                    node.send_access(unicast, vendor_group_onoff_set(company, on, tid, ack=False))
-                    print("    → no status reply (sent NoAck too; watch the lamp)")
+                # Telink-style {sub_op, tid}: op + company_LE + sub_op + tid.
+                payload = (
+                    bytes([op_byte])
+                    + company.to_bytes(2, "little")
+                    + bytes([1 if on else 0, tid])
+                )
+                print(f"    sending {label} ({payload.hex()}) — watch now")
+                node.send_access(unicast, payload)
                 tid = (tid + 1) & 0xFF
-                await asyncio.sleep(3.0)
+                await asyncio.sleep(2.5)
+                # Also a compact {onoff-only} variant (no tid), in case the
+                # firmware uses a 1-byte param.
+                payload2 = bytes([op_byte]) + company.to_bytes(2, "little") + bytes([1 if on else 0])
+                node.send_access(unicast, payload2)
+                await asyncio.sleep(2.5)
         print()
-        if got_status:
-            print("=== GOT A VENDOR STATUS REPLY — the vendor model responds. "
-                  "If the lamp also toggled, this is a full GO. ===")
-        else:
-            print("=== No vendor status reply. Report whether the lamp "
-                  "physically reacted — that determines next steps. ===")
+        print("=== SWEEP DONE. Report: did the lamp react at ANY point, and "
+              "which op-byte was on screen when it did? Any '<< inbound' line "
+              "above is the lamp's real vendor reply. ===")
     finally:
         await pump.stop()
         await bearer.stop()
