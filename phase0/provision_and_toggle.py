@@ -853,7 +853,9 @@ async def mesh_session(
     try:
         session_handler.append(on_message)
         pump.start()
-        if not args.toggle_only:
+        # --toggle-only still (re)configures when no successful bind was ever
+        # recorded — AppKey re-Add with the same key is Success per §4.3.2.37.
+        if not args.toggle_only or "control_model" not in state:
             await configure(node, unicast, appkey, state, pump)
         await toggle_loop(node, unicast, pump, state)
     finally:
