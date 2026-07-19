@@ -21,8 +21,8 @@ import pytest
 pytest.importorskip("homeassistant")
 pytest.importorskip("bleak_retry_connector")
 
-from btmesh.bearer import GattBearer, PROXY_SERVICE
-from btmesh.crypto import k3
+from custom_components.bluetooth_mesh.btmesh.bearer import GattBearer, PROXY_SERVICE
+from custom_components.bluetooth_mesh.btmesh.crypto import k3
 from custom_components.bluetooth_mesh import mesh_transport
 from custom_components.bluetooth_mesh.mesh_transport import (
     MeshTransportError,

@@ -22,7 +22,7 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
-from btmesh.network_model import Network, NetworkModelError
+from .btmesh.network_model import Network, NetworkModelError
 
 from .const import CONF_CONNECT_JSON, DOMAIN
 

@@ -30,15 +30,15 @@ from homeassistant.components.bluetooth import (
 )
 from homeassistant.core import HomeAssistant
 
-from btmesh.bearer import (
+from .btmesh.bearer import (
     PROXY_SERVICE,
     GattBearer,
     parse_proxy_service_data,
 )
-from btmesh.bearer import (
+from .btmesh.bearer import (
     IDENTIFICATION_NETWORK_ID as _IDENTIFICATION_NETWORK_ID,
 )
-from btmesh.crypto import k3
+from .btmesh.crypto import k3
 
 if TYPE_CHECKING:
     from bleak import BleakClient

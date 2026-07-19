@@ -21,7 +21,7 @@ pytest.importorskip("pytest_homeassistant_custom_component")
 
 from homeassistant.data_entry_flow import FlowResultType
 
-from btmesh.network_model import Network
+from custom_components.bluetooth_mesh.btmesh.network_model import Network
 from custom_components.bluetooth_mesh.const import CONF_CONNECT_JSON, DOMAIN
 
 FIXTURE = (

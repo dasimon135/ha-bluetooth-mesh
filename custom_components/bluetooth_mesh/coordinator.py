@@ -34,8 +34,8 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.storage import Store
 
-from btmesh.controller import MeshController
-from btmesh.network_model import Network
+from .btmesh.controller import MeshController
+from .btmesh.network_model import Network
 
 from .const import CONF_CONNECT_JSON, DOMAIN
 from .mesh_transport import async_connect_bearer, find_proxy_address

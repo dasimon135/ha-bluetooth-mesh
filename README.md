@@ -101,6 +101,19 @@ Home Assistant and runs the combined suite on Linux; see
 `.github/workflows/tests.yml` (pytest) and `.github/workflows/validate.yml`
 (hassfest + HACS).
 
+### Vendored library
+
+`src/btmesh/` is the canonical library (the source of truth, published to PyPI).
+Because HACS installs `custom_components/bluetooth_mesh/` as-is, the integration
+ships a **vendored copy** of the library at
+`custom_components/bluetooth_mesh/btmesh/`, so it installs with no external
+`btmesh` dependency (only `cryptography`, which Home Assistant already provides).
+After changing anything under `src/btmesh/`, re-sync the vendored copy:
+
+```bash
+python scripts/sync_vendored_btmesh.py
+```
+
 ## Documentation
 
 Design and feasibility write-ups live in [`docs/plans/`](docs/plans/):
