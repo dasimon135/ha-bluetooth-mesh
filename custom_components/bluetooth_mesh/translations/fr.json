@@ -1,0 +1,23 @@
+{
+  "title": "Bluetooth Mesh",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Importer un réseau Bluetooth Mesh",
+        "description": "Importez un réseau Bluetooth SIG Mesh pour exposer ses lampes dans Home Assistant.",
+        "data": {
+          "connect_json": "Export du réseau (.connect)"
+        },
+        "data_description": {
+          "connect_json": "Ouvrez le fichier d'export .connect de votre application ThingOS / Häfele Connect Mesh dans un éditeur de texte et collez ici l'intégralité de son contenu. Il contient les clés du réseau et la liste des nœuds."
+        }
+      }
+    },
+    "error": {
+      "invalid_connect": "Le texte collé n'est pas un export réseau .connect valide. Collez le contenu complet du fichier exporté."
+    },
+    "abort": {
+      "already_configured": "Ce réseau mesh est déjà configuré."
+    }
+  }
+}

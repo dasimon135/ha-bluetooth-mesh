@@ -3,15 +3,18 @@
   "config": {
     "step": {
       "user": {
-        "title": "Bluetooth Mesh",
+        "title": "Import a Bluetooth Mesh network",
         "description": "Import a Bluetooth SIG Mesh network to expose its lamps in Home Assistant.",
         "data": {
-          "network_name": "Network name"
+          "connect_json": "Network export (.connect)"
         },
         "data_description": {
-          "network_name": "A friendly name for this mesh network."
+          "connect_json": "Open your ThingOS / Häfele Connect Mesh .connect export file in a text editor and paste its entire contents here. It contains the network keys and node list."
         }
       }
+    },
+    "error": {
+      "invalid_connect": "The pasted text is not a valid .connect network export. Paste the full contents of the exported file."
     },
     "abort": {
       "already_configured": "This mesh network is already configured."

@@ -45,3 +45,26 @@ if _HAS_HHCC:
     def auto_enable_custom_integrations(enable_custom_integrations):
         """Make custom_components/ importable for the test hass instance."""
         yield
+
+
+if _HAS_HHCC and sys.platform == "win32":  # pragma: no cover - platform shim
+
+    @pytest.fixture(autouse=True)
+    def _mock_bluetooth_history():
+        """Stub the local BlueZ adapter history on Windows.
+
+        Setting up the ``bluetooth`` dependency (e.g. when a config flow that
+        depends on it is initialised) calls ``async_load_history_from_system``,
+        which reads ``LinuxAdapters.history``. That path goes through
+        ``dbus_fast``'s ``unpack_variants`` — absent on native Windows, so the
+        attribute is ``None`` and the call raises ``TypeError``. HHCC's session
+        ``mock_bluetooth_adapters`` fixture already stubs ``.adapters`` and
+        ``.refresh`` the same way but leaves ``.history`` untouched; patch it to
+        an empty mapping so bluetooth setup completes with no cached history.
+        """
+        from unittest.mock import patch
+
+        with patch(
+            "bluetooth_adapters.systems.linux.LinuxAdapters.history", {}
+        ):
+            yield
