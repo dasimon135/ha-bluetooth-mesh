@@ -4,10 +4,52 @@
 **Hardware:** 1× Häfele Connect Mesh LED controller (Device UUID
 `186cc8fbb5ec45d593676549eb03b268`, BLE addr `C3:EB:49:65:67:53`), reached
 through the `atomebuanderie` ESPHome Bluetooth proxy (`192.168.1.22`).
-**Verdict:** **CONDITIONAL GO** — the entire standard Bluetooth Mesh stack is
-proven on real hardware; the one blocker is that Häfele lamps expose **no
-standard lighting models**, so end-to-end light control needs vendor-model
-support (a Phase 1 research task).
+**Verdict:** **FULL GO** — the lamp is controlled (on/off **and** dimming) from
+our pure-Python stack, with correct Generic OnOff / Light Lightness status
+replies, on real hardware.
+
+## The breakthrough (2026-07-19)
+
+Milestone B was reached, but not the way the plan expected. Findings:
+
+- The Häfele/ThingOS lamp exposes only a **minimal composition** (Config,
+  Health, Time, 4 vendor models) until the **Häfele app activates it** (a
+  vendor + pre-shared-key step we could not replicate). That is why every
+  vendor and standard opcode we sent to our own-network provisioning was
+  silently dropped and why binding Generic OnOff returned Invalid Model.
+- Once the app has activated the lamp, it exposes **10 elements** with the full
+  lighting model set on element 0 — `0x1000 Generic OnOff Server`,
+  `0x1300 Light Lightness Server`, `0x1303 Light CTL`, `0x1002 Level`, … — all
+  bound to the app's AppKey.
+- **Solution — ride on the app's network instead of replicating activation.**
+  The app can export its network as a `.connect` JSON (ThingOS format)
+  containing the NetKey, AppKey, and each node's unicast address. `hafele_control.py`
+  reads those, connects our ESP proxy to the app's network (Network ID =
+  k3(appNetKey)), and sends **standard** Generic OnOff Set (0x8202) / Light
+  Lightness Set (0x824C), app-keyed, to the lamp's unicast (0x000C). The lamp
+  replies with proper status and physically turns on/off and dims.
+- **Coexistence:** the lamp stays in the Häfele app; we control it in parallel
+  via the shared network keys. Ideal end-state — the user keeps their app and
+  HA drives the same lamps.
+- Operational gotcha: a node has one proxy slot, and stops advertising 0x1828
+  while a phone holds the GATT connection. Turn the phone's Bluetooth off and
+  power-cycle the lamp so it advertises for our ESP proxy.
+
+## Phase 1 architecture implication
+
+For Häfele (ThingOS) devices, the HA integration should **import the app's
+network** (`.connect` export → NetKey/AppKey/node addresses) and coexist,
+rather than provision into its own network (own-network provisioning leaves the
+lamp un-activated with a minimal composition). For generic standard mesh
+devices, the own-network provisioning path (Tasks 1–11) still applies.
+
+---
+
+## Original Phase 0 result (superseded above, kept for the record)
+
+The entire standard Bluetooth Mesh stack was proven on real hardware; the
+apparent blocker was that Häfele lamps expose no standard lighting models until
+app activation — resolved by the network-import approach above.
 
 ## What worked on real hardware
 
