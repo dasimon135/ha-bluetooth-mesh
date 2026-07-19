@@ -26,6 +26,12 @@ __all__ = [
     "OP_GENERIC_ONOFF_STATUS",
     "OP_LIGHT_LIGHTNESS_SET",
     "OP_LIGHT_LIGHTNESS_STATUS",
+    "OP_LIGHT_CTL_SET",
+    "OP_LIGHT_CTL_SET_UNACK",
+    "OP_LIGHT_CTL_STATUS",
+    "OP_LIGHT_CTL_TEMPERATURE_SET",
+    "OP_LIGHT_CTL_TEMPERATURE_SET_UNACK",
+    "OP_LIGHT_CTL_TEMPERATURE_STATUS",
     "OP_ATTENTION_GET",
     "OP_ATTENTION_STATUS",
     "OP_NODE_RESET",
@@ -34,6 +40,8 @@ __all__ = [
     "MODEL_HEALTH_SERVER",
     "MODEL_GENERIC_ONOFF_SERVER",
     "MODEL_LIGHT_LIGHTNESS_SERVER",
+    "MODEL_LIGHT_CTL_SERVER",
+    "MODEL_LIGHT_CTL_TEMPERATURE_SERVER",
     # Telink vendor opcodes / constants
     "VD_GROUP_G_GET",
     "VD_GROUP_G_SET",
@@ -48,6 +56,8 @@ __all__ = [
     "ModelAppStatus",
     "GenericOnOffStatus",
     "LightLightnessStatus",
+    "LightCtlStatus",
+    "LightCtlTemperatureStatus",
     "CompositionElement",
     "CompositionData",
     # Codec
@@ -65,11 +75,15 @@ __all__ = [
     "config_composition_data_get",
     "generic_onoff_set",
     "light_lightness_set",
+    "light_ctl_set",
+    "light_ctl_temperature_set",
     # Decoders
     "parse_config_appkey_status",
     "parse_config_model_app_status",
     "parse_generic_onoff_status",
     "parse_light_lightness_status",
+    "parse_light_ctl_status",
+    "parse_light_ctl_temperature_status",
     "parse_composition_data_status",
 ]
 
@@ -86,6 +100,19 @@ OP_GENERIC_ONOFF_STATUS = 0x8204
 # Light Lightness model opcodes (Mesh Model spec §7.1).
 OP_LIGHT_LIGHTNESS_SET = 0x824C
 OP_LIGHT_LIGHTNESS_STATUS = 0x824E
+# Light CTL (color temperature) model opcodes (Mesh Model spec §7.1). Verified
+# against the Nordic nRF5-SDK-for-Mesh header
+# ``models/model_spec/light_ctl/include/light_ctl_messages.h``
+# (LIGHT_CTL_OPCODE_*): all six values below matched the spec exactly.
+OP_LIGHT_CTL_SET = 0x825E
+OP_LIGHT_CTL_SET_UNACK = 0x825F
+OP_LIGHT_CTL_STATUS = 0x8260
+OP_LIGHT_CTL_TEMPERATURE_SET = 0x8264
+OP_LIGHT_CTL_TEMPERATURE_SET_UNACK = 0x8265
+OP_LIGHT_CTL_TEMPERATURE_STATUS = 0x8266
+# Valid CTL temperature range in Kelvin (Mesh Model spec §6.1.3.1).
+_CTL_TEMP_MIN = 0x0320  # 800 K
+_CTL_TEMP_MAX = 0x4E20  # 20000 K
 # Health model — Attention Get/Status (app-keyed; every node has a Health
 # Server, so this is the app-key round-trip sanity check).
 OP_ATTENTION_GET = 0x8004
@@ -98,6 +125,8 @@ OP_NODE_RESET_STATUS = 0x804A
 # SIG model IDs of interest (Mesh Model spec §7.3).
 MODEL_GENERIC_ONOFF_SERVER = 0x1000
 MODEL_LIGHT_LIGHTNESS_SERVER = 0x1300
+MODEL_LIGHT_CTL_SERVER = 0x1303
+MODEL_LIGHT_CTL_TEMPERATURE_SERVER = 0x1304
 
 # Telink SIG Mesh SDK vendor "group generic" opcodes (vendor_model.h). On the
 # wire a vendor opcode is 1 op-byte (0xC0-0xFF) + 2-byte company ID
@@ -173,6 +202,29 @@ class LightLightnessStatus(NamedTuple):
 
     present_lightness: int
     target_lightness: int | None
+    remaining_time: int | None
+
+
+class LightCtlStatus(NamedTuple):
+    """Light CTL Status (opcode 0x8260, Mesh Model spec §6.3.2.4)."""
+
+    present_lightness: int
+    present_temperature: int
+    target_lightness: int | None
+    target_temperature: int | None
+    remaining_time: int | None
+
+
+class LightCtlTemperatureStatus(NamedTuple):
+    """Light CTL Temperature Status (opcode 0x8266, Mesh Model spec §6.3.3.6).
+
+    ``present_delta_uv`` and ``target_delta_uv`` are signed int16.
+    """
+
+    present_temperature: int
+    present_delta_uv: int
+    target_temperature: int | None
+    target_delta_uv: int | None
     remaining_time: int | None
 
 
@@ -423,6 +475,67 @@ def light_lightness_set(lightness: int, tid: int) -> bytes:
     )
 
 
+def _check_ctl_temperature(temperature: int) -> None:
+    if not _CTL_TEMP_MIN <= temperature <= _CTL_TEMP_MAX:
+        raise AccessError(
+            f"CTL temperature out of range "
+            f"[{_CTL_TEMP_MIN:#x}, {_CTL_TEMP_MAX:#x}]: {temperature:#x}"
+        )
+
+
+def _check_delta_uv(delta_uv: int) -> None:
+    if not -32768 <= delta_uv <= 32767:
+        raise AccessError(f"CTL delta UV out of int16 range: {delta_uv}")
+
+
+def light_ctl_set(
+    lightness: int, temperature: int, delta_uv: int, tid: int, *, ack: bool = True
+) -> bytes:
+    """Light CTL Set without transition time (Mesh Model spec §6.3.2.2).
+
+    Params: CTL Lightness (2 LE) + CTL Temperature (2 LE, Kelvin) + CTL Delta UV
+    (2 LE, signed int16) + TID (1). ``ack=False`` uses the Set Unacknowledged
+    opcode.
+    """
+    if not 0 <= lightness <= 0xFFFF:
+        raise AccessError(f"lightness out of range: {lightness:#x}")
+    _check_ctl_temperature(temperature)
+    _check_delta_uv(delta_uv)
+    if not 0 <= tid <= 0xFF:
+        raise AccessError(f"TID out of range: {tid:#x}")
+    opcode = OP_LIGHT_CTL_SET if ack else OP_LIGHT_CTL_SET_UNACK
+    return (
+        encode_opcode(opcode)
+        + lightness.to_bytes(2, "little")
+        + temperature.to_bytes(2, "little")
+        + delta_uv.to_bytes(2, "little", signed=True)
+        + bytes([tid])
+    )
+
+
+def light_ctl_temperature_set(
+    temperature: int, delta_uv: int, tid: int, *, ack: bool = True
+) -> bytes:
+    """Light CTL Temperature Set without transition time (Model spec §6.3.3.4).
+
+    Params: CTL Temperature (2 LE, Kelvin) + CTL Delta UV (2 LE, signed int16) +
+    TID (1). ``ack=False`` uses the Temperature Set Unacknowledged opcode.
+    """
+    _check_ctl_temperature(temperature)
+    _check_delta_uv(delta_uv)
+    if not 0 <= tid <= 0xFF:
+        raise AccessError(f"TID out of range: {tid:#x}")
+    opcode = (
+        OP_LIGHT_CTL_TEMPERATURE_SET if ack else OP_LIGHT_CTL_TEMPERATURE_SET_UNACK
+    )
+    return (
+        encode_opcode(opcode)
+        + temperature.to_bytes(2, "little")
+        + delta_uv.to_bytes(2, "little", signed=True)
+        + bytes([tid])
+    )
+
+
 # ------------------------------------------------------------------ decoders
 
 
@@ -487,6 +600,61 @@ def parse_light_lightness_status(payload: bytes) -> LightLightnessStatus:
         present_lightness=present,
         target_lightness=int.from_bytes(params[2:4], "little"),
         remaining_time=params[4],
+    )
+
+
+def parse_light_ctl_status(payload: bytes) -> LightCtlStatus:
+    """Parse a Light CTL Status (Model spec §6.3.2.4).
+
+    4 mandatory bytes (present lightness + temperature); 9 bytes with the
+    optional target lightness + target temperature + remaining time.
+    """
+    params = _expect_params(payload, OP_LIGHT_CTL_STATUS, (4, 9))
+    present_lightness = int.from_bytes(params[0:2], "little")
+    present_temperature = int.from_bytes(params[2:4], "little")
+    if len(params) == 4:
+        return LightCtlStatus(
+            present_lightness=present_lightness,
+            present_temperature=present_temperature,
+            target_lightness=None,
+            target_temperature=None,
+            remaining_time=None,
+        )
+    return LightCtlStatus(
+        present_lightness=present_lightness,
+        present_temperature=present_temperature,
+        target_lightness=int.from_bytes(params[4:6], "little"),
+        target_temperature=int.from_bytes(params[6:8], "little"),
+        remaining_time=params[8],
+    )
+
+
+def parse_light_ctl_temperature_status(
+    payload: bytes,
+) -> LightCtlTemperatureStatus:
+    """Parse a Light CTL Temperature Status (Model spec §6.3.3.6).
+
+    4 mandatory bytes (present temperature + present delta UV); 9 bytes with the
+    optional target temperature + target delta UV + remaining time. Delta UV is
+    a signed int16.
+    """
+    params = _expect_params(payload, OP_LIGHT_CTL_TEMPERATURE_STATUS, (4, 9))
+    present_temperature = int.from_bytes(params[0:2], "little")
+    present_delta_uv = int.from_bytes(params[2:4], "little", signed=True)
+    if len(params) == 4:
+        return LightCtlTemperatureStatus(
+            present_temperature=present_temperature,
+            present_delta_uv=present_delta_uv,
+            target_temperature=None,
+            target_delta_uv=None,
+            remaining_time=None,
+        )
+    return LightCtlTemperatureStatus(
+        present_temperature=present_temperature,
+        present_delta_uv=present_delta_uv,
+        target_temperature=int.from_bytes(params[4:6], "little"),
+        target_delta_uv=int.from_bytes(params[6:8], "little", signed=True),
+        remaining_time=params[8],
     )
 
 

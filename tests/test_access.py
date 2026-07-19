@@ -223,6 +223,114 @@ def test_parse_light_lightness_status_short_and_full():
     assert full.remaining_time == 0x0A
 
 
+def test_light_ctl_set_layout():
+    from btmesh.access import light_ctl_set
+
+    # lightness 0x8000, temperature 0x1F40 (8000 K), delta_uv 0, tid 5.
+    assert light_ctl_set(0x8000, 0x1F40, 0, 5) == bytes.fromhex(
+        "825e" "0080" "401f" "0000" "05"
+    )
+
+
+def test_light_ctl_set_delta_uv_signed():
+    from btmesh.access import light_ctl_set
+
+    # delta_uv -100 → little-endian signed int16 == 9cff.
+    assert (-100).to_bytes(2, "little", signed=True) == bytes.fromhex("9cff")
+    assert light_ctl_set(0, 0x0320, -100, 0) == bytes.fromhex(
+        "825e" "0000" "2003" "9cff" "00"
+    )
+
+
+def test_light_ctl_set_unack_uses_unack_opcode():
+    from btmesh.access import light_ctl_set
+
+    assert light_ctl_set(0, 0x0320, 0, 1, ack=False) == bytes.fromhex(
+        "825f" "0000" "2003" "0000" "01"
+    )
+
+
+def test_light_ctl_set_validates_ranges():
+    from btmesh.access import light_ctl_set
+
+    with pytest.raises(AccessError):
+        light_ctl_set(0x10000, 0x0320, 0, 0)  # lightness too large
+    with pytest.raises(AccessError):
+        light_ctl_set(0, 0x0100, 0, 0)  # temperature below 0x0320
+    with pytest.raises(AccessError):
+        light_ctl_set(0, 0x5000, 0, 0)  # temperature above 0x4E20
+    with pytest.raises(AccessError):
+        light_ctl_set(0, 0x0320, 40000, 0)  # delta_uv above int16 max
+    with pytest.raises(AccessError):
+        light_ctl_set(0, 0x0320, 0, 0x100)  # tid out of range
+
+
+def test_light_ctl_temperature_set_layout():
+    from btmesh.access import light_ctl_temperature_set
+
+    assert light_ctl_temperature_set(0x4E20, 0, 3) == bytes.fromhex(
+        "8264" "204e" "0000" "03"
+    )
+
+
+def test_light_ctl_temperature_set_unack_and_signed_delta_uv():
+    from btmesh.access import light_ctl_temperature_set
+
+    assert light_ctl_temperature_set(0x0320, -100, 0, ack=False) == bytes.fromhex(
+        "8265" "2003" "9cff" "00"
+    )
+
+
+def test_light_ctl_temperature_set_validates_ranges():
+    from btmesh.access import light_ctl_temperature_set
+
+    with pytest.raises(AccessError):
+        light_ctl_temperature_set(0x0100, 0, 0)  # below range
+    with pytest.raises(AccessError):
+        light_ctl_temperature_set(0x5000, 0, 0)  # above range
+    with pytest.raises(AccessError):
+        light_ctl_temperature_set(0x0320, -40000, 0)  # delta_uv below int16 min
+
+
+def test_parse_light_ctl_status_short_and_full():
+    from btmesh.access import parse_light_ctl_status
+
+    s = parse_light_ctl_status(bytes.fromhex("8260" "0080" "401f"))
+    assert s.present_lightness == 0x8000
+    assert s.present_temperature == 0x1F40
+    assert s.target_lightness is None
+    assert s.target_temperature is None
+    assert s.remaining_time is None
+    full = parse_light_ctl_status(
+        bytes.fromhex("8260" "0080" "401f" "ffff" "204e" "0a")
+    )
+    assert full.present_lightness == 0x8000
+    assert full.present_temperature == 0x1F40
+    assert full.target_lightness == 0xFFFF
+    assert full.target_temperature == 0x4E20
+    assert full.remaining_time == 0x0A
+
+
+def test_parse_light_ctl_temperature_status_short_and_full():
+    from btmesh.access import parse_light_ctl_temperature_status
+
+    # present temp 0x1F40, present delta_uv -100 (9cff signed).
+    s = parse_light_ctl_temperature_status(bytes.fromhex("8266" "401f" "9cff"))
+    assert s.present_temperature == 0x1F40
+    assert s.present_delta_uv == -100
+    assert s.target_temperature is None
+    assert s.target_delta_uv is None
+    assert s.remaining_time is None
+    full = parse_light_ctl_temperature_status(
+        bytes.fromhex("8266" "2003" "0000" "204e" "9cff" "0a")
+    )
+    assert full.present_temperature == 0x0320
+    assert full.present_delta_uv == 0
+    assert full.target_temperature == 0x4E20
+    assert full.target_delta_uv == -100
+    assert full.remaining_time == 0x0A
+
+
 def test_parse_composition_data_status():
     from btmesh.access import parse_composition_data_status
 
