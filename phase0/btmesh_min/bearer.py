@@ -327,8 +327,25 @@ async def find_proxy_node(
 async def connect_local(
     address_or_device: "str | BLEDevice", timeout: float = 20.0
 ) -> "BleakClient":
-    """Connect with the PC's own adapter through plain bleak."""
+    """Connect with the PC's own adapter through plain bleak.
+
+    A ``BLEDevice`` (from scanning) goes through bleak-retry-connector's
+    ``establish_connection`` — mesh nodes routinely drop the first attempt.
+    A bare address string falls back to a single direct attempt.
+    """
     from bleak import BleakClient
+
+    if not isinstance(address_or_device, str):
+        from bleak_retry_connector import establish_connection
+
+        try:
+            return await establish_connection(
+                BleakClient, address_or_device, address_or_device.address
+            )
+        except Exception as exc:
+            raise BearerError(
+                f"local BLE connect to {address_or_device} failed: {exc}"
+            ) from exc
 
     client = BleakClient(address_or_device, timeout=timeout)
     try:
@@ -395,8 +412,30 @@ class EsphomeTransport:
     async def connect(
         self, address_or_device: "str | BLEDevice", timeout: float = 30.0
     ) -> "BleakClient":
-        """Connect to ``address_or_device`` through the proxy."""
+        """Connect to ``address_or_device`` through the proxy.
+
+        A ``BLEDevice`` goes through bleak-retry-connector's
+        ``establish_connection`` — the mechanism Home Assistant itself uses
+        for ESPHome proxies (transient-failure retries, slot management).
+        A bare address string falls back to a single direct attempt.
+        """
         from habluetooth import HaBleakClientWrapper
+
+        if not isinstance(address_or_device, str):
+            from bleak_retry_connector import establish_connection
+
+            try:
+                return await establish_connection(
+                    HaBleakClientWrapper,
+                    address_or_device,
+                    address_or_device.address,
+                    max_attempts=4,
+                )
+            except Exception as exc:
+                raise BearerError(
+                    f"BLE connect to {address_or_device} via ESPHome proxy "
+                    f"{self._host} failed: {exc}"
+                ) from exc
 
         client = HaBleakClientWrapper(address_or_device, timeout=timeout)
         try:

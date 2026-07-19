@@ -9,6 +9,7 @@ dependencies = [
     "bleak-esphome>=2.0",
     "aioesphomeapi>=24",
     "habluetooth>=3",
+    "bleak-retry-connector>=3",
 ]
 
 [dependency-groups]

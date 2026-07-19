@@ -338,6 +338,50 @@ async def _disconnect_quietly(client) -> None:
         logger.debug("disconnect failed (ignored): %s", exc)
 
 
+GATT_SESSION_ATTEMPTS = 3
+
+
+async def open_gatt_session(
+    transport,
+    device,
+    *,
+    provisioning: bool,
+    on_message,
+    attempts: int = GATT_SESSION_ATTEMPTS,
+) -> tuple[object, GattBearer]:
+    """Connect and subscribe, retrying the whole cycle on failure.
+
+    Mesh nodes (Telink firmwares especially) routinely drop the link right
+    after the first connect; a fresh connect+subscribe cycle is the reliable
+    recovery, on top of establish_connection's own per-connect retries.
+    """
+    last: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        if attempt > 1:
+            logger.info("retrying GATT session (%d/%d)...", attempt, attempts)
+            await asyncio.sleep(2.0)
+        try:
+            client = await transport.connect(device)
+        except BearerError as exc:
+            last = exc
+            logger.warning("connect attempt %d/%d failed: %s", attempt, attempts, exc)
+            continue
+        bearer = GattBearer(client, provisioning=provisioning)
+        try:
+            await bearer.start(on_message)
+        except BearerError as exc:
+            last = exc
+            logger.warning(
+                "subscribe attempt %d/%d failed: %s", attempt, attempts, exc
+            )
+            await _disconnect_quietly(client)
+            continue
+        return client, bearer
+    raise BearerError(
+        f"could not establish a GATT session after {attempts} attempts: {last}"
+    )
+
+
 # ------------------------------------------------------- provisioning phase
 
 
@@ -403,8 +447,19 @@ async def provision(args, state: dict, state_path: Path, transport) -> int:
             )
 
     print(f"Connecting PB-GATT to {target.device.address}...")
-    client = await transport.connect(target.device)
-    bearer = GattBearer(client, provisioning=True)
+    # The real handler is installed once the session objects exist below; the
+    # lamp sends nothing before our Provisioning Invite, so nothing is lost.
+    session_handler: list = []
+
+    def dispatch(msg_type: int, payload: bytes) -> None:
+        if session_handler:
+            session_handler[0](msg_type, payload)
+        else:
+            logger.debug("PDU before session ready: 0x%02x %s", msg_type, payload.hex())
+
+    client, bearer = await open_gatt_session(
+        transport, target.device, provisioning=True, on_message=dispatch
+    )
     pump = BearerPump(bearer, MSG_TYPE_PROVISIONING_PDU)
 
     unicast = state["next_unicast"]
@@ -438,7 +493,7 @@ async def provision(args, state: dict, state_path: Path, transport) -> int:
             fail(exc)
 
     try:
-        await bearer.start(on_message)
+        session_handler.append(on_message)
         pump.start()
         prov.start()
         try:
@@ -692,8 +747,17 @@ async def mesh_session(
 
     target = await _find_proxy_target(state, transport, unicast)
     print(f"Connecting Mesh Proxy to {target.address}...")
-    client = await transport.connect(target)
-    bearer = GattBearer(client, provisioning=False)
+    session_handler: list = []
+
+    def dispatch(msg_type: int, payload: bytes) -> None:
+        if session_handler:
+            session_handler[0](msg_type, payload)
+        else:
+            logger.debug("PDU before session ready: 0x%02x %s", msg_type, payload.hex())
+
+    client, bearer = await open_gatt_session(
+        transport, target, provisioning=False, on_message=dispatch
+    )
     pump = BearerPump(bearer, MSG_TYPE_NETWORK_PDU)
     pump.on_error = lambda exc: logger.error("network TX failed: %s", exc)
 
@@ -723,7 +787,7 @@ async def mesh_session(
             )
 
     try:
-        await bearer.start(on_message)
+        session_handler.append(on_message)
         pump.start()
         if not args.toggle_only:
             await configure(node, unicast, appkey, state, pump)
