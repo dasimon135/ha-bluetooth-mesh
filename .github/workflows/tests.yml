@@ -1,0 +1,34 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    name: pytest (library + HA integration)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install the library
+        run: pip install -e .
+
+      - name: Install Home Assistant + test dependencies
+        run: pip install -r requirements-test.txt
+
+      # Runs tests/*.py (pure btmesh library) and tests/ha/*.py (HA integration)
+      # in one pass. On Linux the fcntl/resource modules exist natively so the
+      # tests/ha/_winshims shims are inert, and Home Assistant is installed so
+      # the pytest.importorskip guards in tests/ha do not trigger — the HA tests
+      # run for real.
+      - name: Run tests
+        run: pytest tests -q
