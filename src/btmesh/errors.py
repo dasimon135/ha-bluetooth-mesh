@@ -1,4 +1,4 @@
-"""Shared exception hierarchy for btmesh_min.
+"""Shared exception hierarchy for btmesh.
 
 Every error raised by this package derives from :class:`BtMeshError`, so
 bearer/transport layers can catch one type regardless of which module
@@ -7,4 +7,4 @@ bearer/transport layers can catch one type regardless of which module
 
 
 class BtMeshError(Exception):
-    """Base class for all btmesh_min errors."""
+    """Base class for all btmesh errors."""
