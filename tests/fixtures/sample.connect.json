@@ -1,0 +1,79 @@
+{
+  "$schema": "http://schemas.bluetooth.com/Mesh/ProfileConfiguration.json",
+  "meshName": "Fabricated Test Mesh",
+  "meshUUID": "0F0E0D0C-0B0A-0908-0706-050403020100",
+  "timestamp": "2026-07-19T00:00:00Z",
+  "netKeys": [
+    {
+      "name": "Test Network Key",
+      "index": 0,
+      "key": "00112233445566778899aabbccddeeff",
+      "phase": 0,
+      "minSecurity": "secure",
+      "timestamp": "2026-07-19T00:00:00Z"
+    }
+  ],
+  "appKeys": [
+    {
+      "name": "Test Application Key",
+      "index": 0,
+      "boundNetKey": 0,
+      "key": "0f0e0d0c0b0a09080706050403020100"
+    }
+  ],
+  "provisioners": [],
+  "nodes": [
+    {
+      "UUID": "AABBCCDD-EEFF-0011-2233-445566778899",
+      "unicastAddress": "000C",
+      "deviceKey": "112233445566778899aabbccddeeff00",
+      "security": "secure",
+      "cid": "07E9",
+      "vid": "0001",
+      "pid": "0002",
+      "crpl": "0028",
+      "tos_devices": [
+        {
+          "name": "Test Lamp"
+        }
+      ],
+      "tos_node": {
+        "type": "com.example.fabricated.testlamp.v1"
+      },
+      "elements": [
+        {
+          "index": 0,
+          "location": "0000",
+          "name": "Primary",
+          "models": [
+            {"modelId": "0000", "bind": []},
+            {"modelId": "0002", "bind": []},
+            {"modelId": "1000", "bind": [0], "subscribe": [], "publish": null},
+            {"modelId": "1300", "bind": [0]},
+            {"modelId": "1303", "bind": [0]},
+            {"modelId": "1304", "bind": [0]},
+            {"modelId": "07E91000", "bind": [0]}
+          ]
+        },
+        {
+          "index": 1,
+          "location": "0000",
+          "name": "Secondary A",
+          "models": [
+            {"modelId": "1001", "bind": [0]},
+            {"modelId": "1306", "bind": [0]}
+          ]
+        },
+        {
+          "index": 2,
+          "location": "0000",
+          "name": "Secondary B",
+          "models": [
+            {"modelId": "1001", "bind": [0]}
+          ]
+        }
+      ]
+    }
+  ],
+  "groups": []
+}
