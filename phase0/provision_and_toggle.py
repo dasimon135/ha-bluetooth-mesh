@@ -26,17 +26,25 @@ import time
 from pathlib import Path
 
 from btmesh_min.access import (
+    MODEL_GENERIC_ONOFF_SERVER,
+    MODEL_LIGHT_LIGHTNESS_SERVER,
     OP_CONFIG_APPKEY_STATUS,
+    OP_CONFIG_COMPOSITION_DATA_STATUS,
     OP_CONFIG_MODEL_APP_STATUS,
     OP_GENERIC_ONOFF_STATUS,
+    OP_LIGHT_LIGHTNESS_STATUS,
     STATUS_NAMES,
     config_appkey_add,
+    config_composition_data_get,
     config_model_app_bind,
     encode_opcode,
     generic_onoff_set,
+    light_lightness_set,
+    parse_composition_data_status,
     parse_config_appkey_status,
     parse_config_model_app_status,
     parse_generic_onoff_status,
+    parse_light_lightness_status,
 )
 from btmesh_min.bearer import (
     IDENTIFICATION_NODE_IDENTITY,
@@ -56,7 +64,6 @@ from btmesh_min.proxy_pdu import MSG_TYPE_NETWORK_PDU, MSG_TYPE_PROVISIONING_PDU
 logger = logging.getLogger("phase0")
 
 LOG_FILE = "provision_run.log"
-GENERIC_ONOFF_SERVER_MODEL = 0x1000
 SCAN_UNPROVISIONED_S = 10.0
 SCAN_PROXY_S = 15.0
 PROVISIONING_TIMEOUT_S = 60.0
@@ -671,17 +678,41 @@ async def configure(
         )
     print(f"  AppKey Status: Success ({(time.perf_counter() - t0) * 1000:.0f} ms)")
 
+    # Enumerate the node's models: the Häfele lamp answered Invalid Model to
+    # a blind Generic OnOff bind, so pick the control model from what the
+    # composition data actually lists. The status is SEGMENTED and we send no
+    # segment acks, so the node retransmits — the assembler handles the
+    # duplicates; allow a generous timeout.
+    print("Config: Composition Data Get (page 0)...")
+    try:
+        resp = await node.request(
+            unicast,
+            config_composition_data_get(0),
+            OP_CONFIG_COMPOSITION_DATA_STATUS,
+            dev_key=True,
+            timeout=15,
+        )
+    except TimeoutError as exc:
+        raise Phase0Failure(
+            "config Composition Data Get", str(exc), _timeout_causes(pump)
+        )
+    comp = parse_composition_data_status(_full_payload(resp))
+    print(f"  composition: {comp.describe()}")
+    logger.info("composition data: %s", comp.describe())
+
+    model_id = _pick_control_model(comp)
+    state["control_model"] = model_id
+    model_name = MODEL_NAMES[model_id]
+
     print(
         f"Config: Model App Bind (element 0x{unicast:04x}, "
-        f"model 0x{GENERIC_ONOFF_SERVER_MODEL:04x} Generic OnOff Server)..."
+        f"model 0x{model_id:04x} {model_name})..."
     )
     t0 = time.perf_counter()
     try:
         resp = await node.request(
             unicast,
-            config_model_app_bind(
-                unicast, state["appkey_index"], GENERIC_ONOFF_SERVER_MODEL
-            ),
+            config_model_app_bind(unicast, state["appkey_index"], model_id),
             OP_CONFIG_MODEL_APP_STATUS,
             dev_key=True,
             timeout=10,
@@ -696,32 +727,53 @@ async def configure(
         raise Phase0Failure(
             "config Model App Bind",
             f"Model App Status 0x{status.status:02x} ({name}) binding model "
-            f"0x{GENERIC_ONOFF_SERVER_MODEL:04x}",
-            [
-                "the element may not host a Generic OnOff Server — some lamps "
-                "expose only Light Lightness (0x1300) or vendor models; Generic "
-                "OnOff is Phase 0's go/no-go target, so treat this as a NO-GO "
-                "for this device",
-                "enumerate the models with Config Composition Data Get "
-                "(btmesh_min.access.config_composition_data_get) to confirm",
-            ],
+            f"0x{model_id:04x} even though the composition data lists it",
+            ["unexpected — check the composition dump above and the hex log"],
         )
     print(f"  Model App Status: Success ({(time.perf_counter() - t0) * 1000:.0f} ms)")
 
 
-async def toggle_loop(node: MeshNode, unicast: int, pump: BearerPump) -> None:
-    print("Toggling Generic OnOff: 3 ON/OFF cycles, 2 s apart...")
+MODEL_NAMES = {
+    MODEL_GENERIC_ONOFF_SERVER: "Generic OnOff Server",
+    MODEL_LIGHT_LIGHTNESS_SERVER: "Light Lightness Server",
+}
+
+
+def _pick_control_model(comp) -> int:
+    """Choose the control model from the primary element's composition data."""
+    sig_models = comp.elements[0].sig_models if comp.elements else ()
+    for model_id in (MODEL_GENERIC_ONOFF_SERVER, MODEL_LIGHT_LIGHTNESS_SERVER):
+        if model_id in sig_models:
+            return model_id
+    raise Phase0Failure(
+        "model selection",
+        "primary element hosts neither Generic OnOff (0x1000) nor Light "
+        "Lightness (0x1300)",
+        [
+            f"composition data: {comp.describe()}",
+            "if only vendor models are listed, the lamp is controlled via a "
+            "Telink/vendor model — standard-model control is a NO-GO for this "
+            "device (vendor-model support would be a Phase 1 decision)",
+        ],
+    )
+
+
+async def toggle_loop(node: MeshNode, unicast: int, pump: BearerPump, state: dict) -> None:
+    model_id = state.get("control_model", MODEL_GENERIC_ONOFF_SERVER)
+    model_name = MODEL_NAMES.get(model_id, f"0x{model_id:04x}")
+    print(f"Toggling via {model_name}: 3 ON/OFF cycles, 2 s apart...")
     tid = 0
     for cycle in range(1, 4):
         for onoff in (1, 0):
+            if model_id == MODEL_LIGHT_LIGHTNESS_SERVER:
+                payload = light_lightness_set(0xFFFF if onoff else 0, tid)
+                expected = OP_LIGHT_LIGHTNESS_STATUS
+            else:
+                payload = generic_onoff_set(bool(onoff), tid)
+                expected = OP_GENERIC_ONOFF_STATUS
             t0 = time.perf_counter()
             try:
-                resp = await node.request(
-                    unicast,
-                    generic_onoff_set(bool(onoff), tid),
-                    OP_GENERIC_ONOFF_STATUS,
-                    timeout=5,
-                )
+                resp = await node.request(unicast, payload, expected, timeout=5)
             except TimeoutError as exc:
                 raise Phase0Failure(
                     f"toggle (cycle {cycle}, {'ON' if onoff else 'OFF'})",
@@ -732,10 +784,15 @@ async def toggle_loop(node: MeshNode, unicast: int, pump: BearerPump) -> None:
                     ),
                 )
             ms = (time.perf_counter() - t0) * 1000
-            status = parse_generic_onoff_status(_full_payload(resp))
+            if model_id == MODEL_LIGHT_LIGHTNESS_SERVER:
+                lstatus = parse_light_lightness_status(_full_payload(resp))
+                present = lstatus.present_lightness
+            else:
+                gstatus = parse_generic_onoff_status(_full_payload(resp))
+                present = gstatus.present_onoff
             print(
                 f"  cycle {cycle} {'ON ' if onoff else 'OFF'}: "
-                f"present={status.present_onoff} ({ms:.0f} ms)"
+                f"present={present} ({ms:.0f} ms)"
             )
             tid = (tid + 1) & 0xFF
             await asyncio.sleep(2.0)
@@ -798,7 +855,7 @@ async def mesh_session(
         pump.start()
         if not args.toggle_only:
             await configure(node, unicast, appkey, state, pump)
-        await toggle_loop(node, unicast, pump)
+        await toggle_loop(node, unicast, pump, state)
     finally:
         await pump.stop()
         await bearer.stop()

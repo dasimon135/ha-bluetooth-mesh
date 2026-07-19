@@ -15,6 +15,7 @@ from .errors import BtMeshError
 
 # Foundation model opcodes (Zephyr foundation.h).
 OP_CONFIG_APPKEY_ADD = 0x00
+OP_CONFIG_COMPOSITION_DATA_STATUS = 0x02
 OP_CONFIG_APPKEY_STATUS = 0x8003
 OP_CONFIG_COMPOSITION_DATA_GET = 0x8008
 OP_CONFIG_MODEL_APP_BIND = 0x803D
@@ -22,6 +23,13 @@ OP_CONFIG_MODEL_APP_STATUS = 0x803E
 # Generic OnOff model opcodes (Mesh Model spec §7.1, Zephyr mesh sample).
 OP_GENERIC_ONOFF_SET = 0x8202
 OP_GENERIC_ONOFF_STATUS = 0x8204
+# Light Lightness model opcodes (Mesh Model spec §7.1).
+OP_LIGHT_LIGHTNESS_SET = 0x824C
+OP_LIGHT_LIGHTNESS_STATUS = 0x824E
+
+# SIG model IDs of interest (Mesh Model spec §7.3).
+MODEL_GENERIC_ONOFF_SERVER = 0x1000
+MODEL_LIGHT_LIGHTNESS_SERVER = 0x1300
 
 # Foundation status codes (spec §4.3.5, names per Zephyr foundation.h).
 STATUS_NAMES = {
@@ -73,6 +81,48 @@ class GenericOnOffStatus(NamedTuple):
     present_onoff: int
     target_onoff: int | None
     remaining_time: int | None
+
+
+class LightLightnessStatus(NamedTuple):
+    """Light Lightness Status (opcode 0x824E, Mesh Model spec §6.3.1.4)."""
+
+    present_lightness: int
+    target_lightness: int | None
+    remaining_time: int | None
+
+
+class CompositionElement(NamedTuple):
+    """One element of a Composition Data Page 0 (spec §4.2.1.1)."""
+
+    loc: int
+    sig_models: tuple[int, ...]
+    vendor_models: tuple[tuple[int, int], ...]  # (company_id, model_id)
+
+
+class CompositionData(NamedTuple):
+    """Composition Data Page 0 (opcode 0x02, spec §4.2.1)."""
+
+    page: int
+    cid: int
+    pid: int
+    vid: int
+    crpl: int
+    features: int
+    elements: tuple[CompositionElement, ...]
+
+    def describe(self) -> str:
+        parts = [
+            f"CID {self.cid:#06x}, PID {self.pid:#06x}, VID {self.vid:#06x}, "
+            f"CRPL {self.crpl}, features {self.features:#06x}"
+        ]
+        for i, el in enumerate(self.elements):
+            sig = ", ".join(f"{m:#06x}" for m in el.sig_models) or "none"
+            vnd = (
+                ", ".join(f"{cid:#06x}:{m:#06x}" for cid, m in el.vendor_models)
+                or "none"
+            )
+            parts.append(f"element {i}: SIG models [{sig}]; vendor models [{vnd}]")
+        return "; ".join(parts)
 
 
 # ------------------------------------------------------------- opcode codec
@@ -201,6 +251,19 @@ def generic_onoff_set(onoff: bool, tid: int) -> bytes:
     return encode_opcode(OP_GENERIC_ONOFF_SET) + bytes([int(bool(onoff)), tid])
 
 
+def light_lightness_set(lightness: int, tid: int) -> bytes:
+    """Light Lightness Set (acked) without transition time (Model spec §6.3.1.2)."""
+    if not 0 <= lightness <= 0xFFFF:
+        raise AccessError(f"lightness out of range: {lightness:#x}")
+    if not 0 <= tid <= 0xFF:
+        raise AccessError(f"TID out of range: {tid:#x}")
+    return (
+        encode_opcode(OP_LIGHT_LIGHTNESS_SET)
+        + lightness.to_bytes(2, "little")
+        + bytes([tid])
+    )
+
+
 # ------------------------------------------------------------------ decoders
 
 
@@ -239,4 +302,71 @@ def parse_generic_onoff_status(payload: bytes) -> GenericOnOffStatus:
         present_onoff=params[0],
         target_onoff=params[1],
         remaining_time=params[2],
+    )
+
+
+def parse_light_lightness_status(payload: bytes) -> LightLightnessStatus:
+    """Parse a Light Lightness Status (Model spec §6.3.1.4)."""
+    params = _expect_params(payload, OP_LIGHT_LIGHTNESS_STATUS, (2, 5))
+    present = int.from_bytes(params[0:2], "little")
+    if len(params) == 2:
+        return LightLightnessStatus(
+            present_lightness=present, target_lightness=None, remaining_time=None
+        )
+    return LightLightnessStatus(
+        present_lightness=present,
+        target_lightness=int.from_bytes(params[2:4], "little"),
+        remaining_time=params[4],
+    )
+
+
+def parse_composition_data_status(payload: bytes) -> CompositionData:
+    """Parse a Composition Data Status, Page 0 layout (spec §4.2.1/§4.3.2.5).
+
+    Params: Page(1) + CID/PID/VID/CRPL/Features (2 LE each) + per element:
+    Loc(2 LE), NumS(1), NumV(1), NumS SIG model IDs (2 LE), NumV vendor
+    models (CID 2 LE + model ID 2 LE).
+    """
+    opcode, params = parse_access(payload)
+    if opcode != OP_CONFIG_COMPOSITION_DATA_STATUS:
+        raise AccessError(
+            f"expected opcode {_format_opcode(OP_CONFIG_COMPOSITION_DATA_STATUS)}, "
+            f"got {_format_opcode(opcode)}"
+        )
+    if len(params) < 11:
+        raise AccessError(f"composition data too short: {len(params)} bytes")
+    page = params[0]
+    cid, pid, vid, crpl, features = (
+        int.from_bytes(params[1 + 2 * i : 3 + 2 * i], "little") for i in range(5)
+    )
+    elements: list[CompositionElement] = []
+    off = 11
+    while off < len(params):
+        if off + 4 > len(params):
+            raise AccessError("truncated element header in composition data")
+        loc = int.from_bytes(params[off : off + 2], "little")
+        num_s, num_v = params[off + 2], params[off + 3]
+        off += 4
+        end = off + 2 * num_s + 4 * num_v
+        if end > len(params):
+            raise AccessError("truncated model list in composition data")
+        sig = tuple(
+            int.from_bytes(params[off + 2 * i : off + 2 * i + 2], "little")
+            for i in range(num_s)
+        )
+        off += 2 * num_s
+        vendor = tuple(
+            (
+                int.from_bytes(params[off + 4 * i : off + 4 * i + 2], "little"),
+                int.from_bytes(params[off + 4 * i + 2 : off + 4 * i + 4], "little"),
+            )
+            for i in range(num_v)
+        )
+        off += 4 * num_v
+        elements.append(
+            CompositionElement(loc=loc, sig_models=sig, vendor_models=vendor)
+        )
+    return CompositionData(
+        page=page, cid=cid, pid=pid, vid=vid, crpl=crpl,
+        features=features, elements=tuple(elements),
     )

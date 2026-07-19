@@ -199,3 +199,57 @@ def test_status_names_cover_spec_table():
     assert STATUS_NAMES[0x00] == "Success"
     assert STATUS_NAMES[0x11] == "Invalid Binding"
     assert set(STATUS_NAMES) == set(range(0x12))
+
+
+# ---------------------------------------------- composition data + lightness
+
+
+def test_light_lightness_set_layout():
+    from btmesh_min.access import light_lightness_set
+
+    assert light_lightness_set(0xFFFF, 5) == bytes.fromhex("824cffff05")
+    assert light_lightness_set(0, 0) == bytes.fromhex("824c000000")
+
+
+def test_parse_light_lightness_status_short_and_full():
+    from btmesh_min.access import parse_light_lightness_status
+
+    s = parse_light_lightness_status(bytes.fromhex("824e3412"))
+    assert s.present_lightness == 0x1234
+    assert s.target_lightness is None
+    full = parse_light_lightness_status(bytes.fromhex("824e0000ffff0a"))
+    assert full.present_lightness == 0
+    assert full.target_lightness == 0xFFFF
+    assert full.remaining_time == 0x0A
+
+
+def test_parse_composition_data_status():
+    from btmesh_min.access import parse_composition_data_status
+
+    # Synthetic page 0: CID 0x0211 (Telink), PID 1, VID 2, CRPL 10,
+    # features 0x0007; one element: loc 0x0100, 2 SIG models (0x0000 Config
+    # Server, 0x1300 Lightness Server), 1 vendor model 0x0211:0x0001.
+    params = (
+        "00" "1102" "0100" "0200" "0a00" "0700"
+        "0001" "02" "01" "0000" "0013" "1102" "0100"
+    )
+    comp = parse_composition_data_status(bytes.fromhex("02" + params))
+    assert comp.cid == 0x0211
+    assert comp.features == 0x0007
+    assert len(comp.elements) == 1
+    el = comp.elements[0]
+    assert el.sig_models == (0x0000, 0x1300)
+    assert el.vendor_models == ((0x0211, 0x0001),)
+    assert "0x1300" in comp.describe()
+
+
+def test_parse_composition_data_truncated_raises():
+    from btmesh_min.access import AccessError, parse_composition_data_status
+
+    with pytest.raises(AccessError):
+        parse_composition_data_status(bytes.fromhex("0200110201000200"))
+    with pytest.raises(AccessError):
+        # Element header claims 3 SIG models but only 1 present.
+        parse_composition_data_status(
+            bytes.fromhex("02" + "001102010002000a000700" + "000103000000")
+        )
