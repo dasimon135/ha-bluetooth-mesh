@@ -22,7 +22,7 @@ from btmesh.access import (
 from btmesh.crypto import k4
 from btmesh.errors import BtMeshError
 from btmesh.node import MeshNode, ReceivedMessage
-from btmesh.transport import SegmentAck, encrypt_access, unsegmented_access
+from btmesh.transport import SegmentAck, encrypt_access, build_unsegmented_access
 
 NET_KEY = bytes.fromhex("7dd7364cd842ad18c17c2b820c84c3d6")
 APP_KEY = bytes.fromhex("63964771734fbd76e3b40519d1d94a48")
@@ -245,7 +245,7 @@ def test_foreign_netkey_pdu_ignored():
     foreign = network.NetworkContext(net_key=bytes(range(16)), iv_index=IV_INDEX)
     raw = network.encode(
         foreign, ctl=False, ttl=3, seq=foreign.next_seq(), src=0x0003,
-        dst=0x0001, transport_pdu=unsegmented_access(bytes(5), akf=False, aid=0),
+        dst=0x0001, transport_pdu=build_unsegmented_access(bytes(5), akf=False, aid=0),
     )
     a.handle_network_pdu(raw)  # must not raise
     assert not a.received
@@ -262,7 +262,7 @@ def test_self_echo_ignored():
     )
     raw = network.encode(
         ctx, ctl=False, ttl=3, seq=seq, src=0x0001, dst=0x0001,
-        transport_pdu=unsegmented_access(upper, akf=True, aid=k4(APP_KEY)),
+        transport_pdu=build_unsegmented_access(upper, akf=True, aid=k4(APP_KEY)),
     )
     a.handle_network_pdu(raw)
     assert not a.received
@@ -280,7 +280,7 @@ def test_wrong_aid_ignored():
     wrong_aid = (k4(APP_KEY) + 1) & 0x3F
     raw = network.encode(
         ctx, ctl=False, ttl=3, seq=seq, src=0x0002, dst=0x0001,
-        transport_pdu=unsegmented_access(upper, akf=True, aid=wrong_aid),
+        transport_pdu=build_unsegmented_access(upper, akf=True, aid=wrong_aid),
     )
     a.handle_network_pdu(raw)
     assert not a.received

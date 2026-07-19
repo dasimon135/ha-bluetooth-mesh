@@ -11,6 +11,20 @@ from typing import NoReturn
 
 from .errors import BtMeshError
 
+__all__ = [
+    "ProxyPDUError",
+    "SAR_COMPLETE",
+    "SAR_FIRST",
+    "SAR_CONTINUATION",
+    "SAR_LAST",
+    "MSG_TYPE_NETWORK_PDU",
+    "MSG_TYPE_MESH_BEACON",
+    "MSG_TYPE_PROXY_CONFIG",
+    "MSG_TYPE_PROVISIONING_PDU",
+    "segment",
+    "Reassembler",
+]
+
 
 class ProxyPDUError(BtMeshError):
     """Malformed Proxy PDU frame or invalid SAR sequence."""

@@ -12,6 +12,25 @@ from cryptography.exceptions import InvalidTag
 from .crypto import ccm_decrypt, ccm_encrypt
 from .errors import BtMeshError
 
+__all__ = [
+    "SEGMENT_SIZE",
+    "UNSEG_MAX_UPPER_LEN",
+    "TRANS_MIC_LEN",
+    "MAX_SEGMENTS",
+    "TransportError",
+    "UnsegmentedAccess",
+    "AccessSegment",
+    "SegmentAck",
+    "UnknownControl",
+    "SegmentAssembler",
+    "encrypt_access",
+    "decrypt_access",
+    "build_unsegmented_access",
+    "segment_access_message",
+    "parse_access_lower",
+    "parse_control_lower",
+]
+
 SEGMENT_SIZE = 12  # bytes of upper-transport PDU per segment (spec §3.5.2.2)
 UNSEG_MAX_UPPER_LEN = 15  # max upper-transport PDU in an unsegmented message
 TRANS_MIC_LEN = 4  # SZMIC=0 → 32-bit TransMIC
@@ -139,7 +158,7 @@ def _check_aid(akf: bool, aid: int) -> None:
         raise TransportError("AID must be 0 when AKF=0 (device key)")
 
 
-def unsegmented_access(upper_pdu: bytes, *, akf: bool, aid: int) -> bytes:
+def build_unsegmented_access(upper_pdu: bytes, *, akf: bool, aid: int) -> bytes:
     """Build an unsegmented access lower-transport PDU (spec §3.5.2.1)."""
     _check_aid(akf, aid)
     if not 1 <= len(upper_pdu) <= UNSEG_MAX_UPPER_LEN:

@@ -38,6 +38,31 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+__all__ = [
+    "PROV_SERVICE",
+    "PROV_DATA_IN",
+    "PROV_DATA_OUT",
+    "PROXY_SERVICE",
+    "PROXY_DATA_IN",
+    "PROXY_DATA_OUT",
+    "ATT_HEADER_LEN",
+    "DEFAULT_MAX_FRAME",
+    "IDENTIFICATION_NETWORK_ID",
+    "IDENTIFICATION_NODE_IDENTITY",
+    "BearerError",
+    "GattBearer",
+    "UnprovisionedDevice",
+    "ProxyCandidate",
+    "parse_unprovisioned_service_data",
+    "parse_proxy_service_data",
+    "unprovisioned_from_discoveries",
+    "proxy_candidates_from_discoveries",
+    "scan_unprovisioned",
+    "find_proxy_node",
+    "connect_local",
+    "EsphomeTransport",
+]
+
 # Mesh Provisioning Service (PB-GATT, spec §7.1).
 PROV_SERVICE = "00001827-0000-1000-8000-00805f9b34fb"
 PROV_DATA_IN = "00002adb-0000-1000-8000-00805f9b34fb"  # write-without-response

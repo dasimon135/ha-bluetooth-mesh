@@ -13,6 +13,30 @@ from dataclasses import dataclass
 
 from .errors import BtMeshError
 
+__all__ = [
+    "ProvisioningPDUError",
+    "INVITE",
+    "CAPABILITIES",
+    "START",
+    "PUBLIC_KEY",
+    "CONFIRMATION",
+    "RANDOM",
+    "DATA",
+    "COMPLETE",
+    "FAILED",
+    "Invite",
+    "Capabilities",
+    "Start",
+    "PublicKey",
+    "Confirmation",
+    "Random",
+    "Data",
+    "Complete",
+    "Failed",
+    "ProvisioningPDU",
+    "decode",
+]
+
 
 class ProvisioningPDUError(BtMeshError):
     """Malformed or unknown Provisioning PDU.

@@ -27,7 +27,7 @@ from btmesh.transport import (
     parse_access_lower,
     parse_control_lower,
     segment_access_message,
-    unsegmented_access,
+    build_unsegmented_access,
 )
 
 # §8.3 sample security material.
@@ -132,16 +132,16 @@ def test_bad_label_uuid_length_raises():
 # ------------------------------------------------------- lower layer, access
 
 
-def test_unsegmented_access_message22():
+def test_build_unsegmented_access_message22():
     """§8.3.22: AKF=1, AID=k4(AppKey)=0x26 → header 0x66."""
     aid = k4(APP_KEY)
     assert aid == 0x26
-    assert unsegmented_access(MSG22_UPPER, akf=True, aid=aid) == MSG22_LOWER
+    assert build_unsegmented_access(MSG22_UPPER, akf=True, aid=aid) == MSG22_LOWER
 
 
-def test_unsegmented_access_too_long_raises():
+def test_build_unsegmented_access_too_long_raises():
     with pytest.raises(TransportError):
-        unsegmented_access(bytes(16), akf=False, aid=0)
+        build_unsegmented_access(bytes(16), akf=False, aid=0)
 
 
 def test_segment_access_message6():
@@ -176,14 +176,14 @@ def test_segment_seq_overflow_raises():
 
 def test_aid_out_of_range_raises():
     with pytest.raises(TransportError):
-        unsegmented_access(b"\x00", akf=True, aid=0x40)
+        build_unsegmented_access(b"\x00", akf=True, aid=0x40)
     with pytest.raises(TransportError):
         segment_access_message(bytes(13), akf=True, aid=0x40, first_seq=0)
 
 
 def test_nonzero_aid_with_device_key_raises():
     with pytest.raises(TransportError):
-        unsegmented_access(b"\x00", akf=False, aid=1)
+        build_unsegmented_access(b"\x00", akf=False, aid=1)
     with pytest.raises(TransportError):
         segment_access_message(bytes(13), akf=False, aid=1, first_seq=0)
 

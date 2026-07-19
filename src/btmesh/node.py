@@ -24,15 +24,22 @@ from .transport import (
     SegmentAssembler,
     TransportError,
     UnsegmentedAccess,
+    build_unsegmented_access,
     decrypt_access,
     encrypt_access,
     parse_access_lower,
     parse_control_lower,
     segment_access_message,
-    unsegmented_access,
 )
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "DEFAULT_TTL",
+    "NodeError",
+    "ReceivedMessage",
+    "MeshNode",
+]
 
 DEFAULT_TTL = 7  # hops enough for any Phase 0 topology (matches Zephyr default)
 _RECEIVED_MAXLEN = 128
@@ -151,7 +158,7 @@ class MeshNode:
                 key, akf=akf, seq=seq, src=self._src, dst=dst,
                 iv_index=self._iv_index, access_pdu=payload,
             )
-            pdus = [(seq, unsegmented_access(upper, akf=akf, aid=aid))]
+            pdus = [(seq, build_unsegmented_access(upper, akf=akf, aid=aid))]
         else:
             seg_count = (upper_len + SEGMENT_SIZE - 1) // SEGMENT_SIZE
             # Allocate the whole SEQ block up front: the first SEQ feeds the

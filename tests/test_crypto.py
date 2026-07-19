@@ -22,7 +22,17 @@ Additional sources:
 import pytest
 from cryptography.exceptions import InvalidTag
 
-from btmesh.crypto import aes_cmac, ccm_decrypt, ccm_encrypt, k1, k2, k3, k4, s1
+from btmesh.crypto import (
+    K2Output,
+    aes_cmac,
+    ccm_decrypt,
+    ccm_encrypt,
+    k1,
+    k2,
+    k3,
+    k4,
+    s1,
+)
 
 # Spec sample data §8.1.2 / §8.1.3 use these keys (also §8.1.5, §8.1.6).
 APP_KEY = bytes.fromhex("3216d1509884b533248541792b877f98")
@@ -50,10 +60,16 @@ def test_k1_salt_and_p_derivation():
 
 def test_k2_master_spec_8_1_3():
     """Spec §8.1.3: k2 with P = 0x00 (master/flooding security material)."""
-    nid, enc_key, priv_key = k2(NET_KEY, b"\x00")
+    result = k2(NET_KEY, b"\x00")
+    assert isinstance(result, K2Output)
+    nid, enc_key, priv_key = result  # positional unpacking still works
     assert nid == 0x7F
     assert enc_key == bytes.fromhex("9f589181a0f50de73c8070c7a6d27f46")
     assert priv_key == bytes.fromhex("4c715bd4a64b938f99b453351653124f")
+    # Named field access mirrors the positional tuple.
+    assert result.nid == nid
+    assert result.encryption_key == enc_key
+    assert result.privacy_key == priv_key
 
 
 def test_k2_friendship_spec_8_1_4():
@@ -64,10 +80,16 @@ def test_k2_friendship_spec_8_1_4():
     Exercises multi-byte P in the T1/T2/T3 concatenations.
     """
     p = bytes.fromhex("010203040506070809")
-    nid, enc_key, priv_key = k2(NET_KEY, p)
+    result = k2(NET_KEY, p)
+    nid, enc_key, priv_key = result  # positional unpacking still works
     assert nid == 0x73
     assert enc_key == bytes.fromhex("11efec0642774992510fb5929646df49")
     assert priv_key == bytes.fromhex("d4d7cc0dfa772d836a8df9df5510d7a7")
+    assert (result.nid, result.encryption_key, result.privacy_key) == (
+        nid,
+        enc_key,
+        priv_key,
+    )
 
 
 def test_aes_cmac_rfc4493_example_1():

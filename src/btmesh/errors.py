@@ -5,6 +5,8 @@ bearer/transport layers can catch one type regardless of which module
 (codec, state machine, ...) detected the problem.
 """
 
+__all__ = ["BtMeshError"]
+
 
 class BtMeshError(Exception):
     """Base class for all btmesh errors."""
