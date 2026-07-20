@@ -77,6 +77,13 @@ ATT_HEADER_LEN = 3
 # Fallback frame budget when mtu_size is unavailable/absurd: min ATT MTU 23 - 3.
 DEFAULT_MAX_FRAME = 20
 
+# How long :meth:`GattBearer.start` waits for ``start_notify`` to CONFIRM before
+# proceeding anyway. Some proxied backends (bleak-esphome behind an ESPHome BLE
+# proxy) begin delivering Data Out notifications immediately yet never resolve
+# the ``start_notify`` await, which would hang the caller forever. The
+# subscription is active regardless, so we bound the wait and carry on.
+START_NOTIFY_TIMEOUT = 5.0
+
 # Mesh Proxy Service advertising identification types (spec §7.2.2.2).
 IDENTIFICATION_NETWORK_ID = 0x00
 IDENTIFICATION_NODE_IDENTITY = 0x01
@@ -121,11 +128,36 @@ class GattBearer:
         return mtu - ATT_HEADER_LEN
 
     async def start(self, on_message: Callable[[int, bytes], None]) -> None:
-        """Subscribe to the Data Out characteristic and begin dispatching."""
+        """Subscribe to the Data Out characteristic and begin dispatching.
+
+        Bounded by :data:`START_NOTIFY_TIMEOUT`: some proxied backends (notably
+        bleak-esphome behind an ESPHome BLE proxy) start delivering Data Out
+        notifications immediately but never resolve the ``start_notify`` await,
+        which would hang the caller forever. The subscription is active anyway
+        (frames flow) and the proxy link is usable for writes regardless, so if
+        the await does not confirm in time we log and proceed rather than block.
+        A genuine subscribe *error* still raises :class:`BearerError`.
+        """
         self._on_message = on_message
+        task = asyncio.ensure_future(
+            self._client.start_notify(self._data_out, self._handle_notify)
+        )
         try:
-            await self._client.start_notify(self._data_out, self._handle_notify)
+            await asyncio.wait_for(asyncio.shield(task), START_NOTIFY_TIMEOUT)
+        except asyncio.TimeoutError:
+            # Leave the still-pending subscribe running (notifications already
+            # flow) and swallow any late result so it is not reported as an
+            # unretrieved task exception.
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            logger.warning(
+                "start_notify(%s) unconfirmed after %ss; proceeding "
+                "(proxy backend likely delivers notifications without "
+                "resolving the await)",
+                self._data_out, START_NOTIFY_TIMEOUT,
+            )
+            return
         except Exception as exc:
+            task.cancel()
             raise BearerError(
                 f"could not subscribe to {self._data_out}: {exc}"
             ) from exc

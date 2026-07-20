@@ -83,9 +83,21 @@ SEQ_SAFETY_MARGIN = 32
 PROBE_INTERVAL_AVAILABLE = timedelta(minutes=2)
 PROBE_INTERVAL_UNAVAILABLE = timedelta(seconds=15)
 
-# Hard ceiling on a single connect+command cycle so a hung proxy connection can
-# never wedge the lock forever.
+# Hard ceiling on establishing the proxy connection so a hung connect can never
+# wedge the lock forever.
 CONNECT_TIMEOUT = 20.0
+
+# Hard ceiling on a single command once connected — a safety net around the
+# per-command status wait below.
+COMMAND_TIMEOUT = 8.0
+
+# How long a command waits for the node's Status reply before giving up. This is
+# deliberately SHORT: control is fire-and-forget (the Set reaches the node on the
+# wire regardless), and the node does not currently forward Status replies back
+# over the proxy connection (its proxy filter is not configured), so a long wait
+# would only add latency to every button press. If a Status does arrive within
+# the window we still use its confirmed value; otherwise the command is optimistic.
+STATUS_TIMEOUT = 1.5
 
 
 class MeshCoordinator:
@@ -182,17 +194,29 @@ class MeshCoordinator:
 
     # ---------------------------------------------------------- on-demand core
 
-    async def _run_connected(self, call):
-        """Connect on-demand, run ``call(controller)``, then always disconnect.
+    async def _run_connected(self, call=None):
+        """Connect on-demand, optionally run ``call(controller)``, then disconnect.
 
         This is the heart of the on-demand model. Under the lock it finds the
-        proxy, opens a bearer, starts a controller seeded from the in-memory SEQ
-        cursor, runs the command, persists the advanced SEQ, and — no matter what
-        — stops the controller and disconnects the client in the ``finally``
-        block so the lamp's single proxy slot is freed after every command.
+        proxy, opens a bearer, and starts a controller seeded from the in-memory
+        SEQ cursor. **Establishing that connection is what marks the coordinator
+        available** — the mesh node is right there on the other end of the proxy
+        link, so control will reach it. Availability deliberately does NOT depend
+        on a command's Status reply: the node does not currently forward Status
+        replies over the proxy connection, and control is fire-and-forget, so a
+        missed reply must not make the entity unavailable.
 
-        Returns the command's result, or ``None`` when the mesh is unreachable
-        or the command times out.
+        When ``call`` is ``None`` the connection is a pure reachability probe.
+        Otherwise the command runs best-effort under :data:`COMMAND_TIMEOUT`; a
+        command timeout or error is logged but never flips availability.
+
+        No matter what, the SEQ/TID the controller consumed is persisted and the
+        controller + client are torn down in the ``finally`` block, freeing the
+        lamp's single proxy slot after every cycle. Persisting the SEQ even on a
+        command failure is essential: the Set was already emitted on the wire, so
+        a later command that reused the SEQ would be silently dropped as a replay.
+
+        Returns the command's result, or ``None``.
         """
         async with self._lock:
             address = find_proxy_address(self.hass, self._network.net_key)
@@ -218,24 +242,38 @@ class MeshCoordinator:
                         seq=self._seq, tid=self._tid,
                     )
                     await controller.start()
-                    result = await call(controller)
-                # Advance and persist the SEQ cursor by exactly what was consumed
-                # (no margin re-added here — that is applied once, at start), and
-                # carry the TID cursor forward so consecutive commands never
-                # reuse a TID (which the node would drop as a retransmit).
-                self._seq = controller.seq
-                self._tid = controller.tid
-                await self._store.async_save({"seq": self._seq})
+                # Connected: the proxy link to the mesh node is up. That alone is
+                # our availability signal — do not wait on a Status reply for it.
                 self._set_available()
+                result = None
+                if call is not None:
+                    try:
+                        async with asyncio.timeout(COMMAND_TIMEOUT):
+                            result = await call(controller)
+                    except Exception as exc:  # noqa: BLE001 - status timeout etc.
+                        # The Set still reached the node on the wire; we just did
+                        # not get (or wait long enough for) a confirming Status.
+                        logger.debug(
+                            "mesh command sent but not confirmed: %s", exc
+                        )
                 return result
-            except Exception as exc:  # noqa: BLE001 - transport/GATT/timeout
-                logger.debug("mesh command failed: %s", exc)
+            except Exception as exc:  # noqa: BLE001 - transport/GATT/connect
+                logger.debug("mesh connect failed: %s", exc)
                 self._set_unavailable()
                 return None
             finally:
-                # Clean disconnect after EVERY command — the whole point of the
-                # on-demand model. Failures here must not mask the result.
+                # Persist the SEQ/TID actually consumed — even when the command
+                # timed out — so the next command never reuses a SEQ (which the
+                # node silently drops as a replay) nor a TID (dropped as a
+                # retransmit). Then disconnect cleanly; teardown failures must
+                # not mask the result.
                 if controller is not None:
+                    self._seq = controller.seq
+                    self._tid = controller.tid
+                    try:
+                        await self._store.async_save({"seq": self._seq})
+                    except Exception:  # noqa: BLE001
+                        logger.debug("seq persist failed", exc_info=True)
                     try:
                         await controller.stop()
                     except Exception:  # noqa: BLE001
@@ -249,59 +287,61 @@ class MeshCoordinator:
     # --------------------------------------------------------------- commands
 
     async def async_set_onoff(self, unicast: int, on: bool) -> bool | None:
-        """Set Generic OnOff on ``unicast``; None if unavailable/timeout."""
-        return await self._run_connected(lambda c: c.set_onoff(unicast, on))
+        """Set Generic OnOff on ``unicast`` (fire-and-forget; short status wait)."""
+        return await self._run_connected(
+            lambda c: c.set_onoff(
+                unicast, on, timeout=STATUS_TIMEOUT, retries=0
+            )
+        )
 
     async def async_get_onoff(self, unicast: int) -> bool | None:
-        """Read Generic OnOff from ``unicast``; None if unavailable/timeout."""
-        return await self._run_connected(lambda c: c.get_onoff(unicast))
+        """Read Generic OnOff from ``unicast``; None if unconfirmed."""
+        return await self._run_connected(
+            lambda c: c.get_onoff(unicast, timeout=STATUS_TIMEOUT)
+        )
 
     async def async_set_lightness(
         self, unicast: int, level_0_1: float
     ) -> int | None:
-        """Set Light Lightness (0..1) on ``unicast``; None if unavailable."""
+        """Set Light Lightness (0..1) on ``unicast`` (fire-and-forget)."""
         return await self._run_connected(
-            lambda c: c.set_lightness(unicast, level_0_1)
+            lambda c: c.set_lightness(unicast, level_0_1, timeout=STATUS_TIMEOUT)
         )
 
     async def async_set_ctl(
         self, unicast: int, level_0_1: float, kelvin: int
     ) -> int | None:
-        """Set Light CTL (lightness + temperature) on ``unicast``; None if unavailable."""
+        """Set Light CTL (lightness + temperature) on ``unicast`` (fire-and-forget)."""
         return await self._run_connected(
-            lambda c: c.set_ctl(unicast, level_0_1, kelvin)
+            lambda c: c.set_ctl(
+                unicast, level_0_1, kelvin, timeout=STATUS_TIMEOUT
+            )
         )
 
     async def async_set_ctl_temperature(
         self, unicast: int, kelvin: int
     ) -> int | None:
-        """Set Light CTL Temperature only (K) on ``unicast``; None if unavailable."""
+        """Set Light CTL Temperature only (K) on ``unicast`` (fire-and-forget)."""
         return await self._run_connected(
-            lambda c: c.set_ctl_temperature(unicast, kelvin)
+            lambda c: c.set_ctl_temperature(
+                unicast, kelvin, timeout=STATUS_TIMEOUT
+            )
         )
 
     # ---------------------------------------------------------------- probe
 
     async def _async_probe(self, now=None) -> None:
-        """Periodic availability probe: a cheap GET on the primary node.
+        """Periodic availability probe: just (re)establish the proxy connection.
 
-        Runs through :meth:`_run_connected`, so it refreshes availability (and
-        the repair issue) exactly like a real command, while holding the lamp's
-        slot only briefly.
+        Runs through :meth:`_run_connected` with no command, so it refreshes
+        availability (and clears/raises the repair issue) purely from whether the
+        proxy link can be brought up, while holding the lamp's slot only briefly.
+        We do not send a GET here: the node does not forward a Status back, so a
+        successful connect is the honest reachability signal.
         """
         if self._stopped:
             return
-        unicast = self._primary_unicast()
-        if unicast is None:
-            return
-        await self._run_connected(lambda c: c.get_onoff(unicast))
-
-    def _primary_unicast(self) -> int | None:
-        """Unicast of the first lighting node, or None if the network is empty."""
-        nodes = self._network.nodes
-        if not nodes:
-            return None
-        return nodes[0].unicast
+        await self._run_connected()
 
     # ----------------------------------------------------------- seq persistence
 

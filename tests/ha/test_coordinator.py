@@ -65,23 +65,37 @@ class FakeController:
     async def stop(self) -> None:
         self.stopped = True
 
-    async def set_onoff(self, unicast: int, on: bool) -> bool:
+    async def set_onoff(
+        self, unicast: int, on: bool, *, timeout: float = 5.0, retries: int = 1
+    ) -> bool:
         self.calls.append(("set_onoff", unicast, on))
         self.seq += 1
         self.tid = (self.tid + 1) & 0xFF
         return on
 
-    async def get_onoff(self, unicast: int) -> bool:
+    async def get_onoff(self, unicast: int, *, timeout: float = 5.0) -> bool:
         self.calls.append(("get_onoff", unicast))
         return True
 
-    async def set_lightness(self, unicast: int, level_0_1: float) -> int:
+    async def set_lightness(
+        self, unicast: int, level_0_1: float, *, timeout: float = 5.0
+    ) -> int:
         self.calls.append(("set_lightness", unicast, level_0_1))
         self.seq += 1
         self.tid = (self.tid + 1) & 0xFF
         return round(level_0_1 * 0xFFFF)
 
-    async def set_ctl_temperature(self, unicast: int, kelvin: int) -> int:
+    async def set_ctl(
+        self, unicast: int, level_0_1: float, kelvin: int, *, timeout: float = 5.0
+    ) -> int:
+        self.calls.append(("set_ctl", unicast, level_0_1, kelvin))
+        self.seq += 1
+        self.tid = (self.tid + 1) & 0xFF
+        return kelvin
+
+    async def set_ctl_temperature(
+        self, unicast: int, kelvin: int, *, timeout: float = 5.0
+    ) -> int:
         self.calls.append(("set_ctl_temperature", unicast, kelvin))
         self.seq += 1
         self.tid = (self.tid + 1) & 0xFF
@@ -206,9 +220,9 @@ async def test_seq_margin_applied_once_not_per_command(hass) -> None:
 
     with _patch_transport(None, ctor_side_effect=ctor):
         coord = MeshCoordinator(hass, entry)
-        # async_start awaits one probe (get_onoff: does not advance seq), so the
-        # first controller is built at the seeded cursor and the seed is NOT
-        # consumed by the probe.
+        # async_start awaits one probe (a pure connect — sends no command, so it
+        # does not advance seq), so the first controller is built at the seeded
+        # cursor and the seed is NOT consumed by the probe.
         await coord.async_start()
 
         await coord.async_set_onoff(UNICAST, True)  # first real command (+1)
@@ -216,9 +230,9 @@ async def test_seq_margin_applied_once_not_per_command(hass) -> None:
 
     seeded = 0x5000 + SEQ_SAFETY_MARGIN
     # Three controllers were built: the startup probe, then the two commands.
-    # The probe's get_onoff does not advance seq, so the first *command* still
-    # sees the seeded cursor; the second sees it advanced by exactly 1 (margin
-    # applied once, never re-added per command).
+    # The probe sends no command so it does not advance seq, so the first
+    # *command* still sees the seeded cursor; the second sees it advanced by
+    # exactly 1 (margin applied once, never re-added per command).
     assert ctor_seqs[-2] == seeded  # first command: stored + margin (once)
     assert ctor_seqs[-1] == seeded + 1  # second: advanced by 1, margin NOT re-added
     await coord.async_stop()
