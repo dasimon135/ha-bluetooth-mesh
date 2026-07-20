@@ -171,9 +171,10 @@ class MeshCoordinator:
             address = find_proxy_address(self.hass, self._network.net_key)
             if address is None:
                 seen = discovered_proxies(self.hass)
-                logger.debug(
-                    "no mesh proxy advertising our network; "
+                logger.warning(
+                    "no connectable mesh proxy for network_id %s; "
                     "0x1828 adverts HA sees: %s",
+                    k3(self._network.net_key).hex(),
                     seen or "none",
                 )
                 self._set_unavailable()
