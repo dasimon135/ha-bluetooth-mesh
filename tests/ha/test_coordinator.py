@@ -1,10 +1,11 @@
-"""Tests for the mesh runtime coordinator (Task B3).
+"""Tests for the mesh runtime coordinator (Task B3, on-demand model).
 
-The coordinator owns the proxy connection, the controller, and SEQ persistence.
-Here the two BLE seams are mocked — ``find_proxy_address`` and
-``async_connect_bearer`` from :mod:`.mesh_transport` — and a ``FakeController``
-is injected in place of the real :class:`btmesh.controller.MeshController`, so
-no radios are touched. Run in the daikin_madoka venv (HA + HHCC)::
+The coordinator now connects to the proxy *per command*, runs, and disconnects
+again — freeing the lamp's single proxy slot after every command. Here the two
+BLE seams are mocked — ``find_proxy_address`` and ``async_connect_bearer`` from
+:mod:`.mesh_transport` — and a ``FakeController`` is injected in place of the
+real :class:`btmesh.controller.MeshController`, so no radios are touched. Run in
+the daikin_madoka venv (HA + HHCC)::
 
     PYTHONPATH="tests/ha/_winshims;src" .../daikin_madoka/.venv/Scripts/python.exe \
         -m pytest tests/ha/test_coordinator.py -q
@@ -90,44 +91,52 @@ def _make_entry(hass) -> MockConfigEntry:
 
 @contextlib.contextmanager
 def _patch_transport(controller, *, address=PROXY_ADDR, ctor_side_effect=None):
-    """Patch the BLE seams (transport + discovery) and MeshController."""
+    """Patch the BLE seams (transport + discovery) and MeshController.
+
+    Yields the mocked BLE *client* so tests can assert it was disconnected after
+    every command (the core requirement of the on-demand model). Its
+    ``disconnect`` is an ``AsyncMock`` so ``await client.disconnect()`` works.
+    """
     kwargs = (
         {"side_effect": ctor_side_effect}
         if ctor_side_effect is not None
         else {"return_value": controller}
     )
+    client = MagicMock()
+    client.disconnect = AsyncMock()
     with (
         patch.object(coordinator_mod, "find_proxy_address", return_value=address),
         patch.object(
             coordinator_mod,
             "async_connect_bearer",
-            new=AsyncMock(return_value=(MagicMock(), MagicMock())),
+            new=AsyncMock(return_value=(client, MagicMock())),
         ),
         patch.object(coordinator_mod, "MeshController", **kwargs),
-        patch.object(
-            coordinator_mod, "async_register_proxy_callback",
-            return_value=MagicMock(),
-        ),
         patch.object(coordinator_mod, "discovered_proxies", return_value=[]),
     ):
-        yield
+        yield client
 
 
-async def test_start_connects_delegates_and_persists_seq(hass) -> None:
-    """Found proxy → available, controller started, command delegated, seq saved."""
+async def test_command_connects_delegates_persists_seq_and_disconnects(hass) -> None:
+    """A command connects on-demand, delegates, saves seq, then disconnects."""
     entry = _make_entry(hass)
     fake = FakeController()
-    with _patch_transport(fake):
+    with _patch_transport(fake) as client:
         coord = MeshCoordinator(hass, entry)
         await coord.async_start()
 
+        # The initial probe made us available.
         assert coord.available is True
-        assert fake.started is True
         assert coord.network.nodes[0].unicast == UNICAST
 
         result = await coord.async_set_onoff(UNICAST, True)
         assert result is True
         assert fake.calls[-1] == ("set_onoff", UNICAST, True)
+
+        # The slot was freed: the controller was stopped and the client
+        # disconnected after the command.
+        assert fake.stopped is True
+        assert client.disconnect.await_count >= 1
 
         # SEQ mirrored to the Store after the command.
         stored = await coord._store.async_load()
@@ -149,63 +158,67 @@ async def test_no_proxy_stays_unavailable_and_raises_issue(hass) -> None:
     with (
         patch.object(coordinator_mod, "find_proxy_address", return_value=None),
         patch.object(
-            coordinator_mod, "async_register_proxy_callback",
-            return_value=MagicMock(),
+            coordinator_mod,
+            "async_connect_bearer",
+            new=AsyncMock(return_value=(MagicMock(), MagicMock())),
         ),
+        patch.object(coordinator_mod, "MeshController", return_value=FakeController()),
         patch.object(coordinator_mod, "discovered_proxies", return_value=[]),
     ):
         coord = MeshCoordinator(hass, entry)
-        # First attempt (via start) then drive up to the failure threshold.
+        # async_start fires one probe (miss #1); drive commands up to threshold.
         await coord.async_start()
         for _ in range(UNREACHABLE_THRESHOLD - 1):
-            await coord._async_connect()
+            assert await coord.async_set_onoff(UNICAST, True) is None
 
-        assert coord.available is False  # did not raise
+        assert coord.available is False  # did not raise to the caller
         issue = ir.async_get(hass).async_get_issue(
             DOMAIN, f"proxy_unreachable_{entry.entry_id}"
         )
         assert issue is not None
         assert issue.translation_key == "proxy_unreachable"
-    await coord.async_stop()  # cancels the pending reconnect timer
+    await coord.async_stop()
 
 
-async def test_stored_seq_is_seeded_into_controller(hass) -> None:
-    """A persisted SEQ is seeded (plus the safety margin) when building the controller."""
+async def test_seq_margin_applied_once_not_per_command(hass) -> None:
+    """Seed = stored + margin on the first command; the next reuses the advanced
+    seq WITHOUT re-adding the margin (the historical per-command inflation bug)."""
     entry = _make_entry(hass)
     store = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.seq")
     await store.async_save({"seq": 0x5000})
 
-    captured: dict[str, int] = {}
+    ctor_seqs: list[int] = []
 
     def ctor(network, bearer, *, src_addr, seq):
-        captured["seq"] = seq
-        captured["src_addr"] = src_addr
-        return FakeController()
+        ctor_seqs.append(seq)
+        assert src_addr == coordinator_mod.SRC_ADDR
+        return FakeController(seq=seq)
 
     with _patch_transport(None, ctor_side_effect=ctor):
         coord = MeshCoordinator(hass, entry)
-        await coord.async_start()
+        await coord.async_start()  # one probe (get_onoff: does not advance seq)
 
-    assert captured["seq"] == 0x5000 + SEQ_SAFETY_MARGIN
-    assert captured["src_addr"] == coordinator_mod.SRC_ADDR
+        await coord.async_set_onoff(UNICAST, True)  # first real command (+1)
+        await coord.async_set_onoff(UNICAST, True)  # second real command
+
+    seeded = 0x5000 + SEQ_SAFETY_MARGIN
+    # The two explicit commands are the last two controller constructions.
+    assert ctor_seqs[-2] == seeded  # first command: stored + margin (once)
+    assert ctor_seqs[-1] == seeded + 1  # second: advanced by 1, margin NOT re-added
     await coord.async_stop()
 
 
-async def test_stop_stops_controller_and_cancels_reconnect(hass) -> None:
-    """async_stop tears down the controller and cancels a pending reconnect."""
+async def test_stop_cancels_periodic_probe(hass) -> None:
+    """async_stop cancels the periodic availability probe and goes unavailable."""
     entry = _make_entry(hass)
     fake = FakeController()
     with _patch_transport(fake):
         coord = MeshCoordinator(hass, entry)
         await coord.async_start()
         assert coord.available is True
-
-        # Arm a reconnect so we can prove async_stop cancels it.
-        coord._schedule_reconnect()
-        assert coord._reconnect_unsub is not None
+        assert coord._probe_unsub is not None
 
         await coord.async_stop()
 
-    assert fake.stopped is True
     assert coord.available is False
-    assert coord._reconnect_unsub is None
+    assert coord._probe_unsub is None
