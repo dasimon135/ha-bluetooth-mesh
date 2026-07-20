@@ -95,13 +95,14 @@ def find_proxy_address(hass: HomeAssistant, net_key: bytes) -> str | None:
 def discovered_proxies(hass: HomeAssistant) -> list[tuple[str, str]]:
     """Every 0x1828 mesh-proxy advert HA currently sees (for diagnostics).
 
-    Returns ``(address, description)`` pairs where description is either
-    ``"network_id=<hex>"`` or ``"node-identity"``. Lets the coordinator tell a
-    "no mesh proxy in range at all" miss from a "wrong network" one when it
-    surfaces the proxy_unreachable repair.
+    Scans ALL adverts (connectable and not) so the diagnostic can distinguish
+    three cases: no mesh proxy in range at all (empty), a proxy seen only by a
+    *passive* / non-connectable scanner (``connectable=no`` — HA can see it but
+    cannot connect through it), and a foreign network (a mismatching
+    ``network_id``). Returns ``(address, description)`` pairs.
     """
     out: list[tuple[str, str]] = []
-    for info in bluetooth.async_discovered_service_info(hass, connectable=True):
+    for info in bluetooth.async_discovered_service_info(hass, connectable=False):
         data = info.service_data.get(PROXY_SERVICE)
         if data is None:
             continue
@@ -109,12 +110,13 @@ def discovered_proxies(hass: HomeAssistant) -> list[tuple[str, str]]:
         if parsed is None:
             continue
         id_type, parameter = parsed
-        desc = (
+        kind = (
             f"network_id={parameter.hex()}"
             if id_type == _IDENTIFICATION_NETWORK_ID
             else "node-identity"
         )
-        out.append((info.address, desc))
+        conn = "yes" if getattr(info, "connectable", False) else "no"
+        out.append((info.address, f"{kind}, connectable={conn}"))
     return out
 
 

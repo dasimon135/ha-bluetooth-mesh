@@ -35,6 +35,7 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.storage import Store
 
 from .btmesh.controller import MeshController
+from .btmesh.crypto import k3
 from .btmesh.network_model import Network
 
 from .const import CONF_CONNECT_JSON, DOMAIN
@@ -313,10 +314,20 @@ class MeshCoordinator:
     # --------------------------------------------------------------- repairs
 
     def _raise_proxy_issue(self) -> None:
-        """Raise the proxy_unreachable repair (idempotent while active)."""
+        """Raise the proxy_unreachable repair (idempotent while active).
+
+        Includes a diagnostic of every 0x1828 mesh-proxy advert HA currently
+        sees, so a "no proxy in range" miss (``none``) can be told apart from a
+        "wrong keys" one (a foreign ``network_id=...``) straight from the UI.
+        """
         if self._issue_active:
             return
         self._issue_active = True
+        seen = discovered_proxies(self.hass)
+        seen_text = (
+            ", ".join(f"{addr} ({desc})" for addr, desc in seen) if seen else "none"
+        )
+        network_id = k3(self._network.net_key).hex()
         ir.async_create_issue(
             self.hass,
             DOMAIN,
@@ -324,7 +335,11 @@ class MeshCoordinator:
             is_fixable=False,
             severity=ir.IssueSeverity.ERROR,
             translation_key="proxy_unreachable",
-            translation_placeholders={"network": self._network.name or "mesh"},
+            translation_placeholders={
+                "network": self._network.name or "mesh",
+                "network_id": network_id,
+                "seen": seen_text,
+            },
         )
 
     def _clear_issue(self) -> None:
