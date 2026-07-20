@@ -18,6 +18,8 @@ from btmesh.access import (
     OP_GENERIC_ONOFF_GET,
     OP_GENERIC_ONOFF_SET,
     OP_GENERIC_ONOFF_STATUS,
+    OP_LIGHT_CTL_SET,
+    OP_LIGHT_CTL_STATUS,
     OP_LIGHT_CTL_TEMPERATURE_SET,
     OP_LIGHT_CTL_TEMPERATURE_STATUS,
     OP_LIGHT_LIGHTNESS_SET,
@@ -105,6 +107,14 @@ def make_setup():
                 encode_opcode(OP_LIGHT_CTL_TEMPERATURE_STATUS)
                 + temperature
                 + (0).to_bytes(2, "little", signed=True),  # present delta UV
+            )
+        elif msg.opcode == OP_LIGHT_CTL_SET:
+            # Light CTL Set params: lightness(2) + temperature(2) + delta_uv(2) + tid.
+            lightness = msg.params[0:2]
+            temperature = msg.params[2:4]
+            device.send_access(
+                msg.src,
+                encode_opcode(OP_LIGHT_CTL_STATUS) + lightness + temperature,
             )
 
     device.on_message = responder
@@ -199,6 +209,20 @@ async def test_set_lightness_clamps_out_of_range():
 
 
 # ----------------------------------------------------------- ctl temperature
+
+
+async def test_set_ctl_emits_lightness_and_kelvin():
+    controller, _, captured = make_setup()
+    await controller.start()
+    try:
+        result = await controller.set_ctl(UNICAST, 0.5, 4000)
+    finally:
+        await controller.stop()
+    assert result == 4000
+    assert captured[-1].opcode == OP_LIGHT_CTL_SET
+    # Light CTL Set: lightness(2 LE) then temperature(2 LE).
+    assert int.from_bytes(captured[-1].params[0:2], "little") == 0x8000
+    assert int.from_bytes(captured[-1].params[2:4], "little") == 4000
 
 
 async def test_set_ctl_temperature_emits_kelvin():

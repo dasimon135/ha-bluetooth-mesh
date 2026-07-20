@@ -190,10 +190,16 @@ class MeshCoordinator:
         """Set Light Lightness (0..1) on ``unicast``; None if unavailable."""
         return await self._run(lambda c: c.set_lightness(unicast, level_0_1))
 
+    async def async_set_ctl(
+        self, unicast: int, level_0_1: float, kelvin: int
+    ) -> int | None:
+        """Set Light CTL (lightness + temperature) on ``unicast``; None if unavailable."""
+        return await self._run(lambda c: c.set_ctl(unicast, level_0_1, kelvin))
+
     async def async_set_ctl_temperature(
         self, unicast: int, kelvin: int
     ) -> int | None:
-        """Set Light CTL Temperature (K) on ``unicast``; None if unavailable."""
+        """Set Light CTL Temperature only (K) on ``unicast``; None if unavailable."""
         return await self._run(lambda c: c.set_ctl_temperature(unicast, kelvin))
 
     async def _run(self, call):

@@ -47,8 +47,10 @@ class FakeCoordinator:
         self.calls.append(("set_lightness", unicast, level_0_1))
         return round(level_0_1 * 0xFFFF)
 
-    async def async_set_ctl_temperature(self, unicast: int, kelvin: int) -> int:
-        self.calls.append(("set_ctl_temperature", unicast, kelvin))
+    async def async_set_ctl(
+        self, unicast: int, level_0_1: float, kelvin: int
+    ) -> int:
+        self.calls.append(("set_ctl", unicast, level_0_1, kelvin))
         return kelvin
 
 
@@ -123,12 +125,14 @@ async def test_turn_on_brightness(hass) -> None:
 
 
 async def test_turn_on_color_temp(hass) -> None:
-    """color_temp_kelvin=4000 → set_ctl_temperature(0x000C, 4000); cached temp."""
+    """color_temp_kelvin=4000 → set_ctl(0x000C, level, 4000) keeping brightness."""
     light, coordinator = _light()
 
     await light.async_turn_on(color_temp_kelvin=4000)
 
-    assert coordinator.calls[-1] == ("set_ctl_temperature", UNICAST, 4000)
+    # Light CTL Set carries lightness + temperature; brightness defaults to full
+    # (255/255 = 1.0) when none is cached.
+    assert coordinator.calls[-1] == ("set_ctl", UNICAST, 1.0, 4000)
     assert light.color_temp_kelvin == 4000
     assert light.is_on is True
 

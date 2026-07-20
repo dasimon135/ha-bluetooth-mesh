@@ -164,34 +164,28 @@ class MeshLight(LightEntity):
 
     async def async_turn_on(self, **kwargs) -> None:
         """Apply requested temperature/brightness, else a plain on."""
-        handled = False
+        # The brightness to apply: explicit, else the last known, else full.
+        brightness = kwargs.get(
+            ATTR_BRIGHTNESS, self._brightness if self._brightness else HA_BRIGHTNESS_MAX
+        )
+        level = self._brightness_to_level(brightness)
 
         if ATTR_COLOR_TEMP_KELVIN in kwargs:
+            # Tunable white → Light CTL Set carries lightness + temperature
+            # together, so a temperature change keeps the current brightness.
             kelvin = kwargs[ATTR_COLOR_TEMP_KELVIN]
-            await self._coordinator.async_set_ctl_temperature(
-                self._unicast, kelvin
-            )
+            await self._coordinator.async_set_ctl(self._unicast, level, kelvin)
             self._color_temp_kelvin = kelvin
-            self._is_on = True
-            handled = True
-
-        if ATTR_BRIGHTNESS in kwargs:
-            brightness = kwargs[ATTR_BRIGHTNESS]
-            result = await self._coordinator.async_set_lightness(
-                self._unicast, self._brightness_to_level(brightness)
+            self._brightness = brightness
+        elif ATTR_BRIGHTNESS in kwargs:
+            result = await self._coordinator.async_set_lightness(self._unicast, level)
+            self._brightness = (
+                self._level_to_brightness(result) if result is not None else brightness
             )
-            # Prefer the mesh's confirmed level; fall back to the request.
-            if result is not None:
-                self._brightness = self._level_to_brightness(result)
-            else:
-                self._brightness = brightness
-            self._is_on = True
-            handled = True
-
-        if not handled:
+        else:
             await self._coordinator.async_set_onoff(self._unicast, True)
-            self._is_on = True
 
+        self._is_on = True
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs) -> None:

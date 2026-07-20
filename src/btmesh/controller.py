@@ -17,14 +17,17 @@ import logging
 
 from .access import (
     OP_GENERIC_ONOFF_STATUS,
+    OP_LIGHT_CTL_STATUS,
     OP_LIGHT_CTL_TEMPERATURE_STATUS,
     OP_LIGHT_LIGHTNESS_STATUS,
     encode_opcode,
     generic_onoff_get,
     generic_onoff_set,
+    light_ctl_set,
     light_ctl_temperature_set,
     light_lightness_set,
     parse_generic_onoff_status,
+    parse_light_ctl_status,
     parse_light_ctl_temperature_status,
     parse_light_lightness_status,
 )
@@ -157,10 +160,33 @@ class MeshController:
             return None
         return parse_light_lightness_status(_full_payload(resp)).present_lightness
 
+    async def set_ctl(
+        self, unicast: int, level_0_1: float, kelvin: int, *, timeout: float = 5.0
+    ) -> int | None:
+        """Set Light CTL (lightness + temperature) in one message.
+
+        Tunable-white lamps generally respond to the Light CTL Server's
+        ``Light CTL Set`` (which carries lightness, temperature and delta UV
+        together) rather than the standalone Light CTL Temperature Set. Returns
+        the present temperature, or None on timeout.
+        """
+        level = min(1.0, max(0.0, level_0_1))
+        lightness = round(level * 0xFFFF)
+        temperature = min(_CTL_TEMP_MAX, max(_CTL_TEMP_MIN, kelvin))
+        payload = light_ctl_set(lightness, temperature, 0, self._next_tid())
+        try:
+            resp = await self._node.request(
+                unicast, payload, OP_LIGHT_CTL_STATUS, timeout=timeout
+            )
+        except TimeoutError:
+            logger.debug("set_ctl(%#06x) timed out", unicast)
+            return None
+        return parse_light_ctl_status(_full_payload(resp)).present_temperature
+
     async def set_ctl_temperature(
         self, unicast: int, kelvin: int, *, timeout: float = 5.0
     ) -> int | None:
-        """Set Light CTL Temperature in Kelvin; return present temperature or None."""
+        """Set Light CTL Temperature only (Temperature Server); present temp or None."""
         temperature = min(_CTL_TEMP_MAX, max(_CTL_TEMP_MIN, kelvin))
         payload = light_ctl_temperature_set(temperature, 0, self._next_tid())
         try:
