@@ -2,3 +2,11 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.ruff_cache/
+
+# Secrets and vendor artifacts — NEVER commit these.
+# A ThingOS/Häfele ".connect" export holds the mesh NetKey/AppKey/DeviceKeys.
+# (The sanitized tests/fixtures/sample.connect.json is a *.json fixture and is
+# intentionally NOT matched by this pattern.)
+*.connect
+*.apk

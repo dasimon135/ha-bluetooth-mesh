@@ -11,12 +11,27 @@ product families of "app-only" mesh lights. Existing workarounds need either a
 discontinued vendor gateway or an experimental BlueZ `bluetooth-meshd` setup
 that cannot run on Home Assistant OS. This project removes both requirements.
 
-> **Status:** early. Phase 0 feasibility is validated on real hardware — a
-> Häfele Connect Mesh lamp is turned on/off **and** dimmed from the pure-Python
-> stack through an ESPHome Bluetooth proxy, with correct Generic OnOff / Light
-> Lightness status replies. The Home Assistant integration is a working
-> skeleton (config flow + coordinator + light platform) under active
-> development.
+> **Status:** working, validated on real hardware. A Häfele Connect Mesh
+> tunable-white lamp is controlled end-to-end from Home Assistant through an
+> ESPHome Bluetooth proxy — on/off, brightness, and colour temperature — with a
+> kept-alive proxy connection that makes commands feel instant. See
+> [What it controls](#what-it-controls) for the current capability surface.
+
+## What it controls
+
+Each provisioned lighting node becomes one Home Assistant `light` entity, with
+capabilities read from its mesh composition:
+
+| Node model | HA capability |
+| --- | --- |
+| Generic OnOff (`0x1000`) | on / off |
+| Light Lightness (`0x1300`) | + brightness |
+| Light CTL (`0x1303` / `0x1306`) | + colour temperature (tunable white) |
+
+**Not yet supported:** RGB / full-colour lamps (Light HSL / xyL). The author's
+hardware is tunable-white only, so colour is left unimplemented rather than
+shipped untested — contributions with colour hardware to validate against are
+welcome.
 
 ## Two deliverables
 
@@ -62,11 +77,17 @@ connects its proxy to the same network, and sends **standard**, app-keyed mesh
 messages (Generic OnOff Set, Light Lightness Set, …) to each node's unicast
 address.
 
-Because both sides share the same keys, the vendor app and Home Assistant
-control the **same lamps in parallel** — you keep your app, and HA drives the
-same lights. (Operational note: a mesh node has a single GATT-proxy slot, so a
-lamp stops advertising the Mesh Proxy Service while a phone holds the
-connection; power-cycle the lamp so it advertises for the proxy.)
+Because both sides share the same keys, the vendor app and Home Assistant can
+control the **same lamps** — HA drives the same lights the app provisioned.
+
+A mesh node has a **single** GATT-proxy connection slot, so Home Assistant and
+the app cannot both hold it at once. The integration keeps its proxy connection
+open by default (so commands are instant), which means the vendor app cannot
+connect while HA is loaded. If you still want to use the app, set a **keep-alive
+timeout** (Settings → Devices & Services → *Bluetooth Mesh* → **Configure**):
+after that many idle seconds HA releases the lamp so the app can take over, at
+the cost of a few-second reconnect on HA's next command. `0` = always
+connected.
 
 ## Installation
 
@@ -75,12 +96,16 @@ connection; power-cycle the lamp so it advertises for the proxy.)
    then install *Bluetooth Mesh* and restart Home Assistant.
 2. **Export your network** from the vendor app as a `.connect` file.
 3. **Add the integration** (Settings → Devices & Services → Add Integration →
-   *Bluetooth Mesh*) and import the `.connect` file when prompted. Keep this
-   file private — it contains your mesh network keys and should never be
-   committed to a repository.
+   *Bluetooth Mesh*) and paste the contents of the `.connect` file when
+   prompted. Keep this file private — it contains your mesh network keys and
+   should never be committed to a repository.
+4. *(Optional)* **Configure** the keep-alive timeout if you want to keep using
+   the vendor app — see [Coexistence](#coexistence-with-the-vendor-app-shared-keys).
 
 A Bluetooth transport is required: an ESPHome Bluetooth proxy on your network,
-or a local Bluetooth adapter usable by Home Assistant.
+or a local Bluetooth adapter usable by Home Assistant. At least one mesh lamp
+must be powered and in range of that proxy for Home Assistant to reach the
+network.
 
 ## Development
 
@@ -139,4 +164,4 @@ or the Bluetooth SIG.
 
 ## License
 
-No license has been chosen yet; all rights are reserved until one is added.
+[MIT](LICENSE) © 2026 David Simon.
