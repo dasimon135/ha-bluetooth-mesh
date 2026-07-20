@@ -50,6 +50,7 @@ __all__ = [
     "find_proxy_address",
     "async_connect_bearer",
     "async_register_proxy_callback",
+    "discovered_proxies",
 ]
 
 
@@ -89,6 +90,32 @@ def find_proxy_address(hass: HomeAssistant, net_key: bytes) -> str | None:
             )
             return info.address
     return None
+
+
+def discovered_proxies(hass: HomeAssistant) -> list[tuple[str, str]]:
+    """Every 0x1828 mesh-proxy advert HA currently sees (for diagnostics).
+
+    Returns ``(address, description)`` pairs where description is either
+    ``"network_id=<hex>"`` or ``"node-identity"``. Lets the coordinator tell a
+    "no mesh proxy in range at all" miss from a "wrong network" one when it
+    surfaces the proxy_unreachable repair.
+    """
+    out: list[tuple[str, str]] = []
+    for info in bluetooth.async_discovered_service_info(hass, connectable=True):
+        data = info.service_data.get(PROXY_SERVICE)
+        if data is None:
+            continue
+        parsed = parse_proxy_service_data(bytes(data))
+        if parsed is None:
+            continue
+        id_type, parameter = parsed
+        desc = (
+            f"network_id={parameter.hex()}"
+            if id_type == _IDENTIFICATION_NETWORK_ID
+            else "node-identity"
+        )
+        out.append((info.address, desc))
+    return out
 
 
 async def async_connect_bearer(

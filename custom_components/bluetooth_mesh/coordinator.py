@@ -38,7 +38,12 @@ from .btmesh.controller import MeshController
 from .btmesh.network_model import Network
 
 from .const import CONF_CONNECT_JSON, DOMAIN
-from .mesh_transport import async_connect_bearer, find_proxy_address
+from .mesh_transport import (
+    async_connect_bearer,
+    async_register_proxy_callback,
+    discovered_proxies,
+    find_proxy_address,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +97,9 @@ class MeshCoordinator:
         self._issue_active = False
         self._reconnect_unsub: CALLBACK_TYPE | None = None
         self._reconnect_delay = INITIAL_RECONNECT_DELAY
+        # Push discovery: HA calls us back the moment a matching 0x1828 advert
+        # appears, instead of relying only on a point-in-time snapshot.
+        self._discovery_unsub: CALLBACK_TYPE | None = None
         # Serialise commands and reconnects so a reconnect never races a
         # command against a half-built controller.
         self._lock = asyncio.Lock()
@@ -121,17 +129,20 @@ class MeshCoordinator:
         await self._async_connect()
 
     async def async_stop(self) -> None:
-        """Cancel any pending reconnect and stop the controller."""
+        """Cancel any pending reconnect/discovery and stop the controller."""
         self._stopped = True
         self._cancel_reconnect()
+        self._stop_discovery()
         await self._teardown_controller()
         self._clear_issue()
 
     async def _async_connect(self) -> None:
         """One connect attempt: find proxy → connect → start controller.
 
-        On any miss/failure it marks unavailable, raises the repair issue once
-        the miss is sustained, and schedules a backed-off retry.
+        On a miss it registers push discovery (HA calls us back when a matching
+        proxy advert appears) and schedules a backed-off snapshot retry; on
+        connect failure it retries. The repair issue is raised once the miss is
+        sustained.
         """
         async with self._lock:
             if self._stopped or self._controller is not None:
@@ -139,7 +150,13 @@ class MeshCoordinator:
 
             address = find_proxy_address(self.hass, self._network.net_key)
             if address is None:
-                logger.debug("no mesh proxy advertising our network yet")
+                seen = discovered_proxies(self.hass)
+                logger.debug(
+                    "no mesh proxy advertising our network yet; "
+                    "0x1828 adverts HA sees: %s",
+                    seen or "none",
+                )
+                self._ensure_discovery()
                 self._note_failure()
                 return
 
@@ -152,6 +169,7 @@ class MeshCoordinator:
                 await controller.start()
             except Exception as exc:  # noqa: BLE001 - MeshTransportError + bearer/GATT
                 logger.debug("mesh proxy connect failed: %s", exc)
+                self._ensure_discovery()
                 self._note_failure()
                 return
 
@@ -160,8 +178,33 @@ class MeshCoordinator:
             self._available = True
             self._fail_count = 0
             self._reconnect_delay = INITIAL_RECONNECT_DELAY
+            self._stop_discovery()
             self._clear_issue()
             logger.info("mesh proxy %s connected (seq seeded to %d)", address, seq)
+
+    # -------------------------------------------------------------- discovery
+
+    def _ensure_discovery(self) -> None:
+        """Register push discovery (idempotent): connect when a proxy appears."""
+        if self._stopped or self._discovery_unsub is not None:
+            return
+        self._discovery_unsub = async_register_proxy_callback(
+            self.hass, self._network.net_key, self._on_proxy_found
+        )
+
+    def _stop_discovery(self) -> None:
+        if self._discovery_unsub is not None:
+            self._discovery_unsub()
+            self._discovery_unsub = None
+
+    @callback
+    def _on_proxy_found(self, address: str) -> None:
+        """HA saw a matching proxy advert — attempt a connect right away."""
+        if self._stopped or self._controller is not None:
+            return
+        logger.debug("mesh proxy advert seen (%s); connecting", address)
+        self._cancel_reconnect()
+        self.hass.async_create_task(self._async_connect())
 
     async def _teardown_controller(self) -> None:
         """Stop and drop the controller/client; mark unavailable."""

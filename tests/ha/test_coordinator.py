@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -87,14 +88,15 @@ def _make_entry(hass) -> MockConfigEntry:
     return entry
 
 
+@contextlib.contextmanager
 def _patch_transport(controller, *, address=PROXY_ADDR, ctor_side_effect=None):
-    """Patch the two BLE seams and MeshController for one connect attempt."""
+    """Patch the BLE seams (transport + discovery) and MeshController."""
     kwargs = (
         {"side_effect": ctor_side_effect}
         if ctor_side_effect is not None
         else {"return_value": controller}
     )
-    return (
+    with (
         patch.object(coordinator_mod, "find_proxy_address", return_value=address),
         patch.object(
             coordinator_mod,
@@ -102,15 +104,20 @@ def _patch_transport(controller, *, address=PROXY_ADDR, ctor_side_effect=None):
             new=AsyncMock(return_value=(MagicMock(), MagicMock())),
         ),
         patch.object(coordinator_mod, "MeshController", **kwargs),
-    )
+        patch.object(
+            coordinator_mod, "async_register_proxy_callback",
+            return_value=MagicMock(),
+        ),
+        patch.object(coordinator_mod, "discovered_proxies", return_value=[]),
+    ):
+        yield
 
 
 async def test_start_connects_delegates_and_persists_seq(hass) -> None:
     """Found proxy → available, controller started, command delegated, seq saved."""
     entry = _make_entry(hass)
     fake = FakeController()
-    find, connect, ctor = _patch_transport(fake)
-    with find, connect, ctor:
+    with _patch_transport(fake):
         coord = MeshCoordinator(hass, entry)
         await coord.async_start()
 
@@ -139,7 +146,14 @@ async def test_start_connects_delegates_and_persists_seq(hass) -> None:
 async def test_no_proxy_stays_unavailable_and_raises_issue(hass) -> None:
     """No proxy → unavailable (no raise); a repair appears past the threshold."""
     entry = _make_entry(hass)
-    with patch.object(coordinator_mod, "find_proxy_address", return_value=None):
+    with (
+        patch.object(coordinator_mod, "find_proxy_address", return_value=None),
+        patch.object(
+            coordinator_mod, "async_register_proxy_callback",
+            return_value=MagicMock(),
+        ),
+        patch.object(coordinator_mod, "discovered_proxies", return_value=[]),
+    ):
         coord = MeshCoordinator(hass, entry)
         # First attempt (via start) then drive up to the failure threshold.
         await coord.async_start()
@@ -168,8 +182,7 @@ async def test_stored_seq_is_seeded_into_controller(hass) -> None:
         captured["src_addr"] = src_addr
         return FakeController()
 
-    find, connect, ctor_patch = _patch_transport(None, ctor_side_effect=ctor)
-    with find, connect, ctor_patch:
+    with _patch_transport(None, ctor_side_effect=ctor):
         coord = MeshCoordinator(hass, entry)
         await coord.async_start()
 
@@ -182,8 +195,7 @@ async def test_stop_stops_controller_and_cancels_reconnect(hass) -> None:
     """async_stop tears down the controller and cancels a pending reconnect."""
     entry = _make_entry(hass)
     fake = FakeController()
-    find, connect, ctor = _patch_transport(fake)
-    with find, connect, ctor:
+    with _patch_transport(fake):
         coord = MeshCoordinator(hass, entry)
         await coord.async_start()
         assert coord.available is True
