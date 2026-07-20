@@ -47,6 +47,11 @@ class FakeCoordinator:
         self.calls.append(("set_lightness", unicast, level_0_1))
         return round(level_0_1 * 0xFFFF)
 
+    async def async_get_lightness(self, unicast: int) -> int:
+        self.calls.append(("get_lightness", unicast))
+        # Pretend the lamp reports half brightness (0x8000 → ~128/255).
+        return 0x8000
+
     async def async_set_ctl(
         self, unicast: int, level_0_1: float, kelvin: int
     ) -> int:
@@ -182,12 +187,28 @@ async def test_turn_on_color_temp_without_temp_element_uses_ctl_set(hass) -> Non
 
 
 async def test_turn_on_no_args(hass) -> None:
-    """A bare turn_on → set_onoff(0x000C, True); is_on True."""
+    """A bare turn_on → set_onoff(True) then a lightness read-back to resync.
+
+    The node is dimmable (COLOR_TEMP), so after the plain on we read the lamp's
+    restored brightness and adopt it (0x8000 → ~128) so the display matches.
+    """
     light, coordinator = _light()
 
     await light.async_turn_on()
 
-    assert coordinator.calls[-1] == ("set_onoff", UNICAST, True)
+    assert ("set_onoff", UNICAST, True) in coordinator.calls
+    assert coordinator.calls[-1] == ("get_lightness", UNICAST)
+    assert light.brightness == pytest.approx(128, abs=1)
+    assert light.is_on is True
+
+
+async def test_turn_on_no_args_onoff_only_skips_lightness_readback(hass) -> None:
+    """An on/off-only node has no lightness, so plain on does NOT read it back."""
+    light, coordinator = _light(_onoff_only_network(), unicast=0x0020)
+
+    await light.async_turn_on()
+
+    assert coordinator.calls == [("set_onoff", 0x0020, True)]
     assert light.is_on is True
 
 

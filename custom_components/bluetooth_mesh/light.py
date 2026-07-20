@@ -199,18 +199,23 @@ class MeshLight(LightEntity):
         WITHOUT that element falls back to Light CTL Set, which must carry a
         lightness (the last known, else full), and so can move brightness.
         """
+        # Optimistic state up front so the UI reflects the tap instantly, before
+        # the mesh round-trip (~1s) completes; refined again at the end.
+        self._is_on = True
+        if ATTR_BRIGHTNESS in kwargs:
+            self._brightness = kwargs[ATTR_BRIGHTNESS]
+        if ATTR_COLOR_TEMP_KELVIN in kwargs:
+            self._color_temp_kelvin = kwargs[ATTR_COLOR_TEMP_KELVIN]
+        self.async_write_ha_state()
+
         applied = False
 
         if ATTR_BRIGHTNESS in kwargs:
-            brightness = kwargs[ATTR_BRIGHTNESS]
             result = await self._coordinator.async_set_lightness(
-                self._unicast, self._brightness_to_level(brightness)
+                self._unicast, self._brightness_to_level(kwargs[ATTR_BRIGHTNESS])
             )
-            self._brightness = (
-                self._level_to_brightness(result)
-                if result is not None
-                else brightness
-            )
+            if result is not None:  # confirmed present lightness → trust it
+                self._brightness = self._level_to_brightness(result)
             applied = True
 
         if ATTR_COLOR_TEMP_KELVIN in kwargs:
@@ -235,12 +240,18 @@ class MeshLight(LightEntity):
 
         if not applied:
             await self._coordinator.async_set_onoff(self._unicast, True)
+            # Plain on: the lamp restores its OWN last brightness, which our
+            # cache may not know. Read it back so the displayed level tracks
+            # reality (skipped for on/off-only lamps, which have no lightness).
+            if self._attr_color_mode is not ColorMode.ONOFF:
+                actual = await self._coordinator.async_get_lightness(self._unicast)
+                if actual is not None:
+                    self._brightness = self._level_to_brightness(actual)
 
-        self._is_on = True
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs) -> None:
-        """Switch the node off via Generic OnOff."""
-        await self._coordinator.async_set_onoff(self._unicast, False)
+        """Switch the node off via Generic OnOff (optimistic UI first)."""
         self._is_on = False
         self.async_write_ha_state()
+        await self._coordinator.async_set_onoff(self._unicast, False)

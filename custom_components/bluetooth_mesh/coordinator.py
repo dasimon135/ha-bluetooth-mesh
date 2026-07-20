@@ -366,6 +366,12 @@ class MeshCoordinator:
             lambda c: c.get_onoff(unicast, timeout=STATUS_TIMEOUT)
         )
 
+    async def async_get_lightness(self, unicast: int) -> int | None:
+        """Read Light Lightness (0..0xFFFF) from ``unicast``; None if unconfirmed."""
+        return await self._run_connected(
+            lambda c: c.get_lightness(unicast, timeout=STATUS_TIMEOUT)
+        )
+
     async def async_set_lightness(
         self, unicast: int, level_0_1: float
     ) -> int | None:

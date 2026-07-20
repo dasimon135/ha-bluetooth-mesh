@@ -25,6 +25,7 @@ __all__ = [
     "OP_GENERIC_ONOFF_GET",
     "OP_GENERIC_ONOFF_SET",
     "OP_GENERIC_ONOFF_STATUS",
+    "OP_LIGHT_LIGHTNESS_GET",
     "OP_LIGHT_LIGHTNESS_SET",
     "OP_LIGHT_LIGHTNESS_STATUS",
     "OP_LIGHT_CTL_SET",
@@ -76,6 +77,7 @@ __all__ = [
     "config_composition_data_get",
     "generic_onoff_get",
     "generic_onoff_set",
+    "light_lightness_get",
     "light_lightness_set",
     "light_ctl_set",
     "light_ctl_temperature_set",
@@ -101,6 +103,7 @@ OP_GENERIC_ONOFF_GET = 0x8201
 OP_GENERIC_ONOFF_SET = 0x8202
 OP_GENERIC_ONOFF_STATUS = 0x8204
 # Light Lightness model opcodes (Mesh Model spec §7.1).
+OP_LIGHT_LIGHTNESS_GET = 0x824B
 OP_LIGHT_LIGHTNESS_SET = 0x824C
 OP_LIGHT_LIGHTNESS_STATUS = 0x824E
 # Light CTL (color temperature) model opcodes (Mesh Model spec §7.1). Verified
@@ -468,6 +471,11 @@ def generic_onoff_set(onoff: bool, tid: int) -> bytes:
     if not 0 <= tid <= 0xFF:
         raise AccessError(f"TID out of range: {tid:#x}")
     return encode_opcode(OP_GENERIC_ONOFF_SET) + bytes([int(bool(onoff)), tid])
+
+
+def light_lightness_get() -> bytes:
+    """Light Lightness Get (opcode 0x824B, no params) — app-keyed (Model spec §6.3.1.1)."""
+    return encode_opcode(OP_LIGHT_LIGHTNESS_GET)
 
 
 def light_lightness_set(lightness: int, tid: int) -> bytes:

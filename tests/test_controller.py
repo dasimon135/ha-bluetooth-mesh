@@ -22,6 +22,7 @@ from btmesh.access import (
     OP_LIGHT_CTL_STATUS,
     OP_LIGHT_CTL_TEMPERATURE_SET,
     OP_LIGHT_CTL_TEMPERATURE_STATUS,
+    OP_LIGHT_LIGHTNESS_GET,
     OP_LIGHT_LIGHTNESS_SET,
     OP_LIGHT_LIGHTNESS_STATUS,
     encode_opcode,
@@ -100,6 +101,12 @@ def make_setup(tid: int = 0):
             device.send_access(
                 msg.src, encode_opcode(OP_LIGHT_LIGHTNESS_STATUS) + lightness
             )
+        elif msg.opcode == OP_LIGHT_LIGHTNESS_GET:
+            device.send_access(  # report a fixed present lightness of 0x4000
+                msg.src,
+                encode_opcode(OP_LIGHT_LIGHTNESS_STATUS)
+                + (0x4000).to_bytes(2, "little"),
+            )
         elif msg.opcode == OP_LIGHT_CTL_TEMPERATURE_SET:
             temperature = msg.params[0:2]
             device.send_access(
@@ -173,6 +180,18 @@ async def test_get_onoff_emits_get_and_returns_present():
 
 
 # ----------------------------------------------------------------- lightness
+
+
+async def test_get_lightness_emits_get_and_returns_present():
+    controller, _, captured = make_setup()
+    await controller.start()
+    try:
+        result = await controller.get_lightness(UNICAST)
+    finally:
+        await controller.stop()
+    assert result == 0x4000
+    assert captured[-1].opcode == OP_LIGHT_LIGHTNESS_GET
+    assert captured[-1].params == b""  # Get carries no parameters
 
 
 async def test_set_lightness_full_emits_max():

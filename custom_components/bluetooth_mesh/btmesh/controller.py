@@ -25,6 +25,7 @@ from .access import (
     generic_onoff_set,
     light_ctl_set,
     light_ctl_temperature_set,
+    light_lightness_get,
     light_lightness_set,
     parse_generic_onoff_status,
     parse_light_ctl_status,
@@ -155,6 +156,20 @@ class MeshController:
             logger.debug("get_onoff(%#06x) timed out", unicast)
             return None
         return bool(parse_generic_onoff_status(_full_payload(resp)).present_onoff)
+
+    async def get_lightness(
+        self, unicast: int, *, timeout: float = 5.0
+    ) -> int | None:
+        """Read Light Lightness; return present lightness (0..0xFFFF) or None."""
+        try:
+            resp = await self._node.request(
+                unicast, light_lightness_get(), OP_LIGHT_LIGHTNESS_STATUS,
+                timeout=timeout,
+            )
+        except TimeoutError:
+            logger.debug("get_lightness(%#06x) timed out", unicast)
+            return None
+        return parse_light_lightness_status(_full_payload(resp)).present_lightness
 
     async def set_lightness(
         self, unicast: int, level_0_1: float, *, timeout: float = 5.0
