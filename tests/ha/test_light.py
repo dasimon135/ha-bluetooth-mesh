@@ -133,24 +133,42 @@ async def test_turn_on_brightness(hass) -> None:
     assert light.is_on is True
 
 
-async def test_turn_on_color_temp(hass) -> None:
-    """color_temp_kelvin=4000 → CTL Temperature Set on the temp element only.
+async def test_turn_on_color_temp_while_off_also_turns_on(hass) -> None:
+    """color_temp on an OFF lamp → CTL Temperature Set (temp element) + OnOff ON.
 
     The fixture node 0x000C hosts the Light CTL Temperature server (0x1306) on
     element 1 (unicast 0x000D), so a temperature change is routed there and
-    carries NO lightness — brightness is untouched. The lamp maps temperature
-    inversely, so the wire value is mirrored (2700+6500-4000 = 5200) while HA
-    still shows 4000.
+    carries NO lightness — brightness is untouched. That message does not switch
+    the light on, so a bare temperature turn-on of an off lamp also sends OnOff
+    ON. The lamp maps temperature inversely, so the wire value is mirrored
+    (2700+6500-4000 = 5200) while HA still shows 4000.
     """
-    light, coordinator = _light()
+    light, coordinator = _light()  # a fresh entity is off
 
     await light.async_turn_on(color_temp_kelvin=4000)
 
-    assert coordinator.calls[-1] == ("set_ctl_temperature", 0x000D, 5200)
+    assert ("set_ctl_temperature", 0x000D, 5200) in coordinator.calls
+    assert ("set_onoff", UNICAST, True) in coordinator.calls  # actually lit up
     assert light.color_temp_kelvin == 4000  # display keeps the requested value
     assert light.is_on is True
     # Brightness was not sent (no set_lightness / set_ctl), so it stays unknown.
     assert not any(c[0] in ("set_ctl", "set_lightness") for c in coordinator.calls)
+
+
+async def test_turn_on_color_temp_while_on_skips_redundant_onoff(hass) -> None:
+    """Changing temperature on an already-on lamp sends ONLY the Temperature Set.
+
+    No redundant OnOff, since the lamp is already lit and the temperature message
+    leaves brightness alone.
+    """
+    light, coordinator = _light()
+    light._is_on = True  # already on
+
+    await light.async_turn_on(color_temp_kelvin=4000)
+
+    assert coordinator.calls == [("set_ctl_temperature", 0x000D, 5200)]
+    assert light.color_temp_kelvin == 4000
+    assert light.is_on is True
 
 
 async def test_turn_on_color_temp_without_temp_element_uses_ctl_set(hass) -> None:
@@ -187,28 +205,16 @@ async def test_turn_on_color_temp_without_temp_element_uses_ctl_set(hass) -> Non
 
 
 async def test_turn_on_no_args(hass) -> None:
-    """A bare turn_on → set_onoff(True) then a lightness read-back to resync.
+    """A bare turn_on → set_onoff(0x000C, True); is_on True.
 
-    The node is dimmable (COLOR_TEMP), so after the plain on we read the lamp's
-    restored brightness and adopt it (0x8000 → ~128) so the display matches.
+    Brightness is NOT read back (that caught mid-fade values); the lamp restores
+    its own last level and the cache already tracks it across off/on.
     """
     light, coordinator = _light()
 
     await light.async_turn_on()
 
-    assert ("set_onoff", UNICAST, True) in coordinator.calls
-    assert coordinator.calls[-1] == ("get_lightness", UNICAST)
-    assert light.brightness == pytest.approx(128, abs=1)
-    assert light.is_on is True
-
-
-async def test_turn_on_no_args_onoff_only_skips_lightness_readback(hass) -> None:
-    """An on/off-only node has no lightness, so plain on does NOT read it back."""
-    light, coordinator = _light(_onoff_only_network(), unicast=0x0020)
-
-    await light.async_turn_on()
-
-    assert coordinator.calls == [("set_onoff", 0x0020, True)]
+    assert coordinator.calls == [("set_onoff", UNICAST, True)]
     assert light.is_on is True
 
 

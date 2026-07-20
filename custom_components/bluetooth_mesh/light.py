@@ -190,17 +190,21 @@ class MeshLight(LightEntity):
     # ---------------------------------------------------------------- commands
 
     async def async_turn_on(self, **kwargs) -> None:
-        """Apply requested brightness and/or temperature; else a plain on.
+        """Apply requested brightness and/or temperature and ensure the lamp is on.
 
         Each attribute is applied independently so a temperature change never
-        disturbs brightness and vice-versa. Temperature goes to the Light CTL
-        Temperature server on its own element when the node exposes one — that
-        message carries no lightness, so brightness is preserved. Only a node
-        WITHOUT that element falls back to Light CTL Set, which must carry a
-        lightness (the last known, else full), and so can move brightness.
+        disturbs brightness and vice-versa: temperature goes to the Light CTL
+        Temperature server on its own element (carrying no lightness) when the
+        node exposes one, else falls back to Light CTL Set (which must carry a
+        lightness). Because that Temperature message does NOT switch the light on,
+        a turn-on that only changes temperature — or a bare turn-on — also sends
+        Generic OnOff, so the lamp actually lights instead of HA showing it on
+        while it stays dark. Brightness is tracked from the last commanded value
+        (the lamp restores it across off/on), never read back mid-fade.
         """
-        # Optimistic state up front so the UI reflects the tap instantly, before
-        # the mesh round-trip (~1s) completes; refined again at the end.
+        was_on = self._is_on
+
+        # Optimistic state up front so the UI reflects the tap instantly.
         self._is_on = True
         if ATTR_BRIGHTNESS in kwargs:
             self._brightness = kwargs[ATTR_BRIGHTNESS]
@@ -208,7 +212,10 @@ class MeshLight(LightEntity):
             self._color_temp_kelvin = kwargs[ATTR_COLOR_TEMP_KELVIN]
         self.async_write_ha_state()
 
-        applied = False
+        # Track whether any command drives lightness > 0 (which itself lights the
+        # lamp) versus a temperature-only change (which does not).
+        drove_lightness = False
+        temp_only = False
 
         if ATTR_BRIGHTNESS in kwargs:
             result = await self._coordinator.async_set_lightness(
@@ -216,37 +223,32 @@ class MeshLight(LightEntity):
             )
             if result is not None:  # confirmed present lightness → trust it
                 self._brightness = self._level_to_brightness(result)
-            applied = True
+            drove_lightness = True
 
         if ATTR_COLOR_TEMP_KELVIN in kwargs:
-            kelvin = kwargs[ATTR_COLOR_TEMP_KELVIN]
-            mesh_kelvin = self._mesh_kelvin(kelvin)
+            mesh_kelvin = self._mesh_kelvin(kwargs[ATTR_COLOR_TEMP_KELVIN])
             if self._ctl_temp_unicast is not None:
-                # Dedicated CTL Temperature element: sets ONLY temperature.
+                # Dedicated CTL Temperature element: sets ONLY temperature and
+                # does NOT switch the light on.
                 await self._coordinator.async_set_ctl_temperature(
                     self._ctl_temp_unicast, mesh_kelvin
                 )
+                temp_only = True
             else:
-                # No temperature element: Light CTL Set must carry a lightness,
-                # so reuse the last known brightness (full if never set).
+                # No temperature element: Light CTL Set carries a lightness (the
+                # last known, else full), so it also lights the lamp.
                 level = self._brightness_to_level(
                     self._brightness if self._brightness else HA_BRIGHTNESS_MAX
                 )
                 await self._coordinator.async_set_ctl(
                     self._unicast, level, mesh_kelvin
                 )
-            self._color_temp_kelvin = kelvin  # display the requested value
-            applied = True
+                drove_lightness = True
 
-        if not applied:
+        if not drove_lightness and (not temp_only or not was_on):
+            # Plain turn-on, or a temperature-only turn-on of a lamp that was
+            # off: switch it on explicitly so the optimistic on-state is true.
             await self._coordinator.async_set_onoff(self._unicast, True)
-            # Plain on: the lamp restores its OWN last brightness, which our
-            # cache may not know. Read it back so the displayed level tracks
-            # reality (skipped for on/off-only lamps, which have no lightness).
-            if self._attr_color_mode is not ColorMode.ONOFF:
-                actual = await self._coordinator.async_get_lightness(self._unicast)
-                if actual is not None:
-                    self._brightness = self._level_to_brightness(actual)
 
         self.async_write_ha_state()
 
