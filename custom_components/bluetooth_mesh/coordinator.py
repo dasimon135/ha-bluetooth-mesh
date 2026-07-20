@@ -46,7 +46,12 @@ from .btmesh.controller import MeshController
 from .btmesh.crypto import k3
 from .btmesh.network_model import Network
 
-from .const import CONF_CONNECT_JSON, DOMAIN
+from .const import (
+    CONF_CONNECT_JSON,
+    CONF_KEEPALIVE,
+    DEFAULT_KEEPALIVE,
+    DOMAIN,
+)
 from .mesh_transport import (
     async_connect_bearer,
     discovered_proxies,
@@ -99,12 +104,14 @@ COMMAND_TIMEOUT = 8.0
 # the window we still use its confirmed value; otherwise the command is optimistic.
 STATUS_TIMEOUT = 1.5
 
-# How long the proxy connection is HELD open after the last command before it is
-# dropped to free the lamp's single proxy slot. Opening a proxy connection over
-# an ESPHome BLE proxy costs several seconds, so holding it briefly makes a burst
-# of commands (toggling, dragging a slider) feel instant instead of paying that
-# cost every time; the idle drop then returns the slot to the vendor app.
-IDLE_DISCONNECT = timedelta(seconds=30)
+# Default seconds to HOLD the proxy connection open after the last command
+# before dropping it to free the lamp's single proxy slot. Opening a proxy
+# connection over an ESPHome BLE proxy costs several seconds, so holding it makes
+# a burst of commands feel instant instead of paying that cost every time. This
+# is the fallback when the config entry has no explicit keep-alive option;
+# ``0`` (the shipped default) keeps the connection always open. Overridable per
+# entry via the options flow (:data:`.const.CONF_KEEPALIVE`).
+DEFAULT_IDLE_DISCONNECT = DEFAULT_KEEPALIVE
 
 
 class MeshCoordinator:
@@ -139,10 +146,14 @@ class MeshCoordinator:
         self._issue_active = False
         self._probe_unsub: CALLBACK_TYPE | None = None
         # The HELD proxy connection (keep-alive): reused across commands and
-        # dropped after IDLE_DISCONNECT of inactivity. None while disconnected.
+        # dropped after _idle_timeout seconds of inactivity (0 = never drop).
+        # None while disconnected.
         self._client = None
         self._controller: MeshController | None = None
         self._idle_unsub: CALLBACK_TYPE | None = None
+        self._idle_timeout: int = int(
+            entry.options.get(CONF_KEEPALIVE, DEFAULT_IDLE_DISCONNECT)
+        )
         # Serialise everything through a single connection at a time: two
         # commands must never contend for the lamp's single proxy slot.
         self._lock = asyncio.Lock()
@@ -332,12 +343,16 @@ class MeshCoordinator:
                 logger.debug("client disconnect failed", exc_info=True)
 
     def _arm_idle(self) -> None:
-        """(Re)start the idle timer that drops the held connection."""
+        """(Re)start the idle timer that drops the held connection.
+
+        A non-positive :attr:`_idle_timeout` means keep-alive is permanent — the
+        connection is never dropped for inactivity (only on stop or a dead link).
+        """
         self._cancel_idle()
-        if self._stopped or self._controller is None:
+        if self._stopped or self._controller is None or self._idle_timeout <= 0:
             return
         self._idle_unsub = async_call_later(
-            self.hass, IDLE_DISCONNECT.total_seconds(), self._idle_callback
+            self.hass, self._idle_timeout, self._idle_callback
         )
 
     def _cancel_idle(self) -> None:

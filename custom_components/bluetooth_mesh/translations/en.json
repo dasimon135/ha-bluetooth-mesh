@@ -20,6 +20,20 @@
       "already_configured": "This mesh network is already configured."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Bluetooth Mesh options",
+        "description": "A mesh lamp offers a single Bluetooth proxy connection slot. Keeping it open makes commands instant, but prevents the Häfele Connect Mesh app from connecting to the lamp while this integration is loaded.",
+        "data": {
+          "keepalive_seconds": "Keep connection open for (seconds)"
+        },
+        "data_description": {
+          "keepalive_seconds": "How long to hold the proxy connection after the last command. 0 = always connected (most responsive; the Häfele app cannot use the lamp). A positive value hands the lamp back to the app after that idle time, at the cost of a few seconds to reconnect on the next command."
+        }
+      }
+    }
+  },
   "issues": {
     "proxy_unreachable": {
       "title": "No Bluetooth proxy for mesh network {network}",

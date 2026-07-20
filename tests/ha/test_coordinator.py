@@ -30,7 +30,11 @@ from homeassistant.helpers.storage import Store
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.bluetooth_mesh import coordinator as coordinator_mod
-from custom_components.bluetooth_mesh.const import CONF_CONNECT_JSON, DOMAIN
+from custom_components.bluetooth_mesh.const import (
+    CONF_CONNECT_JSON,
+    CONF_KEEPALIVE,
+    DOMAIN,
+)
 from custom_components.bluetooth_mesh.coordinator import (
     SEQ_SAFETY_MARGIN,
     STORAGE_VERSION,
@@ -179,6 +183,41 @@ async def test_command_reuses_held_connection_persists_seq_frees_on_stop(hass) -
     assert coord._controller is None
     assert fake.stopped is True
     assert client.disconnect.await_count >= 1
+
+
+async def test_keepalive_permanent_by_default_never_arms_idle(hass) -> None:
+    """Default keep-alive (0) holds the connection with NO idle-drop timer."""
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with _patch_transport(fake):
+        coord = MeshCoordinator(hass, entry)
+        assert coord._idle_timeout == 0  # shipped default: always connected
+        await coord.async_start()
+        await coord.async_set_onoff(UNICAST, True)
+        assert coord._controller is fake  # held
+        assert coord._idle_unsub is None  # but never dropped for inactivity
+        await coord.async_stop()
+
+
+async def test_keepalive_timeout_arms_and_stop_cancels_idle_drop(hass) -> None:
+    """A positive keep-alive option arms the idle-drop timer; stop cancels it."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CONNECT_JSON: FIXTURE.read_text(encoding="utf-8")},
+        options={CONF_KEEPALIVE: 30},
+        unique_id="0F0E0D0C-0B0A-0908-0706-050403020100",
+    )
+    entry.add_to_hass(hass)
+    fake = FakeController()
+    with _patch_transport(fake):
+        coord = MeshCoordinator(hass, entry)
+        assert coord._idle_timeout == 30
+        await coord.async_start()
+        await coord.async_set_onoff(UNICAST, True)
+        assert coord._controller is fake
+        assert coord._idle_unsub is not None  # idle drop scheduled
+    await coord.async_stop()
+    assert coord._idle_unsub is None  # cancelled on stop
 
 
 async def test_no_proxy_stays_unavailable_and_raises_issue(hass) -> None:

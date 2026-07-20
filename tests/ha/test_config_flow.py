@@ -20,9 +20,14 @@ pytest.importorskip("homeassistant")
 pytest.importorskip("pytest_homeassistant_custom_component")
 
 from homeassistant.data_entry_flow import FlowResultType
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.bluetooth_mesh.btmesh.network_model import Network
-from custom_components.bluetooth_mesh.const import CONF_CONNECT_JSON, DOMAIN
+from custom_components.bluetooth_mesh.const import (
+    CONF_CONNECT_JSON,
+    CONF_KEEPALIVE,
+    DOMAIN,
+)
 
 FIXTURE = (
     Path(__file__).resolve().parents[1]
@@ -85,6 +90,26 @@ async def test_user_flow_rejects_valid_json_but_not_connect(hass) -> None:
 
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "invalid_connect"}
+
+
+async def test_options_flow_sets_keepalive(hass) -> None:
+    """The options flow stores the keep-alive timeout (0 = always connected)."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CONNECT_JSON: _connect_text()},
+        unique_id="0F0E0D0C-0B0A-0908-0706-050403020100",
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "init"
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_KEEPALIVE: 120}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_KEEPALIVE] == 120
 
 
 async def test_duplicate_network_aborts(hass) -> None:
