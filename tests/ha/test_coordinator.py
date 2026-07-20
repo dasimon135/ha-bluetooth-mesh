@@ -44,12 +44,19 @@ UNICAST = 0x000C
 
 
 class FakeController:
-    """Stand-in for MeshController: records lifecycle + exposes a moving seq."""
+    """Stand-in for MeshController: records lifecycle + moving seq/tid cursors.
 
-    def __init__(self, seq: int = 0x100) -> None:
+    The coordinator now builds ``MeshController(..., seq=self._seq,
+    tid=self._tid)`` and reads back both ``controller.seq`` and
+    ``controller.tid`` after each command, so this fake must expose a ``tid``
+    attribute and advance it (like ``seq``) whenever it emits a Set message.
+    """
+
+    def __init__(self, seq: int = 0x100, tid: int = 0) -> None:
         self.started = False
         self.stopped = False
         self.seq = seq
+        self.tid = tid
         self.calls: list[tuple] = []
 
     async def start(self) -> None:
@@ -61,6 +68,7 @@ class FakeController:
     async def set_onoff(self, unicast: int, on: bool) -> bool:
         self.calls.append(("set_onoff", unicast, on))
         self.seq += 1
+        self.tid = (self.tid + 1) & 0xFF
         return on
 
     async def get_onoff(self, unicast: int) -> bool:
@@ -70,11 +78,13 @@ class FakeController:
     async def set_lightness(self, unicast: int, level_0_1: float) -> int:
         self.calls.append(("set_lightness", unicast, level_0_1))
         self.seq += 1
+        self.tid = (self.tid + 1) & 0xFF
         return round(level_0_1 * 0xFFFF)
 
     async def set_ctl_temperature(self, unicast: int, kelvin: int) -> int:
         self.calls.append(("set_ctl_temperature", unicast, kelvin))
         self.seq += 1
+        self.tid = (self.tid + 1) & 0xFF
         return kelvin
 
 
@@ -189,20 +199,26 @@ async def test_seq_margin_applied_once_not_per_command(hass) -> None:
 
     ctor_seqs: list[int] = []
 
-    def ctor(network, bearer, *, src_addr, seq):
+    def ctor(network, bearer, *, src_addr, seq, tid):
         ctor_seqs.append(seq)
         assert src_addr == coordinator_mod.SRC_ADDR
-        return FakeController(seq=seq)
+        return FakeController(seq=seq, tid=tid)
 
     with _patch_transport(None, ctor_side_effect=ctor):
         coord = MeshCoordinator(hass, entry)
-        await coord.async_start()  # one probe (get_onoff: does not advance seq)
+        # async_start awaits one probe (get_onoff: does not advance seq), so the
+        # first controller is built at the seeded cursor and the seed is NOT
+        # consumed by the probe.
+        await coord.async_start()
 
         await coord.async_set_onoff(UNICAST, True)  # first real command (+1)
         await coord.async_set_onoff(UNICAST, True)  # second real command
 
     seeded = 0x5000 + SEQ_SAFETY_MARGIN
-    # The two explicit commands are the last two controller constructions.
+    # Three controllers were built: the startup probe, then the two commands.
+    # The probe's get_onoff does not advance seq, so the first *command* still
+    # sees the seeded cursor; the second sees it advanced by exactly 1 (margin
+    # applied once, never re-added per command).
     assert ctor_seqs[-2] == seeded  # first command: stored + margin (once)
     assert ctor_seqs[-1] == seeded + 1  # second: advanced by 1, margin NOT re-added
     await coord.async_stop()
