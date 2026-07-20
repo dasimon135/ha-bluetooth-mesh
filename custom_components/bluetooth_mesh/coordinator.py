@@ -109,6 +109,11 @@ class MeshCoordinator:
             hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.seq"
         )
         self._seq = 0
+        # Persistent TID cursor: carried across on-demand controllers so
+        # consecutive Set messages (ON then OFF) never collide on the same TID
+        # and get dropped by the node as a retransmit. In-memory is enough — the
+        # node's dedup window is seconds, far shorter than a restart.
+        self._tid = 0
         self._available = False
         self._stopped = False
         self._fail_count = 0
@@ -209,13 +214,17 @@ class MeshCoordinator:
                         self.hass, address
                     )
                     controller = MeshController(
-                        self._network, bearer, src_addr=SRC_ADDR, seq=self._seq
+                        self._network, bearer, src_addr=SRC_ADDR,
+                        seq=self._seq, tid=self._tid,
                     )
                     await controller.start()
                     result = await call(controller)
-                # Advance and persist the cursor by exactly what was consumed —
-                # no margin re-added here (that is applied once, at start).
+                # Advance and persist the SEQ cursor by exactly what was consumed
+                # (no margin re-added here — that is applied once, at start), and
+                # carry the TID cursor forward so consecutive commands never
+                # reuse a TID (which the node would drop as a retransmit).
                 self._seq = controller.seq
+                self._tid = controller.tid
                 await self._store.async_save({"seq": self._seq})
                 self._set_available()
                 return result

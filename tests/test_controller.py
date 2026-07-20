@@ -64,7 +64,7 @@ class FakeBearer:
         self.on_message(MSG_TYPE_NETWORK_PDU, pdu)
 
 
-def make_setup():
+def make_setup(tid: int = 0):
     """Build a started controller wired to a device node through a FakeBearer.
 
     Returns ``(controller, bearer, captured)`` where ``captured`` is the list of
@@ -72,7 +72,7 @@ def make_setup():
     """
     network = Network.from_connect_file(FIXTURE)
     bearer = FakeBearer()
-    controller = MeshController(network, bearer)
+    controller = MeshController(network, bearer, tid=tid)
 
     captured: list[ReceivedMessage] = []
 
@@ -307,3 +307,21 @@ def test_seq_param_seeds_node_cursor():
     network = Network.from_connect_file(FIXTURE)
     controller = MeshController(network, FakeBearer(), seq=0x4321)
     assert controller.seq == 0x4321
+
+
+async def test_tid_param_seeds_cursor():
+    """TID seeds from the param so on-demand controllers don't reuse TID 0."""
+    c = MeshController(Network.from_connect_file(FIXTURE), FakeBearer(), tid=7)
+    assert c.tid == 7  # seeded
+
+
+async def test_onoff_uses_seeded_tid():
+    controller, _, captured = make_setup(tid=42)
+    await controller.start()
+    try:
+        await controller.set_onoff(UNICAST, True)
+    finally:
+        await controller.stop()
+    # Generic OnOff Set params = [onoff, tid]; tid must be the seeded 42.
+    assert captured[-1].params[1] == 42
+    assert controller.tid == 43  # advanced

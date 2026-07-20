@@ -72,6 +72,7 @@ class MeshController:
         *,
         src_addr: int = 0x7FFF,
         seq: int = 0,
+        tid: int = 0,
     ) -> None:
         self._bearer = bearer
         self._pump = BearerPump(bearer, MSG_TYPE_NETWORK_PDU)
@@ -83,7 +84,13 @@ class MeshController:
             send_network_pdu=self._pump.put,
             seq=seq,
         )
-        self._tid = 0
+        # The Generic OnOff / Lightness / CTL Set messages carry a TID; the node
+        # DEDUPLICATES consecutive Sets that share (src, TID) within a short
+        # window. So the TID must keep advancing ACROSS commands. When a fresh
+        # controller is built per command (on-demand connection), seed the TID
+        # from the caller's persistent cursor so ON then OFF don't collide on
+        # TID 0 (which would make the node ignore the second as a retransmit).
+        self._tid = tid & 0xFF
 
     # ------------------------------------------------------------- lifecycle
 
@@ -107,6 +114,11 @@ class MeshController:
     def seq(self) -> int:
         """Persistable sequence cursor (mirror to storage to avoid SEQ replay)."""
         return self._node.ctx.seq
+
+    @property
+    def tid(self) -> int:
+        """The next transaction ID; carry it across on-demand controllers."""
+        return self._tid
 
     def _next_tid(self) -> int:
         tid = self._tid
