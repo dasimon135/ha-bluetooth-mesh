@@ -17,7 +17,9 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          # 3.14: the pinned pytest-homeassistant-custom-component (and the HA
+          # release it pulls in) requires Python >= 3.14.
+          python-version: "3.14"
 
       - name: Install the library
         run: pip install -e .
