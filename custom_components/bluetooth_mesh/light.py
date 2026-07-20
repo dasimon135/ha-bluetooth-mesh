@@ -160,6 +160,22 @@ class MeshLight(LightEntity):
         """Mesh lightness (0..65535) → HA brightness (0..255)."""
         return round(level / MESH_LEVEL_MAX * HA_BRIGHTNESS_MAX)
 
+    def _mesh_kelvin(self, kelvin: int) -> int:
+        """HA color temperature → the value this lamp's CTL server expects.
+
+        The lamp maps the Light CTL temperature inversely to its warm/cool LEDs
+        (dragging toward warm produced cool and vice-versa), so mirror the
+        requested Kelvin around the midpoint of the exposed range before sending:
+        ``min + max - K``. The mirror stays inside the exposed 2700..6500 K band,
+        so the controller's spec-range clamp never triggers, and HA keeps
+        displaying the un-mirrored value the user selected.
+        """
+        return (
+            self._attr_min_color_temp_kelvin
+            + self._attr_max_color_temp_kelvin
+            - kelvin
+        )
+
     # ---------------------------------------------------------------- commands
 
     async def async_turn_on(self, **kwargs) -> None:
@@ -174,7 +190,10 @@ class MeshLight(LightEntity):
             # Tunable white → Light CTL Set carries lightness + temperature
             # together, so a temperature change keeps the current brightness.
             kelvin = kwargs[ATTR_COLOR_TEMP_KELVIN]
-            await self._coordinator.async_set_ctl(self._unicast, level, kelvin)
+            await self._coordinator.async_set_ctl(
+                self._unicast, level, self._mesh_kelvin(kelvin)
+            )
+            # Display the value the user asked for; only the wire value is mirrored.
             self._color_temp_kelvin = kelvin
             self._brightness = brightness
         elif ATTR_BRIGHTNESS in kwargs:

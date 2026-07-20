@@ -125,15 +125,19 @@ async def test_turn_on_brightness(hass) -> None:
 
 
 async def test_turn_on_color_temp(hass) -> None:
-    """color_temp_kelvin=4000 → set_ctl(0x000C, level, 4000) keeping brightness."""
+    """color_temp_kelvin=4000 → set_ctl with the MIRRORED wire temperature.
+
+    The lamp maps CTL temperature inversely, so the wire value is mirrored around
+    the exposed range (2700+6500-4000 = 5200) while HA still shows 4000.
+    """
     light, coordinator = _light()
 
     await light.async_turn_on(color_temp_kelvin=4000)
 
     # Light CTL Set carries lightness + temperature; brightness defaults to full
-    # (255/255 = 1.0) when none is cached.
-    assert coordinator.calls[-1] == ("set_ctl", UNICAST, 1.0, 4000)
-    assert light.color_temp_kelvin == 4000
+    # (255/255 = 1.0) when none is cached. Temperature is mirrored on the wire.
+    assert coordinator.calls[-1] == ("set_ctl", UNICAST, 1.0, 5200)
+    assert light.color_temp_kelvin == 4000  # display keeps the requested value
     assert light.is_on is True
 
 

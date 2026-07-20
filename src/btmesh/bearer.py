@@ -81,8 +81,11 @@ DEFAULT_MAX_FRAME = 20
 # proceeding anyway. Some proxied backends (bleak-esphome behind an ESPHome BLE
 # proxy) begin delivering Data Out notifications immediately yet never resolve
 # the ``start_notify`` await, which would hang the caller forever. The
-# subscription is active regardless, so we bound the wait and carry on.
-START_NOTIFY_TIMEOUT = 5.0
+# subscription is active within the connection handshake regardless (frames flow
+# before the await would resolve), so this is kept short: it is pure per-command
+# latency on those backends, and a command's own request/response round-trip
+# happens after it, by which point notifications are already arriving.
+START_NOTIFY_TIMEOUT = 1.0
 
 # Mesh Proxy Service advertising identification types (spec §7.2.2.2).
 IDENTIFICATION_NETWORK_ID = 0x00
