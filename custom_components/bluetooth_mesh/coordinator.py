@@ -39,7 +39,7 @@ from datetime import timedelta
 
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant
 from homeassistant.helpers import issue_registry as ir
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.storage import Store
 
 from .btmesh.controller import MeshController
@@ -76,8 +76,12 @@ SEQ_SAFETY_MARGIN = 32
 
 # How often to probe the mesh for availability. We no longer hold a connection,
 # so this light churn is the only time we take the lamp's single slot; the rest
-# of the time it is free for the vendor app.
-PROBE_INTERVAL = timedelta(minutes=2)
+# of the time it is free for the vendor app. The interval is adaptive: when the
+# lamp is reachable we probe rarely (coexistence with the app); when it is NOT,
+# we retry quickly to reconnect fast at startup and after a drop (like the
+# daikin_madoka integration's short retry).
+PROBE_INTERVAL_AVAILABLE = timedelta(minutes=2)
+PROBE_INTERVAL_UNAVAILABLE = timedelta(seconds=15)
 
 # Hard ceiling on a single connect+command cycle so a hung proxy connection can
 # never wedge the lock forever.
@@ -129,29 +133,47 @@ class MeshCoordinator:
     # -------------------------------------------------------------- lifecycle
 
     async def async_start(self) -> None:
-        """Seed the SEQ cursor once, then arm the periodic availability probe.
+        """Seed the SEQ cursor once, probe once, then self-schedule probes.
 
         Never hard-fails: if no proxy is reachable the entry still sets up and
-        the coordinator is simply unavailable until a probe or command succeeds.
-        The SEQ safety margin is applied here exactly once.
+        the coordinator retries quickly in the background until a probe or
+        command succeeds. The SEQ safety margin is applied here exactly once.
         """
         self._stopped = False
         self._seq = await self._load_seq()
-        self._probe_unsub = async_track_time_interval(
-            self.hass, self._async_probe, PROBE_INTERVAL
-        )
-        # Fire one probe now so availability reflects reality without waiting a
-        # full interval; awaited (not backgrounded) so setup sees the result.
+        # Fire one probe now so availability reflects reality without waiting;
+        # awaited (not backgrounded) so setup sees the result.
         await self._async_probe()
+        self._schedule_probe()
 
     async def async_stop(self) -> None:
-        """Cancel the periodic probe and clear the repair issue."""
+        """Cancel the pending probe and clear the repair issue."""
         self._stopped = True
+        self._cancel_probe()
+        self._available = False
+        self._clear_issue()
+
+    def _schedule_probe(self) -> None:
+        """Arm the next probe: fast while unavailable, slow while reachable."""
+        if self._stopped or self._probe_unsub is not None:
+            return
+        delay = (
+            PROBE_INTERVAL_AVAILABLE if self._available
+            else PROBE_INTERVAL_UNAVAILABLE
+        )
+        self._probe_unsub = async_call_later(
+            self.hass, delay.total_seconds(), self._probe_callback
+        )
+
+    def _cancel_probe(self) -> None:
         if self._probe_unsub is not None:
             self._probe_unsub()
             self._probe_unsub = None
-        self._available = False
-        self._clear_issue()
+
+    async def _probe_callback(self, _now) -> None:
+        self._probe_unsub = None
+        await self._async_probe()
+        self._schedule_probe()
 
     # ---------------------------------------------------------- on-demand core
 
@@ -290,10 +312,18 @@ class MeshCoordinator:
         self._clear_issue()
 
     def _set_unavailable(self) -> None:
-        """Mark unreachable; raise the repair once the miss is sustained."""
-        self._available = False
+        """Count a miss; flip to unavailable only once misses are sustained.
+
+        A single-slot mesh lamp is frequently busy for a moment (a probe lands
+        while the app or the node's own housekeeping holds the slot). Flipping
+        the entity to unavailable on the first miss would make it un-clickable
+        far too often, so we keep it available through a few transient misses
+        and only give up — marking it unavailable and raising the repair — once
+        the miss count reaches the threshold.
+        """
         self._fail_count += 1
         if self._fail_count >= UNREACHABLE_THRESHOLD:
+            self._available = False
             self._raise_proxy_issue()
 
     # --------------------------------------------------------------- repairs
