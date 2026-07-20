@@ -99,6 +99,13 @@ COMMAND_TIMEOUT = 8.0
 # the window we still use its confirmed value; otherwise the command is optimistic.
 STATUS_TIMEOUT = 1.5
 
+# How long the proxy connection is HELD open after the last command before it is
+# dropped to free the lamp's single proxy slot. Opening a proxy connection over
+# an ESPHome BLE proxy costs several seconds, so holding it briefly makes a burst
+# of commands (toggling, dragging a slider) feel instant instead of paying that
+# cost every time; the idle drop then returns the slot to the vendor app.
+IDLE_DISCONNECT = timedelta(seconds=30)
+
 
 class MeshCoordinator:
     """Own one mesh subnet's network model and on-demand commands for an entry.
@@ -131,6 +138,11 @@ class MeshCoordinator:
         self._fail_count = 0
         self._issue_active = False
         self._probe_unsub: CALLBACK_TYPE | None = None
+        # The HELD proxy connection (keep-alive): reused across commands and
+        # dropped after IDLE_DISCONNECT of inactivity. None while disconnected.
+        self._client = None
+        self._controller: MeshController | None = None
+        self._idle_unsub: CALLBACK_TYPE | None = None
         # Serialise everything through a single connection at a time: two
         # commands must never contend for the lamp's single proxy slot.
         self._lock = asyncio.Lock()
@@ -164,9 +176,12 @@ class MeshCoordinator:
         self._schedule_probe()
 
     async def async_stop(self) -> None:
-        """Cancel the pending probe and clear the repair issue."""
+        """Cancel timers, drop the held connection, and clear the repair issue."""
         self._stopped = True
         self._cancel_probe()
+        self._cancel_idle()
+        async with self._lock:
+            await self._teardown()
         self._available = False
         self._clear_issue()
 
@@ -189,100 +204,151 @@ class MeshCoordinator:
 
     async def _probe_callback(self, _now) -> None:
         self._probe_unsub = None
-        await self._async_probe()
+        # Only probe to RECOVER when we believe we are unavailable; while
+        # available we rely on real commands + the held connection, so we never
+        # churn the lamp's slot behind the user's back.
+        if not self._available:
+            await self._async_probe()
         self._schedule_probe()
 
-    # ---------------------------------------------------------- on-demand core
+    # ------------------------------------------------------- keep-alive core
+
+    async def _ensure_connected(self) -> "MeshController | None":
+        """Return a live controller, reusing the held connection or opening one.
+
+        Opening a proxy connection over an ESPHome BLE proxy costs several
+        seconds, so the connection is kept open between commands (see
+        :data:`IDLE_DISCONNECT`) and simply reused here when still alive.
+        **Bringing the connection up is the availability signal** — the mesh node
+        is on the other end of the proxy link, so control will reach it; we do
+        not depend on a Status reply for availability. Returns ``None`` (and marks
+        unavailable) when no proxy is reachable or the connect fails. Callers hold
+        :attr:`_lock`.
+        """
+        if self._controller is not None:
+            if getattr(self._client, "is_connected", True):
+                return self._controller
+            # The held link died under us; drop it and reconnect below.
+            await self._teardown()
+
+        address = find_proxy_address(self.hass, self._network.net_key)
+        if address is None:
+            seen = discovered_proxies(self.hass)
+            logger.warning(
+                "no connectable mesh proxy for network_id %s; "
+                "0x1828 adverts HA sees: %s",
+                k3(self._network.net_key).hex(),
+                seen or "none",
+            )
+            self._set_unavailable()
+            return None
+
+        try:
+            async with asyncio.timeout(CONNECT_TIMEOUT):
+                client, bearer = await async_connect_bearer(self.hass, address)
+                controller = MeshController(
+                    self._network, bearer, src_addr=SRC_ADDR,
+                    seq=self._seq, tid=self._tid,
+                )
+                await controller.start()
+        except Exception as exc:  # noqa: BLE001 - transport/GATT/connect
+            logger.debug("mesh connect failed: %s", exc)
+            await self._teardown()
+            self._set_unavailable()
+            return None
+
+        self._client = client
+        self._controller = controller
+        self._set_available()
+        return controller
 
     async def _run_connected(self, call=None):
-        """Connect on-demand, optionally run ``call(controller)``, then disconnect.
+        """Reuse (or open) the held proxy connection and run ``call(controller)``.
 
-        This is the heart of the on-demand model. Under the lock it finds the
-        proxy, opens a bearer, and starts a controller seeded from the in-memory
-        SEQ cursor. **Establishing that connection is what marks the coordinator
-        available** — the mesh node is right there on the other end of the proxy
-        link, so control will reach it. Availability deliberately does NOT depend
-        on a command's Status reply: the node does not currently forward Status
-        replies over the proxy connection, and control is fire-and-forget, so a
-        missed reply must not make the entity unavailable.
-
-        When ``call`` is ``None`` the connection is a pure reachability probe.
-        Otherwise the command runs best-effort under :data:`COMMAND_TIMEOUT`; a
-        command timeout or error is logged but never flips availability.
-
-        No matter what, the SEQ/TID the controller consumed is persisted and the
-        controller + client are torn down in the ``finally`` block, freeing the
-        lamp's single proxy slot after every cycle. Persisting the SEQ even on a
-        command failure is essential: the Set was already emitted on the wire, so
-        a later command that reused the SEQ would be silently dropped as a replay.
-
-        Returns the command's result, or ``None``.
+        Under the lock it (re)establishes the keep-alive connection, runs the
+        best-effort command under :data:`COMMAND_TIMEOUT`, persists the SEQ/TID
+        the controller consumed — even on a command error, since the Set was
+        already emitted and a reused SEQ would be dropped as a replay — and then
+        arms the idle timer that eventually frees the lamp's slot. The connection
+        itself is NOT dropped here, so the next command within the idle window
+        skips the multi-second connect. A command that actually errors (a dead
+        link, not a mere unconfirmed Status) tears the connection down so the next
+        call reconnects fresh. When ``call`` is ``None`` this is a pure
+        reachability check. Returns the command's result, or ``None``.
         """
         async with self._lock:
-            address = find_proxy_address(self.hass, self._network.net_key)
-            if address is None:
-                seen = discovered_proxies(self.hass)
-                logger.warning(
-                    "no connectable mesh proxy for network_id %s; "
-                    "0x1828 adverts HA sees: %s",
-                    k3(self._network.net_key).hex(),
-                    seen or "none",
-                )
-                self._set_unavailable()
+            self._cancel_idle()
+            controller = await self._ensure_connected()
+            if controller is None:
                 return None
 
-            client = bearer = controller = None
+            result = None
             try:
-                async with asyncio.timeout(CONNECT_TIMEOUT):
-                    client, bearer = await async_connect_bearer(
-                        self.hass, address
-                    )
-                    controller = MeshController(
-                        self._network, bearer, src_addr=SRC_ADDR,
-                        seq=self._seq, tid=self._tid,
-                    )
-                    await controller.start()
-                # Connected: the proxy link to the mesh node is up. That alone is
-                # our availability signal — do not wait on a Status reply for it.
-                self._set_available()
-                result = None
                 if call is not None:
-                    try:
-                        async with asyncio.timeout(COMMAND_TIMEOUT):
-                            result = await call(controller)
-                    except Exception as exc:  # noqa: BLE001 - status timeout etc.
-                        # The Set still reached the node on the wire; we just did
-                        # not get (or wait long enough for) a confirming Status.
-                        logger.debug(
-                            "mesh command sent but not confirmed: %s", exc
-                        )
-                return result
-            except Exception as exc:  # noqa: BLE001 - transport/GATT/connect
-                logger.debug("mesh connect failed: %s", exc)
-                self._set_unavailable()
-                return None
+                    async with asyncio.timeout(COMMAND_TIMEOUT):
+                        result = await call(controller)
+            except Exception as exc:  # noqa: BLE001 - dead link / command timeout
+                # A raised error (not a mere unconfirmed Status — those return
+                # None without raising) means the link is likely bad: drop it so
+                # the next command reconnects rather than reusing a stale handle.
+                logger.debug("mesh command failed on held link: %s", exc)
+                await self._teardown()
             finally:
-                # Persist the SEQ/TID actually consumed — even when the command
-                # timed out — so the next command never reuses a SEQ (which the
-                # node silently drops as a replay) nor a TID (dropped as a
-                # retransmit). Then disconnect cleanly; teardown failures must
-                # not mask the result.
-                if controller is not None:
-                    self._seq = controller.seq
-                    self._tid = controller.tid
-                    try:
-                        await self._store.async_save({"seq": self._seq})
-                    except Exception:  # noqa: BLE001
-                        logger.debug("seq persist failed", exc_info=True)
-                    try:
-                        await controller.stop()
-                    except Exception:  # noqa: BLE001
-                        logger.debug("controller stop failed", exc_info=True)
-                if client is not None:
-                    try:
-                        await client.disconnect()
-                    except Exception:  # noqa: BLE001
-                        logger.debug("client disconnect failed", exc_info=True)
+                # Persist whatever SEQ/TID the controller consumed, even on a
+                # failure, so a later command never reuses a SEQ (dropped as a
+                # replay) nor a TID (dropped as a retransmit).
+                self._seq = controller.seq
+                self._tid = controller.tid
+                try:
+                    await self._store.async_save({"seq": self._seq})
+                except Exception:  # noqa: BLE001
+                    logger.debug("seq persist failed", exc_info=True)
+
+            # Hold the link briefly for the next command; freed on idle timeout.
+            if self._controller is not None:
+                self._arm_idle()
+            return result
+
+    # ------------------------------------------------------- connection teardown
+
+    async def _teardown(self) -> None:
+        """Stop the controller and disconnect the held client; clear both refs.
+
+        Idempotent and best-effort — teardown failures are logged, not raised —
+        so it is safe from the idle timer, an error path, or shutdown. Callers
+        hold :attr:`_lock` (except the idle callback, which takes it first).
+        """
+        controller, client = self._controller, self._client
+        self._controller = self._client = None
+        if controller is not None:
+            try:
+                await controller.stop()
+            except Exception:  # noqa: BLE001
+                logger.debug("controller stop failed", exc_info=True)
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:  # noqa: BLE001
+                logger.debug("client disconnect failed", exc_info=True)
+
+    def _arm_idle(self) -> None:
+        """(Re)start the idle timer that drops the held connection."""
+        self._cancel_idle()
+        if self._stopped or self._controller is None:
+            return
+        self._idle_unsub = async_call_later(
+            self.hass, IDLE_DISCONNECT.total_seconds(), self._idle_callback
+        )
+
+    def _cancel_idle(self) -> None:
+        if self._idle_unsub is not None:
+            self._idle_unsub()
+            self._idle_unsub = None
+
+    async def _idle_callback(self, _now) -> None:
+        self._idle_unsub = None
+        async with self._lock:
+            await self._teardown()
 
     # --------------------------------------------------------------- commands
 
@@ -331,17 +397,24 @@ class MeshCoordinator:
     # ---------------------------------------------------------------- probe
 
     async def _async_probe(self, now=None) -> None:
-        """Periodic availability probe: just (re)establish the proxy connection.
+        """Reachability check: bring the proxy connection up, then release it.
 
-        Runs through :meth:`_run_connected` with no command, so it refreshes
-        availability (and clears/raises the repair issue) purely from whether the
-        proxy link can be brought up, while holding the lamp's slot only briefly.
-        We do not send a GET here: the node does not forward a Status back, so a
-        successful connect is the honest reachability signal.
+        Availability comes purely from whether the proxy link can be established
+        (no GET — the node does not forward a Status back). Unlike a real command
+        this does NOT hold the connection: if we were not already connected it
+        connects, records availability, and disconnects immediately so a
+        background recovery check never keeps the lamp's slot. If a command
+        connection is already held we are plainly available and do nothing.
         """
         if self._stopped:
             return
-        await self._run_connected()
+        async with self._lock:
+            if self._controller is not None:
+                return  # a held command connection already proves reachability
+            controller = await self._ensure_connected()
+            if controller is not None:
+                # Probe only — hand the slot straight back to the vendor app.
+                await self._teardown()
 
     # ----------------------------------------------------------- seq persistence
 

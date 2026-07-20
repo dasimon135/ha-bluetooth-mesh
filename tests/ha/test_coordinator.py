@@ -141,8 +141,9 @@ def _patch_transport(controller, *, address=PROXY_ADDR, ctor_side_effect=None):
         yield client
 
 
-async def test_command_connects_delegates_persists_seq_and_disconnects(hass) -> None:
-    """A command connects on-demand, delegates, saves seq, then disconnects."""
+async def test_command_reuses_held_connection_persists_seq_frees_on_stop(hass) -> None:
+    """A command runs on the kept-alive connection, saves seq, holds the link,
+    and only frees the lamp's slot on stop."""
     entry = _make_entry(hass)
     fake = FakeController()
     with _patch_transport(fake) as client:
@@ -157,10 +158,9 @@ async def test_command_connects_delegates_persists_seq_and_disconnects(hass) -> 
         assert result is True
         assert fake.calls[-1] == ("set_onoff", UNICAST, True)
 
-        # The slot was freed: the controller was stopped and the client
-        # disconnected after the command.
-        assert fake.stopped is True
-        assert client.disconnect.await_count >= 1
+        # Keep-alive: the connection is HELD after the command, not dropped, so
+        # the next command skips the multi-second connect.
+        assert coord._controller is fake
 
         # SEQ mirrored to the Store after the command.
         stored = await coord._store.async_load()
@@ -173,7 +173,12 @@ async def test_command_connects_delegates_persists_seq_and_disconnects(hass) -> 
             )
             is None
         )
+
     await coord.async_stop()
+    # Stop frees the slot: controller stopped, client disconnected, ref cleared.
+    assert coord._controller is None
+    assert fake.stopped is True
+    assert client.disconnect.await_count >= 1
 
 
 async def test_no_proxy_stays_unavailable_and_raises_issue(hass) -> None:
@@ -218,7 +223,7 @@ async def test_seq_margin_applied_once_not_per_command(hass) -> None:
         assert src_addr == coordinator_mod.SRC_ADDR
         return FakeController(seq=seq, tid=tid)
 
-    with _patch_transport(None, ctor_side_effect=ctor):
+    with _patch_transport(None, ctor_side_effect=ctor) as client:
         coord = MeshCoordinator(hass, entry)
         # async_start awaits one probe (a pure connect — sends no command, so it
         # does not advance seq), so the first controller is built at the seeded
@@ -226,13 +231,18 @@ async def test_seq_margin_applied_once_not_per_command(hass) -> None:
         await coord.async_start()
 
         await coord.async_set_onoff(UNICAST, True)  # first real command (+1)
+        # Force the second command to RECONNECT rather than reuse the held link,
+        # so we can assert a fresh controller seeds from the ADVANCED cursor (the
+        # margin is never re-added on reconnect).
+        client.is_connected = False
         await coord.async_set_onoff(UNICAST, True)  # second real command
 
     seeded = 0x5000 + SEQ_SAFETY_MARGIN
-    # Three controllers were built: the startup probe, then the two commands.
-    # The probe sends no command so it does not advance seq, so the first
-    # *command* still sees the seeded cursor; the second sees it advanced by
-    # exactly 1 (margin applied once, never re-added per command).
+    # Three controllers were built: the startup probe, the first command, and —
+    # after the forced reconnect — the second. The probe sends no command so it
+    # does not advance seq, so the first *command* still sees the seeded cursor;
+    # the reconnecting second sees it advanced by exactly 1 (margin applied once,
+    # never re-added on reconnect).
     assert ctor_seqs[-2] == seeded  # first command: stored + margin (once)
     assert ctor_seqs[-1] == seeded + 1  # second: advanced by 1, margin NOT re-added
     await coord.async_stop()
