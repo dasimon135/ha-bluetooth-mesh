@@ -75,20 +75,38 @@ def _matches_network_id(
 def find_proxy_address(hass: HomeAssistant, net_key: bytes) -> str | None:
     """Address of a connectable mesh proxy advertising ``net_key``'s Network ID.
 
-    Computes ``network_id = k3(net_key)`` and scans the current connectable
-    discovery snapshot (:func:`bluetooth.async_discovered_service_info`) for a
-    node advertising a 0x1828 Network-ID matching it. Returns the first match's
-    address, or ``None`` if none is present. The snapshot is point-in-time; the
+    Computes ``network_id = k3(net_key)`` and scans HA's **full** advertisement
+    snapshot (:func:`bluetooth.async_discovered_service_info` with
+    ``connectable=False``) for a node advertising a 0x1828 Network-ID matching
+    it, returning the first match HA can currently connect through (its
+    per-advert ``connectable`` flag is set).
+
+    Why scan the full snapshot rather than the ``connectable=True`` view: HA keeps
+    the connectable-only history and the full history as separate structures that
+    update independently, and with a *remote* (ESPHome) scanner the
+    connectable-only view can momentarily lack a proxy that the full snapshot
+    already reports as ``connectable=yes``. Scanning the full snapshot and
+    selecting on the per-advert ``connectable`` flag uses the exact data path as
+    :func:`discovered_proxies`, so discovery agrees with the diagnostic instead of
+    contradicting it. Actual connectability is re-verified at connect time by
+    :func:`async_ble_device_from_address`. The snapshot is point-in-time; the
     coordinator retries, so a transient ``None`` is expected.
     """
     network_id = k3(net_key)
-    for info in bluetooth.async_discovered_service_info(hass, connectable=True):
-        if _matches_network_id(info, network_id):
+    for info in bluetooth.async_discovered_service_info(hass, connectable=False):
+        if not _matches_network_id(info, network_id):
+            continue
+        if getattr(info, "connectable", False):
             logger.debug(
-                "mesh proxy %s advertises Network ID %s",
+                "mesh proxy %s advertises Network ID %s (connectable)",
                 info.address, network_id.hex(),
             )
             return info.address
+        logger.debug(
+            "mesh proxy %s advertises Network ID %s but only via a "
+            "non-connectable scanner; skipping",
+            info.address, network_id.hex(),
+        )
     return None
 
 

@@ -41,12 +41,15 @@ def _network_id_advert(net_key: bytes) -> bytes:
     return bytes([0x00]) + k3(net_key)
 
 
-def _fake_info(address: str, service_data: dict[str, bytes]):
+def _fake_info(
+    address: str, service_data: dict[str, bytes], connectable: bool = True
+):
     """A BluetoothServiceInfoBleak-like object (duck-typed for our code)."""
     return SimpleNamespace(
         address=address,
         device=SimpleNamespace(address=address),
         service_data=service_data,
+        connectable=connectable,
     )
 
 
@@ -65,7 +68,52 @@ def test_find_proxy_address_matches_network_id(hass) -> None:
         address = find_proxy_address(hass, NET_KEY)
 
     assert address == "AA:BB:CC:DD:EE:FF"
-    disc.assert_called_once_with(hass, connectable=True)
+    # Scans the FULL snapshot (connectable=False) and selects on the per-advert
+    # connectable flag — the same data path the diagnostic uses.
+    disc.assert_called_once_with(hass, connectable=False)
+
+
+def test_find_proxy_address_skips_non_connectable_match(hass) -> None:
+    """A matching proxy seen only by a non-connectable scanner is not used.
+
+    Its address would fail ``async_ble_device_from_address(connectable=True)`` at
+    connect time, so we must not hand it back as reachable.
+    """
+    non_conn = _fake_info(
+        "AA:BB:CC:DD:EE:FF",
+        {PROXY_SERVICE: _network_id_advert(NET_KEY)},
+        connectable=False,
+    )
+    with patch.object(
+        mesh_transport.bluetooth,
+        "async_discovered_service_info",
+        return_value=[non_conn],
+    ):
+        assert find_proxy_address(hass, NET_KEY) is None
+
+
+def test_find_proxy_address_prefers_connectable_match(hass) -> None:
+    """Skip a non-connectable match to return a later connectable one.
+
+    This is the exact bug the field diagnostic surfaced: the proxy is present and
+    connectable in the full snapshot, so discovery must find it.
+    """
+    non_conn = _fake_info(
+        "11:22:33:44:55:66",
+        {PROXY_SERVICE: _network_id_advert(NET_KEY)},
+        connectable=False,
+    )
+    conn = _fake_info(
+        "AA:BB:CC:DD:EE:FF",
+        {PROXY_SERVICE: _network_id_advert(NET_KEY)},
+        connectable=True,
+    )
+    with patch.object(
+        mesh_transport.bluetooth,
+        "async_discovered_service_info",
+        return_value=[non_conn, conn],
+    ):
+        assert find_proxy_address(hass, NET_KEY) == "AA:BB:CC:DD:EE:FF"
 
 
 def test_find_proxy_address_none_for_only_foreign(hass) -> None:
