@@ -38,6 +38,9 @@ from .coordinator import MeshCoordinator
 MODEL_GENERIC_ONOFF = 0x1000
 MODEL_LIGHT_LIGHTNESS = 0x1300
 MODEL_LIGHT_CTL = 0x1303
+# The Light CTL Temperature server lives on its OWN (secondary) element and sets
+# temperature WITHOUT touching lightness — unlike Light CTL Set on element 0.
+MODEL_LIGHT_CTL_TEMP = 0x1306
 
 # HA brightness is a 0..255 byte; mesh Lightness/CTL are 16-bit 0..65535.
 MESH_LEVEL_MAX = 0xFFFF
@@ -124,6 +127,14 @@ class MeshLight(LightEntity):
             model=model,
         )
 
+        # The Light CTL Temperature server, if any, is on its own element with
+        # its own unicast — address temperature-only changes there so brightness
+        # is left untouched. None → fall back to Light CTL Set on element 0.
+        temp_element = node.element_for_model(MODEL_LIGHT_CTL_TEMP)
+        self._ctl_temp_unicast = (
+            temp_element.unicast if temp_element is not None else None
+        )
+
         # Optimistic cache.
         self._is_on: bool = False
         self._brightness: int | None = None
@@ -179,29 +190,50 @@ class MeshLight(LightEntity):
     # ---------------------------------------------------------------- commands
 
     async def async_turn_on(self, **kwargs) -> None:
-        """Apply requested temperature/brightness, else a plain on."""
-        # The brightness to apply: explicit, else the last known, else full.
-        brightness = kwargs.get(
-            ATTR_BRIGHTNESS, self._brightness if self._brightness else HA_BRIGHTNESS_MAX
-        )
-        level = self._brightness_to_level(brightness)
+        """Apply requested brightness and/or temperature; else a plain on.
+
+        Each attribute is applied independently so a temperature change never
+        disturbs brightness and vice-versa. Temperature goes to the Light CTL
+        Temperature server on its own element when the node exposes one — that
+        message carries no lightness, so brightness is preserved. Only a node
+        WITHOUT that element falls back to Light CTL Set, which must carry a
+        lightness (the last known, else full), and so can move brightness.
+        """
+        applied = False
+
+        if ATTR_BRIGHTNESS in kwargs:
+            brightness = kwargs[ATTR_BRIGHTNESS]
+            result = await self._coordinator.async_set_lightness(
+                self._unicast, self._brightness_to_level(brightness)
+            )
+            self._brightness = (
+                self._level_to_brightness(result)
+                if result is not None
+                else brightness
+            )
+            applied = True
 
         if ATTR_COLOR_TEMP_KELVIN in kwargs:
-            # Tunable white → Light CTL Set carries lightness + temperature
-            # together, so a temperature change keeps the current brightness.
             kelvin = kwargs[ATTR_COLOR_TEMP_KELVIN]
-            await self._coordinator.async_set_ctl(
-                self._unicast, level, self._mesh_kelvin(kelvin)
-            )
-            # Display the value the user asked for; only the wire value is mirrored.
-            self._color_temp_kelvin = kelvin
-            self._brightness = brightness
-        elif ATTR_BRIGHTNESS in kwargs:
-            result = await self._coordinator.async_set_lightness(self._unicast, level)
-            self._brightness = (
-                self._level_to_brightness(result) if result is not None else brightness
-            )
-        else:
+            mesh_kelvin = self._mesh_kelvin(kelvin)
+            if self._ctl_temp_unicast is not None:
+                # Dedicated CTL Temperature element: sets ONLY temperature.
+                await self._coordinator.async_set_ctl_temperature(
+                    self._ctl_temp_unicast, mesh_kelvin
+                )
+            else:
+                # No temperature element: Light CTL Set must carry a lightness,
+                # so reuse the last known brightness (full if never set).
+                level = self._brightness_to_level(
+                    self._brightness if self._brightness else HA_BRIGHTNESS_MAX
+                )
+                await self._coordinator.async_set_ctl(
+                    self._unicast, level, mesh_kelvin
+                )
+            self._color_temp_kelvin = kelvin  # display the requested value
+            applied = True
+
+        if not applied:
             await self._coordinator.async_set_onoff(self._unicast, True)
 
         self._is_on = True

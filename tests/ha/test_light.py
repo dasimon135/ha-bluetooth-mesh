@@ -53,6 +53,10 @@ class FakeCoordinator:
         self.calls.append(("set_ctl", unicast, level_0_1, kelvin))
         return kelvin
 
+    async def async_set_ctl_temperature(self, unicast: int, kelvin: int) -> int:
+        self.calls.append(("set_ctl_temperature", unicast, kelvin))
+        return kelvin
+
 
 def _fixture_network() -> Network:
     """The fabricated sample network (node 0x000C has 0x1000+0x1300+0x1303)."""
@@ -125,20 +129,56 @@ async def test_turn_on_brightness(hass) -> None:
 
 
 async def test_turn_on_color_temp(hass) -> None:
-    """color_temp_kelvin=4000 → set_ctl with the MIRRORED wire temperature.
+    """color_temp_kelvin=4000 → CTL Temperature Set on the temp element only.
 
-    The lamp maps CTL temperature inversely, so the wire value is mirrored around
-    the exposed range (2700+6500-4000 = 5200) while HA still shows 4000.
+    The fixture node 0x000C hosts the Light CTL Temperature server (0x1306) on
+    element 1 (unicast 0x000D), so a temperature change is routed there and
+    carries NO lightness — brightness is untouched. The lamp maps temperature
+    inversely, so the wire value is mirrored (2700+6500-4000 = 5200) while HA
+    still shows 4000.
     """
     light, coordinator = _light()
 
     await light.async_turn_on(color_temp_kelvin=4000)
 
-    # Light CTL Set carries lightness + temperature; brightness defaults to full
-    # (255/255 = 1.0) when none is cached. Temperature is mirrored on the wire.
-    assert coordinator.calls[-1] == ("set_ctl", UNICAST, 1.0, 5200)
+    assert coordinator.calls[-1] == ("set_ctl_temperature", 0x000D, 5200)
     assert light.color_temp_kelvin == 4000  # display keeps the requested value
     assert light.is_on is True
+    # Brightness was not sent (no set_lightness / set_ctl), so it stays unknown.
+    assert not any(c[0] in ("set_ctl", "set_lightness") for c in coordinator.calls)
+
+
+async def test_turn_on_color_temp_without_temp_element_uses_ctl_set(hass) -> None:
+    """A CTL node WITHOUT a 0x1306 element falls back to Light CTL Set.
+
+    Then temperature must carry a lightness (full when none cached), mirrored on
+    the wire exactly as before.
+    """
+    # element 0 has the CTL server (0x1303) but there is NO 0x1306 element.
+    element0 = Element(
+        index=0,
+        unicast=0x0030,
+        models=(
+            Model(model_id=0x1000, bound_appkey_indexes=(0,)),
+            Model(model_id=0x1300, bound_appkey_indexes=(0,)),
+            Model(model_id=0x1303, bound_appkey_indexes=(0,)),
+        ),
+    )
+    node = Node(
+        uuid="99998888-7777-6666-5555-444433332222",
+        unicast=0x0030,
+        device_key=b"\x00" * 16,
+        cid=0x07E9,
+        name="CTL no temp element",
+        elements=(element0,),
+    )
+    net = replace(_fixture_network(), nodes=(node,))
+    light, coordinator = _light(network=net, unicast=0x0030)
+
+    await light.async_turn_on(color_temp_kelvin=4000)
+
+    assert coordinator.calls[-1] == ("set_ctl", 0x0030, 1.0, 5200)
+    assert light.color_temp_kelvin == 4000
 
 
 async def test_turn_on_no_args(hass) -> None:
