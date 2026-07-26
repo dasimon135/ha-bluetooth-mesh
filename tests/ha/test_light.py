@@ -23,7 +23,12 @@ pytest.importorskip("pytest_homeassistant_custom_component")
 
 from homeassistant.components.light import ColorMode
 
-from custom_components.bluetooth_mesh.btmesh.network_model import Element, Model, Network, Node
+from custom_components.bluetooth_mesh.btmesh.network_model import (
+    Element,
+    Model,
+    Network,
+    Node,
+)
 from custom_components.bluetooth_mesh.light import MeshLight, async_setup_entry
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "sample.connect.json"

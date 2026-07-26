@@ -22,7 +22,7 @@ from btmesh.access import (
 from btmesh.crypto import k4
 from btmesh.errors import BtMeshError
 from btmesh.node import MeshNode, ReceivedMessage
-from btmesh.transport import SegmentAck, encrypt_access, build_unsegmented_access
+from btmesh.transport import SegmentAck, build_unsegmented_access, encrypt_access
 
 NET_KEY = bytes.fromhex("7dd7364cd842ad18c17c2b820c84c3d6")
 APP_KEY = bytes.fromhex("63964771734fbd76e3b40519d1d94a48")

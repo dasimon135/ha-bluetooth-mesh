@@ -10,11 +10,10 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import provision_and_toggle as pt
 import pytest
 
-import provision_and_toggle as pt
 from btmesh.bearer import BearerError
-
 
 # ------------------------------------------------------------------- state
 

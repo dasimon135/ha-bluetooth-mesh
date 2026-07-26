@@ -46,6 +46,16 @@ def test_manifest_core_fields() -> None:
     assert "bluetooth" in manifest["dependencies"]
 
 
+def test_iot_class_is_polling_not_push() -> None:
+    """Nothing pushes: state is read when the mesh becomes reachable.
+
+    ``local_push`` claims the device tells Home Assistant about changes on its
+    own. This integration subscribes to no unsolicited publication — it asks.
+    Claiming otherwise misleads anyone reading the integration list.
+    """
+    assert _load_manifest()["iot_class"] == "local_polling"
+
+
 def test_manifest_version_matches_the_library() -> None:
     """The integration and the vendored library ship as one version.
 
@@ -75,6 +85,17 @@ def test_hacs_json_has_no_domains_key() -> None:
     }
     assert set(hacs).issubset(allowed), f"unexpected hacs.json keys: {set(hacs)}"
     assert hacs["name"] == "Bluetooth Mesh"
+
+
+def test_hacs_declares_a_minimum_core_version() -> None:
+    """The integration uses APIs older cores do not have.
+
+    ``entry.runtime_data`` (2024.6) and PEP 695 ``type`` aliases (Python 3.12)
+    both fail at import time on an older core; without this key HACS would
+    happily install it and the user would get a traceback instead of a reason.
+    """
+    hacs = json.loads((REPO_ROOT / "hacs.json").read_text(encoding="utf-8"))
+    assert hacs["homeassistant"] == "2024.6.0"
 
 
 def test_domain_const_matches_manifest() -> None:
@@ -124,9 +145,8 @@ async def test_setup_and_unload_entry() -> None:
     """
     pytest.importorskip("pytest_homeassistant_custom_component")
 
-    from unittest.mock import AsyncMock, MagicMock, patch
-
     import importlib
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     module = importlib.import_module("custom_components.bluetooth_mesh")
 

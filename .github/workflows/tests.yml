@@ -7,6 +7,26 @@ on:
   workflow_dispatch:
 
 jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # Pinned: ruff's default rule set grows between releases, and a lint job
+      # that changes shape on its own fails for reasons unrelated to the commit.
+      - name: Install ruff
+        run: pip install ruff==0.16.0
+
+      - name: Run ruff
+        run: ruff check .
+
   pytest:
     name: pytest (library + HA integration)
     runs-on: ubuntu-latest
@@ -33,10 +53,11 @@ jobs:
       - name: Install Home Assistant + test dependencies
         run: pip install -r requirements-test.txt
 
-      # Runs tests/*.py (pure btmesh library) and tests/ha/*.py (HA integration)
-      # in one pass. On Linux the fcntl/resource modules exist natively so the
-      # tests/ha/_winshims shims are inert, and Home Assistant is installed so
-      # the pytest.importorskip guards in tests/ha do not trigger — the HA tests
-      # run for real.
+      # No path argument: pyproject's `testpaths` covers tests/ (the library
+      # and the HA integration) AND phase0/tests, so the harness suite cannot
+      # rot unnoticed the way it did while CI ran `pytest tests`. On Linux the
+      # fcntl/resource modules exist natively so the tests/ha/_winshims shims
+      # are inert, and Home Assistant is installed so the pytest.importorskip
+      # guards in tests/ha do not trigger — the HA tests run for real.
       - name: Run tests
-        run: pytest tests -q
+        run: pytest -q

@@ -13,9 +13,8 @@ the daikin_madoka venv (HA + HHCC)::
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 import contextlib
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest

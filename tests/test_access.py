@@ -373,7 +373,7 @@ def test_parse_composition_data_truncated_raises():
 
 
 def test_vendor_group_onoff_set_bytes():
-    from btmesh.access import vendor_group_onoff_set, HAEFELE_COMPANY_ID
+    from btmesh.access import HAEFELE_COMPANY_ID, vendor_group_onoff_set
 
     # C2 (SET) + E9 07 (company 0x07E9 LE) + 01 (ON) + 05 (tid)
     assert vendor_group_onoff_set(HAEFELE_COMPANY_ID, True, 5) == bytes.fromhex("c2e9070105")
@@ -384,7 +384,12 @@ def test_vendor_group_onoff_set_bytes():
 
 
 def test_vendor_opcode_roundtrips_through_parse_access():
-    from btmesh.access import vendor_opcode, parse_access, VD_GROUP_G_STATUS, HAEFELE_COMPANY_ID
+    from btmesh.access import (
+        HAEFELE_COMPANY_ID,
+        VD_GROUP_G_STATUS,
+        parse_access,
+        vendor_opcode,
+    )
 
     op = vendor_opcode(VD_GROUP_G_STATUS, HAEFELE_COMPANY_ID)
     # Status on the wire: C4 E9 07 <sub_op>
@@ -394,7 +399,7 @@ def test_vendor_opcode_roundtrips_through_parse_access():
 
 
 def test_config_model_app_bind_vendor_bytes():
-    from btmesh.access import config_model_app_bind_vendor, HAEFELE_COMPANY_ID
+    from btmesh.access import HAEFELE_COMPANY_ID, config_model_app_bind_vendor
 
     # 803D + elem 0003 LE + appidx 0000 LE + company E9 07 LE + model 0010 LE
     got = config_model_app_bind_vendor(0x0003, 0, HAEFELE_COMPANY_ID, 0x1000)

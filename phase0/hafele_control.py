@@ -21,6 +21,18 @@ import asyncio
 import json
 import logging
 
+from provision_and_toggle import (
+    SCAN_PROXY_S,
+    BearerPump,
+    EsphomeTransport,
+    LocalTransport,
+    Phase0Failure,
+    _full_payload,
+    open_gatt_session,
+    print_diagnostic,
+    setup_logging,
+)
+
 from btmesh.access import (
     OP_GENERIC_ONOFF_STATUS,
     OP_LIGHT_LIGHTNESS_STATUS,
@@ -34,18 +46,6 @@ from btmesh.crypto import k3
 from btmesh.errors import BtMeshError
 from btmesh.node import MeshNode
 from btmesh.proxy_pdu import MSG_TYPE_NETWORK_PDU
-
-from provision_and_toggle import (
-    SCAN_PROXY_S,
-    BearerPump,
-    EsphomeTransport,
-    LocalTransport,
-    Phase0Failure,
-    _full_payload,
-    open_gatt_session,
-    print_diagnostic,
-    setup_logging,
-)
 
 logger = logging.getLogger("phase0")
 

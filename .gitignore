@@ -10,3 +10,6 @@ __pycache__/
 # intentionally NOT matched by this pattern.)
 *.connect
 *.apk
+
+# Local agent definitions (per-machine tooling, not project content).
+.claude/

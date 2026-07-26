@@ -22,12 +22,12 @@ from btmesh.transport import (
     TransportError,
     UnknownControl,
     UnsegmentedAccess,
+    build_unsegmented_access,
     decrypt_access,
     encrypt_access,
     parse_access_lower,
     parse_control_lower,
     segment_access_message,
-    build_unsegmented_access,
 )
 
 # §8.3 sample security material.

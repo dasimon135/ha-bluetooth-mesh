@@ -45,7 +45,6 @@ from homeassistant.helpers.storage import Store
 from .btmesh.controller import MeshController
 from .btmesh.crypto import k3
 from .btmesh.network_model import Network
-
 from .const import (
     CONF_CONNECT_JSON,
     CONF_KEEPALIVE,

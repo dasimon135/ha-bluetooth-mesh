@@ -32,7 +32,6 @@ from homeassistant.helpers.selector import (
 )
 
 from .btmesh.network_model import Network, NetworkModelError
-
 from .const import CONF_CONNECT_JSON, CONF_KEEPALIVE, DEFAULT_KEEPALIVE, DOMAIN
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
