@@ -107,7 +107,9 @@ setting a `self._failed` flag; expose `failed` (or `pump.failure`) and make
 or let commands raise once failed so `_run_connected`'s existing `except`
 already tears down.
 
-### 1.3 (P2) Colour temperature is mirrored for *every* lamp
+### 1.3 (P2) Colour temperature is mirrored for *every* lamp — **DONE (v0.3.0)**
+
+> Gated on the Häfele company identifier (`_INVERTED_CTL_CIDS`).
 
 `light.py:174-188`. `_mesh_kelvin()` unconditionally sends `min + max - K` to
 work around the Häfele/ThingOS inverted CTL mapping. The README advertises
@@ -116,7 +118,9 @@ end-to-end. Gate it on the vendor CID (`node.cid == 0x07E9`, already parsed and
 already used for the manufacturer name) or expose an "invert colour
 temperature" option, defaulting to the quirk only for known-affected CIDs.
 
-### 1.4 (P2) Availability only refreshes through an accidental 30 s poll
+### 1.4 (P2) Availability only refreshes through an accidental 30 s poll — **DONE (v0.2.0)**
+
+> `MeshCoordinator.async_add_listener()` + `should_poll = False`.
 
 `light.py:145-148` reads `self._coordinator.available`, but the coordinator has
 no listener registry and never notifies entities when `_set_available()` /
@@ -210,7 +214,11 @@ unlock:
 Scope: one codec module (~80 lines + tests) in `src/btmesh`, one call in
 `MeshController.start()`, and re-opening `STATUS_TIMEOUT`.
 
-### 2.2 (P1 robustness) Track the IV Index from the Secure Network Beacon
+### 2.2 (P1 robustness) Track the IV Index from the Secure Network Beacon — **DONE (v0.3.0)**
+
+> Implemented and hardware-validated: the lamp's beacon authenticates against
+> the imported NetKey and confirms IV Index 0. Adoption restarts the SEQ cursor
+> and drops the live link so the next connection rebuilds on the new index.
 
 The IV Index is hard-coded to whatever the export says, defaulting to **0**
 (`network_model.py:112-113, 153`), and `network.decode()` rejects any PDU whose
@@ -265,7 +273,8 @@ window.
 
 ### 2.8 (P3) Missing HA surfaces
 
-* **`diagnostics.py`** — this integration's entire support burden is "which
+* ~~**`diagnostics.py`**~~ — **DONE (v0.3.0)**, redaction asserted by test.
+* **Originally:** this integration's entire support burden is "which
   proxy sees what". A redacted dump (Network ID, IV Index, SEQ cursor,
   keep-alive, node/element/model inventory, `discovered_proxies()` output,
   connection state) would replace most log requests. **Must redact** NetKey,
@@ -360,9 +369,11 @@ noted only so it is not "fixed" by accident.
 
 1. ~~§1.1 client leak + §1.2 dead pump~~ and ~~§3.1 vendoring `--check`~~ —
    **done 2026-07-26**.
-2. §3.2 `iot_class`, §3.3 ruff — short, protects everything after it.
-3. ~~§2.1 proxy filter~~ — **done 2026-07-26**, pending hardware validation.
-4. §1.3 CTL mirror gating, §1.4 availability listener, §1.5 unique_id fallback.
+2. ~~§2.1 proxy filter~~, ~~§1.3 CTL mirror~~, ~~§1.4 availability listener~~,
+   ~~§2.2 IV Index tracking~~, ~~§2.8 diagnostics~~ — **shipped in v0.2.0–v0.3.0,
+   all hardware-validated.**
+3. §3.2 `iot_class` (still `local_push`; `local_polling` is the honest value
+   until unsolicited publications are subscribed to), §3.3 ruff.
+4. §1.5 unique_id fallback, §1.6 tolerant node parsing, §1.7 ConfigEntryError.
 5. §2.4 delayed SEQ save, §2.5 background first probe, §2.3 push discovery.
-6. §2.2 Secure Network Beacon / IV Index tracking, then §2.8 diagnostics +
-   reconfigure + restore.
+6. §2.8 remainder: reconfigure flow, RestoreEntity, provisioning.
