@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] — 2026-07-26
 
 ### Added
 
@@ -28,6 +28,14 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Status codecs, plus `MeshNode.build_proxy_config_pdu` and
   `MeshNode.parse_proxy_config_pdu` for the `CTL=1, TTL=0` network PDU they
   travel in.
+- **Lamps are read, not guessed.** The optimistic cache starts blank, so a lamp
+  that was physically lit came back as *off* after every restart and stayed
+  wrong until someone touched it. Each light now reads Generic OnOff — and
+  Light Lightness when it is on and dimmable — as soon as the mesh becomes
+  reachable, and again after every reconnection, which also catches what
+  changed while Home Assistant was away. Colour temperature is not read back
+  yet. An unanswered read leaves the cache untouched rather than inventing a
+  state.
 
 ### Fixed
 
@@ -36,6 +44,10 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   slider to the value it was passing through. Set commands return the
   *target* — where the lamp is heading — and fall back to the present value
   only when no transition is running.
+- **Availability changes reach the UI immediately.** Entities read the
+  coordinator's availability directly, so a change only surfaced through Home
+  Assistant's default 30-second entity poll. The coordinator now notifies its
+  entities on an availability transition and the lights no longer poll at all.
 
 ## [0.1.1] — 2026-07-26
 
@@ -99,5 +111,6 @@ ESPHome Bluetooth proxy.
   made from the vendor app in parallel are not read back until HA's next
   command.
 
+[0.2.0]: https://github.com/dasimon135/ha-bluetooth-mesh/releases/tag/v0.2.0
 [0.1.1]: https://github.com/dasimon135/ha-bluetooth-mesh/releases/tag/v0.1.1
 [0.1.0]: https://github.com/dasimon135/ha-bluetooth-mesh/releases/tag/v0.1.0
