@@ -26,7 +26,7 @@ from homeassistant.components.light import (
     ColorMode,
     LightEntity,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -92,6 +92,9 @@ class MeshLight(LightEntity):
 
     _attr_has_entity_name = True
     _attr_name = None
+    # Availability and state are pushed by the coordinator (see
+    # async_added_to_hass); there is nothing for Home Assistant to poll.
+    _attr_should_poll = False
 
     def __init__(self, coordinator: MeshCoordinator, node) -> None:
         self._coordinator = coordinator
@@ -139,6 +142,62 @@ class MeshLight(LightEntity):
         self._is_on: bool = False
         self._brightness: int | None = None
         self._color_temp_kelvin: int | None = None
+
+    # -------------------------------------------------------------- lifecycle
+
+    async def async_added_to_hass(self) -> None:
+        """Track the coordinator and seed the cache from the lamp itself.
+
+        Reading is only attempted while the mesh is actually reachable. At Home
+        Assistant startup the entity is added before the Bluetooth proxies have
+        finished registering their scanners, so a read fired here finds no proxy
+        and answers nothing — hence the subscription: the read happens when the
+        coordinator BECOMES available, and again after every reconnection, which
+        also catches whatever changed while we were away.
+        """
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self._coordinator.async_add_listener(self._handle_availability)
+        )
+        if self._coordinator.available:
+            self._schedule_refresh()
+
+    @callback
+    def _handle_availability(self) -> None:
+        """Push the availability change to HA, and re-read when back online."""
+        self.async_write_ha_state()
+        if self._coordinator.available:
+            self._schedule_refresh()
+
+    def _schedule_refresh(self) -> None:
+        """Read the lamp in the background; a round trip must not block setup."""
+        self.hass.async_create_background_task(
+            self.async_refresh_state(),
+            f"bluetooth_mesh refresh {self._unicast:04x}",
+        )
+
+    async def async_refresh_state(self) -> None:
+        """Ask the lamp what it is actually doing and cache the answer.
+
+        The optimistic cache starts blank, so before this a lamp that was
+        physically lit came back as *off* after every Home Assistant restart and
+        stayed wrong until someone touched it. Reading it is only possible now
+        that the proxy address filter lets Status replies through.
+
+        Best-effort: an unanswered GET leaves the cache exactly as it was —
+        never invent a state from silence.
+        """
+        on = await self._coordinator.async_get_onoff(self._unicast)
+        if on is None:
+            return
+        self._is_on = on
+        # An off lamp reports lightness 0, which is not a brightness worth
+        # showing — HA wants no brightness at all while off.
+        if on and self._attr_color_mode is not ColorMode.ONOFF:
+            level = await self._coordinator.async_get_lightness(self._unicast)
+            if level is not None:
+                self._brightness = self._level_to_brightness(level)
+        self.async_write_ha_state()
 
     # ------------------------------------------------------------- properties
 

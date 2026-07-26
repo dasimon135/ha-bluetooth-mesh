@@ -34,10 +34,30 @@ MESH_UUID = "0F0E0D0C-0B0A-0908-0706-050403020100"
 class FakeCoordinator:
     """Minimal coordinator: a real Network + recorded async_set_* calls."""
 
-    def __init__(self, network: Network, *, available: bool = True) -> None:
+    def __init__(
+        self,
+        network: Network,
+        *,
+        available: bool = True,
+        onoff: bool | None = True,
+        lightness: int | None = 0x8000,
+    ) -> None:
         self.network = network
         self.available = available
         self.calls: list[tuple] = []
+        # What the lamp reports when asked (None = it stayed silent).
+        self.onoff = onoff
+        self.lightness = lightness
+        self.listeners: list = []
+
+    def async_add_listener(self, callback_):
+        """Mirror the real coordinator: notified on availability changes."""
+        self.listeners.append(callback_)
+        return lambda: self.listeners.remove(callback_)
+
+    def fire(self) -> None:
+        for callback_ in list(self.listeners):
+            callback_()
 
     async def async_set_onoff(self, unicast: int, on: bool) -> bool:
         self.calls.append(("set_onoff", unicast, on))
@@ -50,7 +70,11 @@ class FakeCoordinator:
     async def async_get_lightness(self, unicast: int) -> int:
         self.calls.append(("get_lightness", unicast))
         # Pretend the lamp reports half brightness (0x8000 → ~128/255).
-        return 0x8000
+        return self.lightness
+
+    async def async_get_onoff(self, unicast: int) -> bool | None:
+        self.calls.append(("get_onoff", unicast))
+        return self.onoff
 
     async def async_set_ctl(
         self, unicast: int, level_0_1: float, kelvin: int
@@ -235,3 +259,119 @@ async def test_onoff_only_node_is_onoff_mode(hass) -> None:
 
     assert light.supported_color_modes == {ColorMode.ONOFF}
     assert light.color_mode == ColorMode.ONOFF
+
+
+# --------------------------------------------------- real state at startup
+
+
+async def test_refresh_state_reads_the_lamp(hass) -> None:
+    """Startup state comes from the lamp, not from an empty optimistic cache.
+
+    After a Home Assistant restart the cache starts blank, so a lamp that is
+    physically lit showed as off until someone touched it. Now that the proxy
+    filter lets Status replies through, the entity can simply ask.
+    """
+    light, coordinator = _light()
+    assert light.is_on is False  # blank cache before asking
+
+    await light.async_refresh_state()
+
+    assert ("get_onoff", UNICAST) in coordinator.calls
+    assert light.is_on is True
+    assert light.brightness == 128  # 0x8000 of 0xFFFF
+
+
+async def test_refresh_state_keeps_the_cache_when_the_mesh_is_silent(hass) -> None:
+    """An unanswered GET must not invent a state."""
+    light, coordinator = _light()
+    coordinator.onoff = None
+    light._is_on = True
+    light._brightness = 42
+
+    await light.async_refresh_state()
+
+    assert light.is_on is True  # untouched
+    assert light.brightness == 42
+    assert ("get_lightness", UNICAST) not in coordinator.calls
+
+
+async def test_refresh_state_does_not_read_brightness_of_an_off_lamp(hass) -> None:
+    """An off lamp reports lightness 0; HA wants no brightness at all then."""
+    light, coordinator = _light()
+    coordinator.onoff = False
+
+    await light.async_refresh_state()
+
+    assert light.is_on is False
+    assert light.brightness is None
+    assert ("get_lightness", UNICAST) not in coordinator.calls
+
+
+async def test_refresh_state_skips_brightness_for_an_onoff_only_node(hass) -> None:
+    """A Generic OnOff node has no lightness server to ask."""
+    light, coordinator = _light(_onoff_only_network(), unicast=0x0020)
+
+    await light.async_refresh_state()
+
+    assert light.is_on is True
+    assert [c[0] for c in coordinator.calls] == ["get_onoff"]
+
+
+async def test_added_to_hass_refreshes_in_the_background(hass) -> None:
+    """Setup must not block on a mesh round trip, but must still refresh."""
+    light, coordinator = _light()
+    light.hass = hass
+    light.entity_id = "light.mesh_test"
+
+    await light.async_added_to_hass()
+    await hass.async_block_till_done()
+
+    assert ("get_onoff", UNICAST) in coordinator.calls
+    assert light.is_on is True
+
+
+async def test_no_refresh_while_the_mesh_is_unreachable(hass) -> None:
+    """Asking an unreachable mesh is pointless — and the answer would be None."""
+    light, coordinator = _light()
+    coordinator.available = False
+    light.hass = hass
+    light.entity_id = "light.mesh_test"
+
+    await light.async_added_to_hass()
+    await hass.async_block_till_done()
+
+    assert coordinator.calls == []
+
+
+async def test_refreshes_when_the_mesh_becomes_reachable(hass) -> None:
+    """The startup race is why this exists.
+
+    At Home Assistant startup the entity is added before the ESPHome proxies
+    have finished registering their scanners, so the mesh is not yet reachable
+    and a one-shot read finds no proxy, returns None and never retries — the
+    lamp stayed shown as off (observed live 2026-07-26). Refreshing when the
+    coordinator BECOMES available fixes that, and re-reads after every
+    reconnection too, catching whatever changed while we were away.
+    """
+    light, coordinator = _light()
+    coordinator.available = False
+    light.hass = hass
+    light.entity_id = "light.mesh_test"
+    await light.async_added_to_hass()
+    await hass.async_block_till_done()
+    assert coordinator.calls == []  # nothing asked yet
+
+    coordinator.available = True
+    coordinator.fire()
+    await hass.async_block_till_done()
+
+    assert ("get_onoff", UNICAST) in coordinator.calls
+    assert light.is_on is True
+    assert light.brightness == 128
+
+
+async def test_availability_change_is_pushed_not_polled(hass) -> None:
+    """The entity must not rely on HA's 30 s poll to notice it went stale."""
+    light, coordinator = _light()
+
+    assert light.should_poll is False
