@@ -132,3 +132,95 @@ async def test_duplicate_network_aborts(hass) -> None:
     )
     assert second["type"] is FlowResultType.ABORT
     assert second["reason"] == "already_configured"
+
+
+# --------------------------------------------- identity and reconfiguration
+
+
+def _text_without_uuid() -> str:
+    """The fixture export with its meshUUID blanked out."""
+    doc = json.loads(_connect_text())
+    doc["meshUUID"] = ""
+    return json.dumps(doc)
+
+
+async def test_unique_id_falls_back_to_the_network_id(hass) -> None:
+    """An export without a meshUUID must still identify its network.
+
+    Falling back to an empty string made every such network collide: the
+    second one imported aborted as already_configured. The Network ID —
+    k3(NetKey) — is the subnet's real on-air identity and is already computed
+    everywhere else.
+    """
+    text = _text_without_uuid()
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": "user"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_CONNECT_JSON: text}
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    entry = hass.config_entries.async_entries(DOMAIN)[0]
+    network = Network.from_connect(json.loads(text))
+    assert entry.unique_id == network.identifier
+    assert entry.unique_id  # not the empty string
+
+
+async def test_reconfigure_replaces_the_export(hass) -> None:
+    """Re-importing a network must not mean deleting the entry.
+
+    A re-export after adding a node used to cost every entity id and its
+    history, because the only way back in was to remove and re-add.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CONNECT_JSON: "{}"},
+        unique_id=Network.from_connect(json.loads(_connect_text())).identifier,
+    )
+    entry.add_to_hass(hass)
+
+    result = await entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_CONNECT_JSON: _connect_text()}
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data[CONF_CONNECT_JSON] == _connect_text()
+
+
+async def test_reconfigure_refuses_a_different_network(hass) -> None:
+    """Pasting another network's export would silently repoint every entity."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CONNECT_JSON: _connect_text()},
+        unique_id="a-completely-different-network",
+    )
+    entry.add_to_hass(hass)
+
+    result = await entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_CONNECT_JSON: _connect_text()}
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "wrong_network"
+
+
+async def test_reconfigure_rejects_garbage(hass) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CONNECT_JSON: _connect_text()},
+        unique_id=Network.from_connect(json.loads(_connect_text())).identifier,
+    )
+    entry.add_to_hass(hass)
+
+    result = await entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_CONNECT_JSON: "not json"}
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "invalid_connect"}

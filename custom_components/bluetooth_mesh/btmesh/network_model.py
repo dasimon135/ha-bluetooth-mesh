@@ -22,8 +22,10 @@ bound application-key indexes.
 """
 
 import json
+import logging
 from dataclasses import dataclass
 
+from .crypto import k3
 from .errors import BtMeshError
 
 __all__ = [
@@ -33,6 +35,9 @@ __all__ = [
     "Node",
     "Network",
 ]
+
+
+logger = logging.getLogger(__name__)
 
 
 class NetworkModelError(BtMeshError):
@@ -121,6 +126,16 @@ class Network:
     iv_index: int
     nodes: tuple[Node, ...]
 
+    @property
+    def identifier(self) -> str:
+        """A stable identity for this network, even without a ``meshUUID``.
+
+        Exports do not all carry one, and an empty string made every such
+        network collide. ``k3(NetKey)`` — the Network ID nodes advertise — is
+        the subnet's real on-air identity, so it is the honest fallback.
+        """
+        return self.uuid or k3(self.net_key).hex()
+
     @classmethod
     def from_connect(cls, data: dict) -> "Network":
         """Parse a decoded ``.connect`` JSON document into a :class:`Network`.
@@ -141,7 +156,34 @@ class Network:
         if not isinstance(raw_nodes, list):
             raise NetworkModelError("connect document has no 'nodes' list")
 
-        nodes = tuple(_parse_node(n) for n in raw_nodes)
+        # One malformed entry must not sink the whole import. Exports come from
+        # another vendor's app, and a single node missing a field it never
+        # promised (a provisioner record, a firmware quirk) used to make the
+        # entire network unusable with no way to tell which one was at fault.
+        nodes = []
+        skipped: list[str] = []
+        for raw_node in raw_nodes:
+            try:
+                nodes.append(_parse_node(raw_node))
+            except NetworkModelError as exc:
+                name = (
+                    raw_node.get("UUID", "?")
+                    if isinstance(raw_node, dict)
+                    else "?"
+                )
+                skipped.append(f"{name}: {exc}")
+        if skipped:
+            logger.warning(
+                "skipped %d unparseable node(s) in the connect export: %s",
+                len(skipped), "; ".join(skipped),
+            )
+            if not nodes:
+                # Every node was dropped: importing an empty network would
+                # look like success and expose nothing.
+                raise NetworkModelError(
+                    "no usable node in the connect export — "
+                    + "; ".join(skipped)
+                )
 
         return cls(
             name=str(data.get("meshName", "")),
@@ -151,7 +193,7 @@ class Network:
             app_key=app_key,
             app_key_index=_as_int(app_key_entry.get("index", 0), "appKeys[0].index"),
             iv_index=_as_int(data.get("ivIndex", 0), "ivIndex"),
-            nodes=nodes,
+            nodes=tuple(nodes),
         )
 
     @classmethod

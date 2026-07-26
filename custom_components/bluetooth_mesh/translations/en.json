@@ -11,13 +11,25 @@
         "data_description": {
           "connect_json": "Open your ThingOS / Häfele Connect Mesh .connect export file in a text editor and paste its entire contents here. It contains the network keys and node list."
         }
+      },
+      "reconfigure": {
+        "title": "Re-import the Bluetooth Mesh network",
+        "description": "Paste a freshly exported .connect file to update this network — after adding a node, or refreshing a key. It must be the same network.",
+        "data": {
+          "connect_json": "Network export (.connect)"
+        },
+        "data_description": {
+          "connect_json": "Open your ThingOS / Häfele Connect Mesh .connect export file in a text editor and paste its entire contents here. It contains the network keys and node list."
+        }
       }
     },
     "error": {
       "invalid_connect": "The pasted text is not a valid .connect network export. Paste the full contents of the exported file."
     },
     "abort": {
-      "already_configured": "This mesh network is already configured."
+      "already_configured": "This mesh network is already configured.",
+      "wrong_network": "That export belongs to a different mesh network. Re-import the network this entry was created from, or add the other one as a separate entry.",
+      "reconfigure_successful": "The network export was updated."
     }
   },
   "options": {

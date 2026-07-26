@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryError
 
+from .btmesh.network_model import NetworkModelError
 from .coordinator import MeshCoordinator
 
 PLATFORMS: list[Platform] = [Platform.LIGHT]
@@ -19,7 +23,17 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: BluetoothMeshConfigEntry
 ) -> bool:
     """Set up Bluetooth Mesh from a config entry."""
-    coordinator = MeshCoordinator(hass, entry)
+    try:
+        coordinator = MeshCoordinator(hass, entry)
+    except (json.JSONDecodeError, NetworkModelError, KeyError) as exc:
+        # The stored export is parsed in the constructor, so a damaged entry
+        # used to blow up here as a raw traceback with nothing actionable in
+        # it. Re-importing the export (the reconfigure flow) is the fix, and
+        # that is what the user needs to be told.
+        raise ConfigEntryError(
+            f"the stored .connect export could not be read ({exc}); "
+            "reconfigure the entry with a fresh export"
+        ) from exc
     # Never hard-fails: async_start marks the coordinator unavailable and
     # retries in the background if no proxy is reachable yet.
     await coordinator.async_start()
