@@ -365,6 +365,29 @@ noted only so it is not "fixed" by accident.
 
 ---
 
+## 5bis. Status — everything above is shipped
+
+Every finding in this document has been addressed and released, except the two
+items below, which were considered and deliberately left:
+
+* **Provisioning** (§2.8) — adding an *unprovisioned* node is a feature, not a
+  fix: it needs its own flow, its own design, and hardware with an
+  unprovisioned lamp to validate against. Still the right shape for a future
+  headline release.
+* **`RestoreEntity`** (§2.8) — restoring the last known state now works
+  *against* the integration. v0.2.1 removed the fabricated "off" precisely
+  because another integration can act on an invented state and make it true,
+  and the lamp is read for real within seconds of the mesh becoming reachable.
+  Restoring would put a stale value back into exactly that window, for no gain.
+
+§2.7 shipped as a **duplicate filter rather than the spec's replay list**:
+rejecting every SEQ below the last would deafen the integration to a node that
+restarted its sequence after a power cut, while the worst a replayed Status can
+do is show a stale value for a moment. The lesser guarantee is the safer trade.
+
+Shipped in v0.1.1 → v0.4.0, each release hardware-validated on a Häfele Connect
+Mesh lamp through an ESPHome Bluetooth proxy.
+
 ## 5. Suggested order
 
 1. ~~§1.1 client leak + §1.2 dead pump~~ and ~~§3.1 vendoring `--check`~~ —
