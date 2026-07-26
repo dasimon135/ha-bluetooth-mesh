@@ -438,6 +438,22 @@ async def test_a_matching_beacon_changes_nothing(hass) -> None:
     await coord.async_stop()
 
 
+async def test_the_authenticated_beacon_is_kept_for_diagnostics(hass) -> None:
+    """Whether the subnet beacons, and whether it authenticates, is the fastest
+    way to tell a key mismatch from a silent node — so surface it."""
+    entry = _make_entry(hass)
+    fake = FakeController()
+    fake.beacon = _Beacon(iv_index=0)
+    with _patch_transport(fake):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        assert coord.beacon is None  # nothing seen yet
+        await coord.async_set_onoff(UNICAST, True)
+        assert coord.beacon is not None
+        assert coord.beacon.iv_index == 0
+    await coord.async_stop()
+
+
 async def test_no_proxy_stays_unavailable_and_raises_issue(hass) -> None:
     """No proxy → unavailable (no raise); a repair appears past the threshold."""
     entry = _make_entry(hass)

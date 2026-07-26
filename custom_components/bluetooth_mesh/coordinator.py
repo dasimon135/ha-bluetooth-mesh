@@ -147,6 +147,10 @@ class MeshCoordinator:
         # node's dedup window is seconds, far shorter than a restart.
         self._tid = 0
         self._available = False
+        # Last authenticated Secure Network Beacon seen, kept for diagnostics:
+        # "does the subnet beacon, and do our keys verify it" answers most
+        # support questions in one look.
+        self._beacon = None
         self._stopped = False
         self._fail_count = 0
         self._issue_active = False
@@ -208,6 +212,11 @@ class MeshCoordinator:
     def connected(self) -> bool:
         """True while a proxy connection is held open."""
         return self._controller is not None
+
+    @property
+    def beacon(self):
+        """The last authenticated Secure Network Beacon, or ``None``."""
+        return self._beacon
 
     @property
     def iv_index(self) -> int:
@@ -557,7 +566,10 @@ class MeshCoordinator:
         cursor, which is only required to be unique *within* an IV Index.
         """
         beacon = getattr(controller, "beacon", None)
-        if beacon is None or beacon.iv_index == self._iv_index:
+        if beacon is None:
+            return False
+        self._beacon = beacon
+        if beacon.iv_index == self._iv_index:
             return False
         logger.warning(
             "adopting IV Index %#x announced by the subnet (was %#x); "

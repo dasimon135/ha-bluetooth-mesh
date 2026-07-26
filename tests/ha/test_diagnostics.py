@@ -35,6 +35,7 @@ class FakeCoordinator:
         self.seq = 0x1234
         self.keepalive_seconds = 0
         self.connected = True
+        self.beacon = None
 
 
 def _entry(hass) -> MockConfigEntry:

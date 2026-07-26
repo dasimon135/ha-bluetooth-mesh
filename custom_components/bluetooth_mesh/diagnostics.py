@@ -48,6 +48,18 @@ async def async_get_config_entry_diagnostics(
             "seq": coordinator.seq,
             "keepalive_seconds": coordinator.keepalive_seconds,
         },
+        # A subnet that beacons AND authenticates proves the imported keys are
+        # the right ones; silence here points at the node, a mismatch at the
+        # export.
+        "beacon": (
+            {
+                "iv_index": coordinator.beacon.iv_index,
+                "iv_update": coordinator.beacon.iv_update,
+                "key_refresh": coordinator.beacon.key_refresh,
+            }
+            if coordinator.beacon is not None
+            else None
+        ),
         # Every 0x1828 advert Home Assistant currently sees, so a "no proxy"
         # report can be told apart from a "wrong network" one at a glance.
         "proxies_seen": [
