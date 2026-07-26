@@ -61,6 +61,50 @@ def make_pair(a_send_filter=None):
     return nodes["a"], nodes["b"], a_sent
 
 
+# ------------------------------------------------------- proxy configuration
+
+
+def test_proxy_config_pdu_round_trip():
+    """A proxy config message survives the network layer between two nodes.
+
+    Proxy configuration rides in a network PDU with CTL=1 and TTL=0 addressed
+    to the unassigned address (spec §6.5) — a different shape from the access
+    traffic every other path builds, and one the peer must recover verbatim.
+    """
+    a, b, sent = make_pair()
+    message = bytes([0x00, 0x00])  # Set Filter Type: accept list
+
+    pdu = a.build_proxy_config_pdu(message)
+    decoded = network.decode(b.ctx, pdu)
+
+    assert decoded.ctl is True
+    assert decoded.ttl == 0
+    assert decoded.dst == 0x0000  # unassigned: this is for the proxy itself
+    assert decoded.src == 0x0001
+    assert b.parse_proxy_config_pdu(pdu) == message
+    assert sent == []  # built, not sent: the caller routes it (proxy PDU type)
+
+
+def test_proxy_config_pdu_consumes_a_seq():
+    """It is a real network PDU, so it must burn a SEQ like any other."""
+    a, _, _ = make_pair()
+    before = a.ctx.seq
+    a.build_proxy_config_pdu(bytes([0x00, 0x00]))
+    assert a.ctx.seq == before + 1
+
+
+def test_parse_proxy_config_pdu_ignores_foreign_traffic():
+    """A PDU from another network must be dropped, not raised on."""
+    foreign = MeshNode(
+        netkey=bytes(16), appkey=APP_KEY, iv_index=IV_INDEX,
+        src_addr=0x0009, send_network_pdu=lambda pdu: None,
+    )
+    a, _, _ = make_pair()
+    assert a.parse_proxy_config_pdu(
+        foreign.build_proxy_config_pdu(bytes([0x00, 0x00]))
+    ) is None
+
+
 def onoff_responder(node: MeshNode):
     """on_message handler answering every OnOff Set with an OnOff Status."""
 

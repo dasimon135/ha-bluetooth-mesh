@@ -34,13 +34,21 @@ class BearerPump:
     def __init__(self, bearer: GattBearer, msg_type: int) -> None:
         self._bearer = bearer
         self._msg_type = msg_type
-        self._queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self._queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
         self._task: asyncio.Task | None = None
         self.failure: BaseException | None = None
         self.on_error: Callable[[BaseException], None] | None = None
 
-    def put(self, pdu: bytes) -> None:
-        self._queue.put_nowait(pdu)
+    def put(self, pdu: bytes, msg_type: int | None = None) -> None:
+        """Queue one PDU, optionally overriding the pump's message type.
+
+        Proxy configuration travels under its own proxy message type but must
+        share this queue: a send that bypassed it could interleave its SAR
+        frames with a network PDU's and corrupt reassembly at the peer.
+        """
+        self._queue.put_nowait(
+            (self._msg_type if msg_type is None else msg_type, pdu)
+        )
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._run())
@@ -48,8 +56,8 @@ class BearerPump:
     async def _run(self) -> None:
         try:
             while True:
-                pdu = await self._queue.get()
-                await self._bearer.send(self._msg_type, pdu)
+                msg_type, pdu = await self._queue.get()
+                await self._bearer.send(msg_type, pdu)
         except asyncio.CancelledError:
             raise
         except BaseException as exc:

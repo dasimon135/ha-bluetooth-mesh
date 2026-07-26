@@ -164,7 +164,31 @@ traceback instead of a proper setup failure. Wrap and raise
 
 ## 2. Architecture gaps (the high-value work)
 
-### 2.1 (P1 feature) Configure the proxy filter — the single biggest upgrade
+### 2.1 (P1 feature) Configure the proxy filter — the single biggest upgrade — **IMPLEMENTED**
+
+> Implemented on 2026-07-26: `btmesh.proxy_config` + `MeshNode.build/parse_proxy_config_pdu`
+> + `MeshController._configure_filter()` (accept list, our own address).
+>
+> **HARDWARE-VALIDATED** the same day on the Häfele lamp through the
+> `atomebuanderie` ESPHome proxy. Status replies now come back in **145–310 ms**
+> where nothing ever came back before, on every command, with no timeout. Two
+> findings from that run:
+>
+> * The lamp **applies the filter but never sends a Filter Status**, though the
+>   spec says it shall. Blocking on that confirmation therefore added its full
+>   2 s timeout to *every* connection and logged a warning claiming replies "may
+>   not be forwarded" while they demonstrably were. Filter setup is now
+>   fire-and-forget: the ordered TX pump is what guarantees both messages
+>   precede the first command (visible in the trace as `0x02, 0x02, 0x00` 1 ms
+>   apart), so waiting bought nothing.
+> * The **Secure Network Beacon is right there** on every connect —
+>   `RX type=0x01 … 000b8150e5fb81e99f 00000000 …` — carrying `IV Index = 0`.
+>   That both confirms the currently hard-coded assumption and shows §2.2 is
+>   directly implementable from data the lamp already sends us.
+>
+> `STATUS_TIMEOUT` was left at 1.5 s: measured round trips are 145–310 ms, so it
+> is ample, and a silent node must not slow every button press.
+
 
 `proxy_pdu.py:42` defines `MSG_TYPE_PROXY_CONFIG = 0x02`, and **nothing else in
 the tree implements Proxy Configuration**. That is the root cause documented in
@@ -337,9 +361,8 @@ noted only so it is not "fixed" by accident.
 1. ~~§1.1 client leak + §1.2 dead pump~~ and ~~§3.1 vendoring `--check`~~ —
    **done 2026-07-26**.
 2. §3.2 `iot_class`, §3.3 ruff — short, protects everything after it.
-3. §1.3 CTL mirror gating, §1.4 availability listener, §1.5 unique_id fallback.
-4. §2.4 delayed SEQ save, §2.5 background first probe, §2.3 push discovery.
-5. **§2.1 proxy filter** — then re-open `STATUS_TIMEOUT`, use the existing
-   getters, and flip `iot_class` to `local_push` for real.
+3. ~~§2.1 proxy filter~~ — **done 2026-07-26**, pending hardware validation.
+4. §1.3 CTL mirror gating, §1.4 availability listener, §1.5 unique_id fallback.
+5. §2.4 delayed SEQ save, §2.5 background first probe, §2.3 push discovery.
 6. §2.2 Secure Network Beacon / IV Index tracking, then §2.8 diagnostics +
    reconfigure + restore.

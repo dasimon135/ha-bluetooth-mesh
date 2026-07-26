@@ -4,6 +4,39 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **The proxy address filter is now configured on every connection**, which is
+  what makes confirmed state possible at all. A Proxy Server starts each
+  connection with an accept list that is *empty* (spec §6.5.1) — it forwards
+  nothing inbound until told otherwise — so until now no Status reply ever
+  reached Home Assistant and every value shown was purely optimistic.
+  `MeshController.start()` sets the filter type and claims its own address, so
+  a Set is confirmed by the lamp and `get_onoff` / `get_lightness` become
+  usable. Best-effort: a proxy that does not answer only costs the
+  confirmation, never the connection.
+
+  Hardware-validated on a Häfele Connect Mesh lamp through an ESPHome
+  Bluetooth proxy: Status replies now come back in 145–310 ms where nothing
+  ever came back before. Note the lamp applies the filter but never sends the
+  Filter Status the spec asks for, so the setup is deliberately
+  fire-and-forget — both messages are queued ahead of the first command on the
+  ordered TX pump, which is what actually guarantees the filter is in place.
+- `btmesh.proxy_config`: Set Filter Type / Add Addresses To Filter / Filter
+  Status codecs, plus `MeshNode.build_proxy_config_pdu` and
+  `MeshNode.parse_proxy_config_pdu` for the `CTL=1, TTL=0` network PDU they
+  travel in.
+
+### Fixed
+
+- **A Set no longer reports a mid-fade value.** With Status replies now
+  arriving, a lamp answering mid-transition would have dragged the brightness
+  slider to the value it was passing through. Set commands return the
+  *target* — where the lamp is heading — and fall back to the present value
+  only when no transition is running.
+
 ## [0.1.1] — 2026-07-26
 
 ### Fixed
