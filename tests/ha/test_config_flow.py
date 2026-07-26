@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -181,10 +182,17 @@ async def test_reconfigure_replaces_the_export(hass) -> None:
     )
     entry.add_to_hass(hass)
 
-    result = await entry.start_reconfigure_flow(hass)
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {CONF_CONNECT_JSON: _connect_text()}
-    )
+    # A successful reconfigure reloads the entry for real, which would start
+    # the coordinator and reach for the Bluetooth stack; the flow is what is
+    # under test here, not setup.
+    with patch(
+        "custom_components.bluetooth_mesh.async_setup_entry", return_value=True
+    ):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_CONNECT_JSON: _connect_text()}
+        )
+        await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
