@@ -44,7 +44,21 @@ def test_manifest_core_fields() -> None:
     assert manifest["name"] == "Bluetooth Mesh"
     assert manifest["config_flow"] is True
     assert "bluetooth" in manifest["dependencies"]
-    assert manifest["version"] == "0.1.0"
+
+
+def test_manifest_version_matches_the_library() -> None:
+    """The integration and the vendored library ship as one version.
+
+    Asserting a hard-coded literal here only turns every release into a failing
+    test; the invariant worth guarding is that the two halves of a release move
+    together, so a half-done version bump is caught instead.
+    """
+    import tomllib
+
+    pyproject = tomllib.loads(
+        (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    assert _load_manifest()["version"] == pyproject["project"]["version"]
 
 
 def test_hacs_json_has_no_domains_key() -> None:

@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.1] — 2026-07-26
 
 ### Fixed
 
@@ -21,6 +21,11 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nothing until the config entry was reloaded. `MeshController` now exposes
   `failed` / `failure`, and the coordinator drops and re-establishes the link
   as soon as the transport dies.
+
+### Added
+
+- The `logo.png` / `logo@2x.png` brand assets, which landed after the `v0.1.0`
+  tag and therefore never reached anyone installing the tagged release.
 
 ### Changed
 
@@ -61,4 +66,5 @@ ESPHome Bluetooth proxy.
   made from the vendor app in parallel are not read back until HA's next
   command.
 
+[0.1.1]: https://github.com/dasimon135/ha-bluetooth-mesh/releases/tag/v0.1.1
 [0.1.0]: https://github.com/dasimon135/ha-bluetooth-mesh/releases/tag/v0.1.0
