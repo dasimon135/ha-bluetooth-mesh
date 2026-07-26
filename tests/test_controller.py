@@ -293,6 +293,50 @@ async def test_get_onoff_returns_none_on_timeout():
     assert result is None
 
 
+# ----------------------------------------------------------- dead TX pump
+
+
+async def test_dead_tx_pump_is_reported_as_failed():
+    """A GATT write failure kills the TX pump; the controller must SAY so.
+
+    ``BearerPump`` swallows the first ``send()`` error and then stops draining
+    its queue for good, so every later command silently times out and returns
+    ``None`` — indistinguishable from an unconfirmed Status. Without a failure
+    flag the Home Assistant coordinator keeps reusing a controller that can no
+    longer transmit anything, leaving the entity "available" while every tap
+    does nothing until the entry is reloaded.
+    """
+    controller, bearer, _ = make_setup()
+
+    async def dead_send(msg_type, payload):
+        raise RuntimeError("GATT write failed: link wedged")
+
+    bearer.send = dead_send
+    await controller.start()
+    try:
+        result = await controller.set_onoff(
+            UNICAST, True, timeout=0.05, retries=0
+        )
+    finally:
+        await controller.stop()
+
+    assert result is None  # still best-effort: the caller never sees a raise
+    assert controller.failed is True
+    assert isinstance(controller.failure, RuntimeError)
+
+
+async def test_healthy_controller_is_not_failed():
+    """A controller whose writes succeed never reports a transport failure."""
+    controller, _, _ = make_setup()
+    await controller.start()
+    try:
+        await controller.set_onoff(UNICAST, True)
+        assert controller.failed is False
+        assert controller.failure is None
+    finally:
+        await controller.stop()
+
+
 # --------------------------------------------------------------- tid and seq
 
 

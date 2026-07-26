@@ -237,9 +237,14 @@ class MeshCoordinator:
         :attr:`_lock`.
         """
         if self._controller is not None:
-            if getattr(self._client, "is_connected", True):
+            if (
+                getattr(self._client, "is_connected", True)
+                and not self._controller.failed
+            ):
                 return self._controller
-            # The held link died under us; drop it and reconnect below.
+            # The held link died under us — the GATT link dropped, or the TX
+            # pump died on a write and can no longer transmit (which commands
+            # cannot report by raising). Drop it and reconnect below.
             await self._teardown()
 
         address = find_proxy_address(self.hass, self._network.net_key)
@@ -254,6 +259,12 @@ class MeshCoordinator:
             self._set_unavailable()
             return None
 
+        # Bound before the try: from the moment async_connect_bearer returns, the
+        # client holds the lamp's single proxy slot even if everything after it
+        # fails. It is not reachable through self._client until the controller is
+        # up, so _teardown() cannot free it — this local reference is the only
+        # way back to it, and leaking it would lock out both HA and the app.
+        client = None
         try:
             async with asyncio.timeout(CONNECT_TIMEOUT):
                 client, bearer = await async_connect_bearer(self.hass, address)
@@ -264,6 +275,7 @@ class MeshCoordinator:
                 await controller.start()
         except Exception as exc:  # noqa: BLE001 - transport/GATT/connect
             logger.debug("mesh connect failed: %s", exc)
+            await self._disconnect(client)
             await self._teardown()
             self._set_unavailable()
             return None
@@ -315,6 +327,13 @@ class MeshCoordinator:
                 except Exception:  # noqa: BLE001
                     logger.debug("seq persist failed", exc_info=True)
 
+            # A dead TX pump does not raise — the command just times out like an
+            # unconfirmed Status — so check explicitly and drop the link, else
+            # we would hold a controller that can never transmit again.
+            if self._controller is not None and self._controller.failed:
+                logger.debug("mesh transport died; dropping the held link")
+                await self._teardown()
+
             # Hold the link briefly for the next command; freed on idle timeout.
             if self._controller is not None:
                 self._arm_idle()
@@ -336,11 +355,17 @@ class MeshCoordinator:
                 await controller.stop()
             except Exception:  # noqa: BLE001
                 logger.debug("controller stop failed", exc_info=True)
-        if client is not None:
-            try:
-                await client.disconnect()
-            except Exception:  # noqa: BLE001
-                logger.debug("client disconnect failed", exc_info=True)
+        await self._disconnect(client)
+
+    @staticmethod
+    async def _disconnect(client) -> None:
+        """Best-effort disconnect: freeing the proxy slot must never raise."""
+        if client is None:
+            return
+        try:
+            await client.disconnect()
+        except Exception:  # noqa: BLE001
+            logger.debug("client disconnect failed", exc_info=True)
 
     def _arm_idle(self) -> None:
         """(Re)start the idle timer that drops the held connection.
