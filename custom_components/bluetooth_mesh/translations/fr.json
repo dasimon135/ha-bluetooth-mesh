@@ -11,13 +11,25 @@
         "data_description": {
           "connect_json": "Ouvrez le fichier d'export .connect de votre application ThingOS / Häfele Connect Mesh dans un éditeur de texte et collez ici l'intégralité de son contenu. Il contient les clés du réseau et la liste des nœuds."
         }
+      },
+      "reconfigure": {
+        "title": "Réimporter le réseau Bluetooth Mesh",
+        "description": "Collez un fichier .connect fraîchement exporté pour mettre à jour ce réseau — après l'ajout d'un nœud, ou un renouvellement de clé. Il doit s'agir du même réseau.",
+        "data": {
+          "connect_json": "Export du réseau (.connect)"
+        },
+        "data_description": {
+          "connect_json": "Ouvrez votre fichier d'export .connect ThingOS / Häfele Connect Mesh dans un éditeur de texte et collez ici l'intégralité de son contenu. Il contient les clés du réseau et la liste des nœuds."
+        }
       }
     },
     "error": {
       "invalid_connect": "Le texte collé n'est pas un export réseau .connect valide. Collez le contenu complet du fichier exporté."
     },
     "abort": {
-      "already_configured": "Ce réseau mesh est déjà configuré."
+      "already_configured": "Ce réseau mesh est déjà configuré.",
+      "wrong_network": "Cet export appartient à un autre réseau mesh. Réimportez le réseau à partir duquel cette entrée a été créée, ou ajoutez l'autre comme une entrée distincte.",
+      "reconfigure_successful": "L'export du réseau a été mis à jour."
     }
   },
   "options": {

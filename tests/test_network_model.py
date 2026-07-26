@@ -136,3 +136,61 @@ def test_name_fallback_to_tos_node_type():
     data["nodes"][0]["tos_devices"] = []
     net = Network.from_connect(data)
     assert net.nodes[0].name == "com.example.fabricated.testlamp.v1"
+
+
+# ------------------------------------------------- tolerant node parsing
+
+
+def _connect_doc(nodes):
+    return {
+        "meshName": "T",
+        "meshUUID": "u",
+        "netKeys": [{"key": "7dd7364cd842ad18c17c2b820c84c3d6", "index": 0}],
+        "appKeys": [{"key": "63964771734fbd76e3b40519d1d94a48", "index": 0}],
+        "nodes": nodes,
+    }
+
+
+_GOOD_NODE = {
+    "UUID": "n1",
+    "unicastAddress": "000C",
+    "deviceKey": "9d6dd0e96eb25dc19a40ed9914f8f03f",
+    "cid": "07E9",
+    "elements": [{"index": 0, "models": [{"modelId": "1000", "bind": [0]}]}],
+}
+
+
+def test_one_unparseable_node_does_not_sink_the_whole_import():
+    """A single odd entry used to make the entire network unusable.
+
+    Exports are written by another vendor's app; one node missing a field it
+    never promised (a provisioner record, a firmware quirk) would raise, the
+    config flow would answer a flat "not a valid export", and there was no way
+    to tell which node was at fault. The usable nodes are what matter.
+    """
+    doc = _connect_doc([_GOOD_NODE, {"UUID": "broken"}])
+
+    network = Network.from_connect(doc)
+
+    assert len(network.nodes) == 1
+    assert network.nodes[0].unicast == 0x000C
+
+
+def test_keys_are_still_a_hard_failure():
+    """Without keys there is no network at all — that must still raise."""
+    doc = _connect_doc([_GOOD_NODE])
+    del doc["netKeys"]
+    with pytest.raises(NetworkModelError):
+        Network.from_connect(doc)
+
+
+def test_a_document_whose_every_node_is_broken_still_raises():
+    """Silently importing an empty network would look like success."""
+    doc = _connect_doc([{"UUID": "broken"}, {"UUID": "also-broken"}])
+    with pytest.raises(NetworkModelError):
+        Network.from_connect(doc)
+
+
+def test_an_export_with_no_nodes_at_all_is_accepted():
+    """An empty list is a legitimate (if useless) network, not a parse error."""
+    assert Network.from_connect(_connect_doc([])).nodes == ()

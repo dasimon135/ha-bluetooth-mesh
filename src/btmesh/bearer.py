@@ -114,6 +114,10 @@ class GattBearer:
             self._data_in, self._data_out = PROXY_DATA_IN, PROXY_DATA_OUT
         self._reassembler = Reassembler()
         self._on_message: Callable[[int, bytes], None] | None = None
+        # A subscribe that never confirmed (see START_NOTIFY_TIMEOUT); kept so
+        # stop() can cancel it rather than leave it running against a client
+        # the caller is about to disconnect.
+        self._subscribe_task: "asyncio.Task | None" = None
 
     @property
     def max_frame(self) -> int:
@@ -152,6 +156,7 @@ class GattBearer:
             # flow) and swallow any late result so it is not reported as an
             # unretrieved task exception.
             task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            self._subscribe_task = task
             logger.warning(
                 "start_notify(%s) unconfirmed after %ss; proceeding "
                 "(proxy backend likely delivers notifications without "
@@ -168,6 +173,13 @@ class GattBearer:
 
     async def stop(self) -> None:
         """Unsubscribe from Data Out; safe to call on a dead connection."""
+        if self._subscribe_task is not None:
+            task, self._subscribe_task = self._subscribe_task, None
+            task.cancel()
+            # Awaited, not just cancelled: cancellation is delivered when the
+            # task next runs, and stop() promising the bearer is done means the
+            # subscribe is really finished with the client.
+            await asyncio.gather(task, return_exceptions=True)
         try:
             await self._client.stop_notify(self._data_out)
         except Exception as exc:

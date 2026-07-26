@@ -108,7 +108,7 @@ class MeshLight(LightEntity):
         self._unicast = node.unicast
 
         self._attr_unique_id = (
-            f"{coordinator.network.uuid}_{node.unicast:04x}"
+            f"{coordinator.network.identifier}_{node.unicast:04x}"
         )
 
         # Capability → HA color mode. COLOR_TEMP implies brightness support in

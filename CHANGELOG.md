@@ -4,6 +4,53 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **A reconfigure flow.** Networks change — a node is added, a key refreshed —
+  and the only way to import the new export was to delete the entry and re-add
+  it, losing every entity id and the history behind it. Pasting a *different*
+  network is refused rather than silently repointing every entity.
+- **Push discovery.** The integration recovers the moment a proxy for its
+  network advertises again, instead of waiting out the retry tick.
+
+### Changed
+
+- **Setup no longer blocks on the first connect.** It awaited a full connect —
+  up to the connect timeout plus retries — inside `async_setup_entry`, past the
+  point where Home Assistant warns that an integration is slow to set up.
+- **The SEQ cursor is written through a debounced store** instead of on every
+  command: one flash write per button press wears out an SD card for nothing.
+  It is flushed immediately when the entry unloads, and the safety margin
+  applied at startup already covers whatever a crash leaves unwritten.
+- `iot_class` is now `local_polling`. Nothing pushes: the integration
+  subscribes to no unsolicited publication, it asks when the mesh becomes
+  reachable.
+- **ruff runs in CI**, pinned, and the test job no longer silently excludes the
+  `phase0` harness suite. `hacs.json` declares a 2024.11.0 floor, so an older
+  core is refused instead of failing at import.
+
+### Fixed
+
+- **A malformed node no longer sinks the whole import.** Exports come from
+  another vendor's app; one node missing a field it never promised made the
+  entire network unusable behind a flat "not a valid export". Unparseable nodes
+  are skipped with a warning naming them — losing *every* node still fails,
+  since an empty network would look like success.
+- **A network without a `meshUUID` gets a stable identity.** The unique id fell
+  back to an empty string, so any second such network aborted as already
+  configured. `k3(NetKey)` — the Network ID nodes advertise — is used instead.
+- **A damaged stored export fails the setup cleanly** with a message pointing
+  at the reconfigure flow, instead of a raw traceback.
+- **An unconfirmed GATT subscribe is cancelled when the bearer stops**, rather
+  than left running against a client the caller is about to disconnect.
+- **A duplicate inbound PDU is dropped** (same source, same SEQ as the one just
+  handled). Deliberately not the spec's full replay list: rejecting every SEQ
+  below the last would deafen the integration to a node that restarted its
+  sequence after a power cut, which is worse than the stale value a replayed
+  Status could briefly show.
+
 ## [0.3.0] — 2026-07-26
 
 ### Added

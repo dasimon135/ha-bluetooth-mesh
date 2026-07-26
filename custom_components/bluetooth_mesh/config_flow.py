@@ -32,8 +32,16 @@ from homeassistant.helpers.selector import (
 )
 
 from .btmesh.network_model import Network, NetworkModelError
-
 from .const import CONF_CONNECT_JSON, CONF_KEEPALIVE, DEFAULT_KEEPALIVE, DOMAIN
+
+
+def _parse(text: str) -> Network | None:
+    """Parse a pasted ``.connect`` export, or ``None`` if it is not one."""
+    try:
+        return Network.from_connect(json.loads(text))
+    except (json.JSONDecodeError, NetworkModelError):
+        return None
+
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
@@ -65,13 +73,11 @@ class BluetoothMeshConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             text = user_input[CONF_CONNECT_JSON]
-            try:
-                data = json.loads(text)
-                network = Network.from_connect(data)
-            except (json.JSONDecodeError, NetworkModelError):
+            network = _parse(text)
+            if network is None:
                 errors["base"] = "invalid_connect"
             else:
-                await self.async_set_unique_id(network.uuid)
+                await self.async_set_unique_id(network.identifier)
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(
                     title=network.name or "Bluetooth Mesh",
@@ -80,6 +86,38 @@ class BluetoothMeshConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="user",
+            data_schema=STEP_USER_DATA_SCHEMA,
+            errors=errors,
+        )
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Replace the stored export with a freshly exported one.
+
+        Networks change: a node is added, a key is refreshed. Without this the
+        only way to import the new export was to delete the entry and re-add
+        it, which costs every entity id and the history behind it.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            text = user_input[CONF_CONNECT_JSON]
+            network = _parse(text)
+            if network is None:
+                errors["base"] = "invalid_connect"
+            else:
+                await self.async_set_unique_id(network.identifier)
+                # Pasting a *different* network here would silently repoint
+                # every entity at nodes that are not theirs.
+                self._abort_if_unique_id_mismatch(reason="wrong_network")
+                return self.async_update_reload_and_abort(
+                    self._get_reconfigure_entry(),
+                    data_updates={CONF_CONNECT_JSON: text},
+                )
+
+        return self.async_show_form(
+            step_id="reconfigure",
             data_schema=STEP_USER_DATA_SCHEMA,
             errors=errors,
         )

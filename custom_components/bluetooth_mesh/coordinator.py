@@ -37,7 +37,7 @@ import json
 import logging
 from datetime import timedelta
 
-from homeassistant.core import CALLBACK_TYPE, HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.storage import Store
@@ -45,7 +45,6 @@ from homeassistant.helpers.storage import Store
 from .btmesh.controller import MeshController
 from .btmesh.crypto import k3
 from .btmesh.network_model import Network
-
 from .const import (
     CONF_CONNECT_JSON,
     CONF_KEEPALIVE,
@@ -54,6 +53,7 @@ from .const import (
 )
 from .mesh_transport import (
     async_connect_bearer,
+    async_register_proxy_callback,
     discovered_proxies,
     find_proxy_address,
 )
@@ -78,6 +78,12 @@ UNREACHABLE_THRESHOLD = 3
 # — each command advances the cursor by exactly what the controller consumed.
 STORAGE_VERSION = 1
 SEQ_SAFETY_MARGIN = 32
+
+# The cursor is written through Home Assistant's debounced Store rather than on
+# every command: one flash write per button press wears out an SD card for no
+# benefit. Anything the debounce loses to a crash is covered by the margin
+# above — at one or two SEQ per command, this window cannot burn 32.
+SEQ_SAVE_DELAY = 10.0
 
 # How often to probe the mesh for availability. We no longer hold a connection,
 # so this light churn is the only time we take the lamp's single slot; the rest
@@ -155,6 +161,7 @@ class MeshCoordinator:
         self._fail_count = 0
         self._issue_active = False
         self._probe_unsub: CALLBACK_TYPE | None = None
+        self._discovery_unsub: CALLBACK_TYPE | None = None
         # Entities subscribed to availability transitions (see async_add_listener).
         self._listeners: list[CALLBACK_TYPE] = []
         # The HELD proxy connection (keep-alive): reused across commands and
@@ -244,18 +251,35 @@ class MeshCoordinator:
         """
         self._stopped = False
         self._seq, self._iv_index = await self._load_state()
-        # Fire one probe now so availability reflects reality without waiting;
-        # awaited (not backgrounded) so setup sees the result.
-        await self._async_probe()
+        # Probe in the BACKGROUND. Awaiting a full connect here — up to
+        # CONNECT_TIMEOUT plus bleak's retries — happens inside
+        # async_setup_entry, well past the 10s mark where Home Assistant starts
+        # warning that an integration is slow to set up, and it delays every
+        # other integration behind it. Availability simply arrives a moment
+        # later; entities are created unavailable and told when it lands.
+        self.hass.async_create_background_task(
+            self._async_probe(), f"{DOMAIN} initial probe"
+        )
         self._schedule_probe()
+        # Push discovery: recover the moment a matching proxy advertises again
+        # instead of waiting out the retry tick.
+        self._discovery_unsub = async_register_proxy_callback(
+            self.hass, self._network.net_key, self._on_proxy_seen
+        )
 
     async def async_stop(self) -> None:
         """Cancel timers, drop the held connection, and clear the repair issue."""
         self._stopped = True
         self._cancel_probe()
         self._cancel_idle()
+        if self._discovery_unsub is not None:
+            self._discovery_unsub()
+            self._discovery_unsub = None
         async with self._lock:
             await self._teardown()
+        # Flush the debounced cursor now: the entry is going away, and a SEQ
+        # that never reached disk is one the mesh will later drop as a replay.
+        await self._flush_state()
         self._available = False
         self._clear_issue()
 
@@ -275,6 +299,21 @@ class MeshCoordinator:
         if self._probe_unsub is not None:
             self._probe_unsub()
             self._probe_unsub = None
+
+    @callback
+    def _on_proxy_seen(self, address: str) -> None:
+        """A proxy for our network just advertised — try again straight away.
+
+        Only while we believe we are unreachable: adverts arrive constantly,
+        and probing on each one would take the lamp's single proxy slot for
+        nothing.
+        """
+        if self._stopped or self._available:
+            return
+        logger.debug("mesh proxy %s advertised; probing now", address)
+        self.hass.async_create_background_task(
+            self._async_probe(), f"{DOMAIN} discovery probe"
+        )
 
     async def _probe_callback(self, _now) -> None:
         self._probe_unsub = None
@@ -388,7 +427,7 @@ class MeshCoordinator:
                 # Must run BEFORE persisting: adopting a new IV Index restarts
                 # the SEQ cursor, and that pair has to be stored together.
                 stale_iv_index = self._adopt_iv_index(controller)
-                await self._persist()
+                self._persist()
 
             if stale_iv_index:
                 # The live link still encrypts with the old index; drop it so
@@ -547,12 +586,17 @@ class MeshCoordinator:
             int(data.get("iv_index", self._network.iv_index)),
         )
 
-    async def _persist(self) -> None:
-        """Mirror the SEQ cursor and IV Index to the Store (best-effort)."""
+    def _state_to_save(self) -> dict[str, int]:
+        return {"seq": self._seq, "iv_index": self._iv_index}
+
+    def _persist(self) -> None:
+        """Queue a debounced write of the SEQ cursor and IV Index."""
+        self._store.async_delay_save(self._state_to_save, SEQ_SAVE_DELAY)
+
+    async def _flush_state(self) -> None:
+        """Write the cursor out now (best-effort), bypassing the debounce."""
         try:
-            await self._store.async_save(
-                {"seq": self._seq, "iv_index": self._iv_index}
-            )
+            await self._store.async_save(self._state_to_save())
         except Exception:  # noqa: BLE001
             logger.debug("state persist failed", exc_info=True)
 

@@ -28,7 +28,7 @@ from btmesh.access import (
     OP_LIGHT_LIGHTNESS_STATUS,
     encode_opcode,
 )
-from btmesh import controller as controller_mod
+from btmesh.beacon import build_secure_network_beacon
 from btmesh.controller import MeshController
 from btmesh.network_model import Network
 from btmesh.node import MeshNode, ReceivedMessage
@@ -39,7 +39,6 @@ from btmesh.proxy_config import (
     OP_SET_FILTER_TYPE,
     FilterStatus,
 )
-from btmesh.beacon import build_secure_network_beacon
 from btmesh.proxy_pdu import (
     MSG_TYPE_MESH_BEACON,
     MSG_TYPE_NETWORK_PDU,

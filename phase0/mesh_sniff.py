@@ -21,22 +21,21 @@ import argparse
 import asyncio
 import logging
 
-from btmesh.access import parse_access
-from btmesh.crypto import k3
-from btmesh.errors import BtMeshError
-from btmesh.node import MeshNode
-from btmesh.proxy_pdu import MSG_TYPE_NETWORK_PDU
-
 from provision_and_toggle import (
+    SCAN_PROXY_S,
     EsphomeTransport,
     LocalTransport,
     Phase0Failure,
-    SCAN_PROXY_S,
     open_gatt_session,
     print_diagnostic,
     setup_logging,
 )
+
 from btmesh.bearer import find_proxy_node
+from btmesh.crypto import k3
+from btmesh.errors import BtMeshError
+from btmesh.node import MeshNode
+from btmesh.proxy_pdu import MSG_TYPE_NETWORK_PDU
 
 logger = logging.getLogger("phase0")
 

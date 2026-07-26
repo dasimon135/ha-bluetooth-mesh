@@ -46,6 +46,16 @@ def test_manifest_core_fields() -> None:
     assert "bluetooth" in manifest["dependencies"]
 
 
+def test_iot_class_is_polling_not_push() -> None:
+    """Nothing pushes: state is read when the mesh becomes reachable.
+
+    ``local_push`` claims the device tells Home Assistant about changes on its
+    own. This integration subscribes to no unsolicited publication — it asks.
+    Claiming otherwise misleads anyone reading the integration list.
+    """
+    assert _load_manifest()["iot_class"] == "local_polling"
+
+
 def test_manifest_version_matches_the_library() -> None:
     """The integration and the vendored library ship as one version.
 
@@ -75,6 +85,19 @@ def test_hacs_json_has_no_domains_key() -> None:
     }
     assert set(hacs).issubset(allowed), f"unexpected hacs.json keys: {set(hacs)}"
     assert hacs["name"] == "Bluetooth Mesh"
+
+
+def test_hacs_declares_a_minimum_core_version() -> None:
+    """The integration uses APIs older cores do not have.
+
+    ``entry.runtime_data`` (2024.6), the reconfigure-flow helpers
+    ``_abort_if_unique_id_mismatch`` / ``async_update_reload_and_abort``
+    (2024.11) and PEP 695 ``type`` aliases (Python 3.12) all fail on an older
+    core; without this key HACS would happily install it and the user would
+    get a traceback instead of a reason.
+    """
+    hacs = json.loads((REPO_ROOT / "hacs.json").read_text(encoding="utf-8"))
+    assert hacs["homeassistant"] == "2024.11.0"
 
 
 def test_domain_const_matches_manifest() -> None:
@@ -124,9 +147,8 @@ async def test_setup_and_unload_entry() -> None:
     """
     pytest.importorskip("pytest_homeassistant_custom_component")
 
-    from unittest.mock import AsyncMock, MagicMock, patch
-
     import importlib
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     module = importlib.import_module("custom_components.bluetooth_mesh")
 
@@ -157,3 +179,29 @@ async def test_setup_and_unload_entry() -> None:
             entry, module.PLATFORMS
         )
         fake_coordinator.async_stop.assert_awaited_once()
+
+
+async def test_corrupt_entry_data_fails_the_setup_cleanly() -> None:
+    """A corrupt export must not surface as a raw traceback.
+
+    The coordinator parses the stored export in its constructor, so a damaged
+    entry blew up inside async_setup_entry with a stack trace and no
+    actionable message. ConfigEntryError puts a reason in the UI instead.
+    """
+    pytest.importorskip("homeassistant")
+
+    import importlib
+    from unittest.mock import MagicMock
+
+    from homeassistant.exceptions import ConfigEntryError
+
+    module = importlib.import_module("custom_components.bluetooth_mesh")
+    from custom_components.bluetooth_mesh.const import CONF_CONNECT_JSON
+
+    hass = MagicMock()
+    entry = MagicMock()
+    entry.data = {CONF_CONNECT_JSON: "{ not json"}
+    entry.options = {}
+
+    with pytest.raises(ConfigEntryError):
+        await module.async_setup_entry(hass, entry)

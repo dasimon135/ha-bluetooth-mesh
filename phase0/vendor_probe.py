@@ -20,33 +20,6 @@ import argparse
 import asyncio
 import logging
 
-from btmesh.access import (
-    HAEFELE_COMPANY_ID,
-    MODEL_HEALTH_SERVER,
-    OP_ATTENTION_STATUS,
-    OP_CONFIG_APPKEY_STATUS,
-    OP_CONFIG_MODEL_APP_STATUS,
-    OP_GENERIC_ONOFF_STATUS,
-    OP_LIGHT_LIGHTNESS_STATUS,
-    OP_NODE_RESET_STATUS,
-    STATUS_NAMES,
-    VD_GROUP_G_STATUS,
-    attention_get,
-    config_appkey_add,
-    config_model_app_bind,
-    config_model_app_bind_vendor,
-    config_node_reset,
-    generic_onoff_set,
-    light_lightness_set,
-    parse_config_appkey_status,
-    parse_config_model_app_status,
-    vendor_group_onoff_set,
-    vendor_opcode,
-)
-from btmesh.errors import BtMeshError
-from btmesh.node import MeshNode
-from btmesh.proxy_pdu import MSG_TYPE_NETWORK_PDU
-
 # Reuse the provisioned-session plumbing from the main harness.
 from provision_and_toggle import (
     BearerPump,
@@ -62,6 +35,30 @@ from provision_and_toggle import (
     save_state,
     setup_logging,
 )
+
+from btmesh.access import (
+    HAEFELE_COMPANY_ID,
+    MODEL_HEALTH_SERVER,
+    OP_ATTENTION_STATUS,
+    OP_CONFIG_APPKEY_STATUS,
+    OP_CONFIG_MODEL_APP_STATUS,
+    OP_GENERIC_ONOFF_STATUS,
+    OP_LIGHT_LIGHTNESS_STATUS,
+    OP_NODE_RESET_STATUS,
+    STATUS_NAMES,
+    attention_get,
+    config_appkey_add,
+    config_model_app_bind,
+    config_model_app_bind_vendor,
+    config_node_reset,
+    generic_onoff_set,
+    light_lightness_set,
+    parse_config_appkey_status,
+    parse_config_model_app_status,
+)
+from btmesh.errors import BtMeshError
+from btmesh.node import MeshNode
+from btmesh.proxy_pdu import MSG_TYPE_NETWORK_PDU
 
 logger = logging.getLogger("phase0")
 
@@ -234,11 +231,9 @@ async def probe(args, state, state_path, transport, unicast: int) -> None:
                 unicast, attention_get(), OP_ATTENTION_STATUS, timeout=6, retries=1
             )
             print(f"  ✓ APP-KEY PATH WORKS — Attention Status params={resp.params.hex()}")
-            appkey_ok = True
         except TimeoutError:
             print("  ✗ NO Attention Status — our APP-KEY send/receive path is "
                   "the problem, not the vendor opcode. Fix that first.")
-            appkey_ok = False
 
         # APK finding: the Connect Mesh v2 app (React Native / ThingOS) sends
         # STANDARD SIG model messages (GenericOnOffSet, LightLightnessSet, …).
@@ -278,7 +273,6 @@ async def probe(args, state, state_path, transport, unicast: int) -> None:
         print(f"    trying op-bytes {[hex(o) for o in op_bytes]} + company "
               f"{company:#06x} (LE {company & 0xFF:02X} {(company >> 8) & 0xFF:02X})")
         tid = 0
-        any_inbound_before = 0
         for op_byte in op_bytes:
             print(f"\n  -- op-byte {op_byte:#04x} --")
             for on in (True, False):

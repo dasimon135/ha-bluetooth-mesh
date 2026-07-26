@@ -13,9 +13,9 @@ the daikin_madoka venv (HA + HHCC)::
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
+import asyncio
 import contextlib
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -149,6 +149,13 @@ def _patch_transport(controller, *, address=PROXY_ADDR, ctor_side_effect=None):
         ),
         patch.object(coordinator_mod, "MeshController", **kwargs),
         patch.object(coordinator_mod, "discovered_proxies", return_value=[]),
+        # Push discovery goes through HA's bluetooth manager, which no test
+        # here sets up; the dedicated test re-patches this with its own stub.
+        patch.object(
+            coordinator_mod,
+            "async_register_proxy_callback",
+            return_value=lambda: None,
+        ),
     ):
         yield client
 
@@ -451,6 +458,115 @@ async def test_the_authenticated_beacon_is_kept_for_diagnostics(hass) -> None:
         await coord.async_set_onoff(UNICAST, True)
         assert coord.beacon is not None
         assert coord.beacon.iv_index == 0
+    await coord.async_stop()
+
+
+async def test_seq_is_written_with_a_delay_not_on_every_command(hass) -> None:
+    """One flash write per button press is not acceptable on an SD card.
+
+    Home Assistant debounces Store writes for exactly this, and flushes them on
+    shutdown; the SEQ safety margin applied at startup already covers whatever
+    a crash leaves unflushed.
+    """
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with _patch_transport(fake):
+        coord = MeshCoordinator(hass, entry)
+        with patch.object(
+            coord._store, "async_delay_save"
+        ) as delayed, patch.object(coord._store, "async_save") as immediate:
+            await coord.async_start()
+            await coord.async_set_onoff(UNICAST, True)
+            assert delayed.called
+            assert not immediate.called
+    await coord.async_stop()
+
+
+async def test_stop_flushes_the_cursor_immediately(hass) -> None:
+    """Debouncing must not lose the cursor when the entry is unloaded."""
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with _patch_transport(fake):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await coord.async_set_onoff(UNICAST, True)
+        await coord.async_stop()
+
+    stored = await coord._store.async_load()
+    assert stored["seq"] == fake.seq
+
+
+async def test_setup_does_not_block_on_the_first_connect(hass) -> None:
+    """A cold proxy must not hold up Home Assistant's startup.
+
+    async_start awaited a full connect — up to CONNECT_TIMEOUT plus bleak's
+    retries — inside async_setup_entry, well past the 10s mark where Home
+    Assistant starts warning that an integration is slow to set up, delaying
+    everything queued behind it.
+    """
+    entry = _make_entry(hass)
+    fake = FakeController()
+
+    slow_connect = AsyncMock()
+
+    async def _slow(*args, **kwargs):
+        await asyncio.sleep(0.4)
+        return MagicMock(), MagicMock()
+
+    slow_connect.side_effect = _slow
+
+    with (
+        _patch_transport(fake),
+        patch.object(coordinator_mod, "async_connect_bearer", new=slow_connect),
+    ):
+        coord = MeshCoordinator(hass, entry)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await coord.async_start()
+        elapsed = loop.time() - started
+
+        assert elapsed < 0.2, f"async_start blocked for {elapsed:.2f}s"
+
+        # Background tasks are deliberately NOT awaited by async_block_till_done
+        # — that is exactly what makes them background — so wait on the outcome.
+        for _ in range(200):
+            if coord.available:
+                break
+            await asyncio.sleep(0.01)
+        assert coord.available is True  # the probe landed on its own
+    await coord.async_stop()
+
+
+async def test_a_matching_proxy_advert_triggers_a_reconnect(hass) -> None:
+    """Recovery should not wait out the retry tick when the proxy reappears.
+
+    mesh_transport.async_register_proxy_callback has existed and been tested
+    since the first release without ever being called.
+    """
+    entry = _make_entry(hass)
+    fake = FakeController()
+    callbacks: list = []
+
+    def register(hass_, net_key, on_found):
+        callbacks.append(on_found)
+        return lambda: None
+
+    with (
+        _patch_transport(fake),
+        patch.object(
+            coordinator_mod, "async_register_proxy_callback", side_effect=register
+        ),
+    ):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await hass.async_block_till_done()
+        assert callbacks, "no push-discovery callback registered"
+
+        # Go unavailable, then have the proxy re-appear.
+        coord._available = False
+        callbacks[0](PROXY_ADDR)
+        await hass.async_block_till_done()
+        assert coord.available is True
     await coord.async_stop()
 
 
