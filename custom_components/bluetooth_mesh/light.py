@@ -138,8 +138,9 @@ class MeshLight(LightEntity):
             temp_element.unicast if temp_element is not None else None
         )
 
-        # Optimistic cache.
-        self._is_on: bool = False
+        # Optimistic cache. ``None`` means "not known yet" — never claim a state
+        # that has not been commanded or read (see the ``is_on`` property).
+        self._is_on: bool | None = None
         self._brightness: int | None = None
         self._color_temp_kelvin: int | None = None
 
@@ -207,7 +208,15 @@ class MeshLight(LightEntity):
         return self._coordinator.available
 
     @property
-    def is_on(self) -> bool:
+    def is_on(self) -> bool | None:
+        """``None`` until the lamp has been read or commanded ("unknown").
+
+        Reporting *off* for a lamp nobody has looked at is not a harmless
+        default: another integration acting on it — a light group syncing its
+        members is enough — switches the lamp off for real, and the invented
+        state becomes true. Home Assistant renders ``None`` as ``unknown``,
+        which is what we actually have.
+        """
         return self._is_on
 
     @property

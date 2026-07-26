@@ -272,7 +272,7 @@ async def test_refresh_state_reads_the_lamp(hass) -> None:
     filter lets Status replies through, the entity can simply ask.
     """
     light, coordinator = _light()
-    assert light.is_on is False  # blank cache before asking
+    assert light.is_on is None  # unknown before asking
 
     await light.async_refresh_state()
 
@@ -375,3 +375,31 @@ async def test_availability_change_is_pushed_not_polled(hass) -> None:
     light, coordinator = _light()
 
     assert light.should_poll is False
+
+
+# ------------------------------------------------- never fabricate a state
+
+
+async def test_a_fresh_entity_reports_unknown_not_off(hass) -> None:
+    """Never assert a state that has not been read.
+
+    A blank cache claiming *off* is not merely cosmetic: another integration
+    acting on that fabricated value — a light group syncing its members, say —
+    can physically switch the lamp off, and the lie becomes true. Until the
+    first read answers, the honest answer is "unknown".
+    """
+    light, _ = _light()
+
+    assert light.is_on is None
+    assert light.state is None  # the state machine renders this as "unknown"
+
+
+async def test_turn_on_from_an_unknown_state_still_switches_the_lamp_on(hass) -> None:
+    """Not knowing must never be mistaken for knowing it is already on."""
+    light, coordinator = _light()
+    assert light.is_on is None
+
+    await light.async_turn_on(color_temp_kelvin=4000)
+
+    assert ("set_onoff", UNICAST, True) in coordinator.calls
+    assert light.is_on is True
