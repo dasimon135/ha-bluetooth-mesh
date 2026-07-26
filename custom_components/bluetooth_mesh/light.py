@@ -58,6 +58,12 @@ _KNOWN_CIDS = {
     0x07E9: "Häfele",
 }
 
+# Company identifiers whose lamps map Light CTL temperature INVERSELY: dragging
+# toward warm produces cool and vice-versa. The workaround mirrors the requested
+# Kelvin around the exposed range, and must stay confined to those vendors —
+# applying it to a spec-conformant lamp inverts warm and cool end to end.
+_INVERTED_CTL_CIDS = frozenset({0x07E9})  # Häfele / ThingOS
+
 
 def _manufacturer(cid: int) -> str:
     """Friendly manufacturer for a company identifier, else its hex form."""
@@ -242,13 +248,20 @@ class MeshLight(LightEntity):
     def _mesh_kelvin(self, kelvin: int) -> int:
         """HA color temperature → the value this lamp's CTL server expects.
 
-        The lamp maps the Light CTL temperature inversely to its warm/cool LEDs
-        (dragging toward warm produced cool and vice-versa), so mirror the
-        requested Kelvin around the midpoint of the exposed range before sending:
-        ``min + max - K``. The mirror stays inside the exposed 2700..6500 K band,
-        so the controller's spec-range clamp never triggers, and HA keeps
-        displaying the un-mirrored value the user selected.
+        Häfele/ThingOS lamps map the Light CTL temperature inversely to their
+        warm/cool LEDs (dragging toward warm produced cool and vice-versa), so
+        for those the requested Kelvin is mirrored around the midpoint of the
+        exposed range before sending: ``min + max - K``. The mirror stays inside
+        the exposed 2700..6500 K band, so the controller's spec-range clamp
+        never triggers, and HA keeps displaying the un-mirrored value the user
+        selected.
+
+        Every other vendor gets the value untouched: the mirror is a quirk, not
+        the spec, and applying it to a conformant lamp would invert warm and
+        cool end to end.
         """
+        if self._node.cid not in _INVERTED_CTL_CIDS:
+            return kelvin
         return (
             self._attr_min_color_temp_kelvin
             + self._attr_max_color_temp_kelvin

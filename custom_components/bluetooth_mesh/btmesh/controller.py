@@ -32,6 +32,7 @@ from .access import (
     parse_light_ctl_temperature_status,
     parse_light_lightness_status,
 )
+from .beacon import BeaconError, SecureNetworkBeacon, parse_secure_network_beacon
 from .bearer import GattBearer
 from .network_model import Network
 from .node import MeshNode, ReceivedMessage
@@ -43,7 +44,11 @@ from .proxy_config import (
     parse_filter_status,
     set_filter_type,
 )
-from .proxy_pdu import MSG_TYPE_NETWORK_PDU, MSG_TYPE_PROXY_CONFIG
+from .proxy_pdu import (
+    MSG_TYPE_MESH_BEACON,
+    MSG_TYPE_NETWORK_PDU,
+    MSG_TYPE_PROXY_CONFIG,
+)
 from .pump import BearerPump
 
 logger = logging.getLogger(__name__)
@@ -93,13 +98,20 @@ class MeshController:
         src_addr: int = 0x7FFF,
         seq: int = 0,
         tid: int = 0,
+        iv_index: int | None = None,
     ) -> None:
         self._bearer = bearer
         self._pump = BearerPump(bearer, MSG_TYPE_NETWORK_PDU)
+        self._net_key = network.net_key
+        # The export states the IV Index as it was at export time; the mesh
+        # moves on without telling the file. The caller passes back whatever it
+        # persisted from a Secure Network Beacon (see :attr:`beacon`).
+        self._iv_index = network.iv_index if iv_index is None else iv_index
+        self._beacon: SecureNetworkBeacon | None = None
         self._node = MeshNode(
             netkey=network.net_key,
             appkey=network.app_key,
-            iv_index=network.iv_index,
+            iv_index=self._iv_index,
             src_addr=src_addr,
             send_network_pdu=self._pump.put,
             seq=seq,
@@ -140,8 +152,45 @@ class MeshController:
             self._node.handle_network_pdu(payload)
         elif msg_type == MSG_TYPE_PROXY_CONFIG:
             self._handle_proxy_config(payload)
+        elif msg_type == MSG_TYPE_MESH_BEACON:
+            self._handle_beacon(payload)
         else:
             logger.debug("ignoring proxy message type %#04x", msg_type)
+
+    # ---------------------------------------------------------- beacon
+
+    def _handle_beacon(self, payload: bytes) -> None:
+        """Record the subnet's announced IV Index, if the beacon authenticates.
+
+        Best-effort and strictly read-only: a beacon that is malformed, foreign
+        or forged is dropped without touching anything. Adopting the value is
+        the caller's decision (it owns the persistence and the SEQ cursor that
+        goes with it).
+        """
+        try:
+            beacon = parse_secure_network_beacon(payload, self._net_key)
+        except BeaconError as exc:
+            logger.debug("ignoring mesh beacon: %s", exc)
+            return
+        self._beacon = beacon
+        if beacon.iv_index != self._iv_index:
+            logger.warning(
+                "subnet announces IV Index %#x but we are using %#x; "
+                "traffic will be dropped until the new index is adopted",
+                beacon.iv_index, self._iv_index,
+            )
+        if beacon.iv_update:
+            logger.info("subnet is running an IV Update")
+
+    @property
+    def beacon(self) -> SecureNetworkBeacon | None:
+        """The last authenticated Secure Network Beacon, if any."""
+        return self._beacon
+
+    @property
+    def iv_index(self) -> int:
+        """The IV Index this controller encrypts with."""
+        return self._iv_index
 
     # ------------------------------------------------------- proxy filter
 

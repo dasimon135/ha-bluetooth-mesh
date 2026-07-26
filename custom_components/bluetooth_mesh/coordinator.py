@@ -136,12 +136,21 @@ class MeshCoordinator:
             hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.seq"
         )
         self._seq = 0
+        # The IV Index we encrypt with. The .connect export states it as it was
+        # at export time and the mesh moves on without telling the file, so the
+        # value discovered from a Secure Network Beacon is persisted and wins
+        # (see _adopt_iv_index).
+        self._iv_index = self._network.iv_index
         # Persistent TID cursor: carried across on-demand controllers so
         # consecutive Set messages (ON then OFF) never collide on the same TID
         # and get dropped by the node as a retransmit. In-memory is enough — the
         # node's dedup window is seconds, far shorter than a restart.
         self._tid = 0
         self._available = False
+        # Last authenticated Secure Network Beacon seen, kept for diagnostics:
+        # "does the subnet beacon, and do our keys verify it" answers most
+        # support questions in one look.
+        self._beacon = None
         self._stopped = False
         self._fail_count = 0
         self._issue_active = False
@@ -199,6 +208,31 @@ class MeshCoordinator:
         """True while the most recent connect/command/probe succeeded."""
         return self._available
 
+    @property
+    def connected(self) -> bool:
+        """True while a proxy connection is held open."""
+        return self._controller is not None
+
+    @property
+    def beacon(self):
+        """The last authenticated Secure Network Beacon, or ``None``."""
+        return self._beacon
+
+    @property
+    def iv_index(self) -> int:
+        """The IV Index in use (persisted, and adopted from the subnet)."""
+        return self._iv_index
+
+    @property
+    def seq(self) -> int:
+        """The persisted sequence cursor."""
+        return self._seq
+
+    @property
+    def keepalive_seconds(self) -> int:
+        """How long the proxy link is held after the last command (0 = always)."""
+        return self._idle_timeout
+
     # -------------------------------------------------------------- lifecycle
 
     async def async_start(self) -> None:
@@ -209,7 +243,7 @@ class MeshCoordinator:
         command succeeds. The SEQ safety margin is applied here exactly once.
         """
         self._stopped = False
-        self._seq = await self._load_seq()
+        self._seq, self._iv_index = await self._load_state()
         # Fire one probe now so availability reflects reality without waiting;
         # awaited (not backgrounded) so setup sees the result.
         await self._async_probe()
@@ -299,7 +333,7 @@ class MeshCoordinator:
                 client, bearer = await async_connect_bearer(self.hass, address)
                 controller = MeshController(
                     self._network, bearer, src_addr=SRC_ADDR,
-                    seq=self._seq, tid=self._tid,
+                    seq=self._seq, tid=self._tid, iv_index=self._iv_index,
                 )
                 await controller.start()
         except Exception as exc:  # noqa: BLE001 - transport/GATT/connect
@@ -351,10 +385,15 @@ class MeshCoordinator:
                 # replay) nor a TID (dropped as a retransmit).
                 self._seq = controller.seq
                 self._tid = controller.tid
-                try:
-                    await self._store.async_save({"seq": self._seq})
-                except Exception:  # noqa: BLE001
-                    logger.debug("seq persist failed", exc_info=True)
+                # Must run BEFORE persisting: adopting a new IV Index restarts
+                # the SEQ cursor, and that pair has to be stored together.
+                stale_iv_index = self._adopt_iv_index(controller)
+                await self._persist()
+
+            if stale_iv_index:
+                # The live link still encrypts with the old index; drop it so
+                # the next command rebuilds a controller on the new one.
+                await self._teardown()
 
             # A dead TX pump does not raise — the command just times out like an
             # unconfirmed Status — so check explicitly and drop the link, else
@@ -494,12 +533,52 @@ class MeshCoordinator:
 
     # ----------------------------------------------------------- seq persistence
 
-    async def _load_seq(self) -> int:
-        """Stored SEQ + safety margin, or 0 on a fresh install (applied once)."""
+    async def _load_state(self) -> tuple[int, int]:
+        """Stored (SEQ + safety margin, IV Index); the margin is applied once.
+
+        A fresh install has neither, so the SEQ starts at 0 and the IV Index
+        falls back to whatever the ``.connect`` export claimed.
+        """
         data = await self._store.async_load()
         if not data:
-            return 0
-        return int(data.get("seq", 0)) + SEQ_SAFETY_MARGIN
+            return 0, self._network.iv_index
+        return (
+            int(data.get("seq", 0)) + SEQ_SAFETY_MARGIN,
+            int(data.get("iv_index", self._network.iv_index)),
+        )
+
+    async def _persist(self) -> None:
+        """Mirror the SEQ cursor and IV Index to the Store (best-effort)."""
+        try:
+            await self._store.async_save(
+                {"seq": self._seq, "iv_index": self._iv_index}
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("state persist failed", exc_info=True)
+
+    def _adopt_iv_index(self, controller) -> bool:
+        """Take the subnet's announced IV Index; True when it changed.
+
+        A stale IV Index is fatal in silence: the mesh drops every PDU we send
+        and we reject every PDU we receive on the IVI check, with nothing to
+        show for it. The subnet announces the truth in an authenticated Secure
+        Network Beacon on each connection, so adopt it — and restart the SEQ
+        cursor, which is only required to be unique *within* an IV Index.
+        """
+        beacon = getattr(controller, "beacon", None)
+        if beacon is None:
+            return False
+        self._beacon = beacon
+        if beacon.iv_index == self._iv_index:
+            return False
+        logger.warning(
+            "adopting IV Index %#x announced by the subnet (was %#x); "
+            "restarting the SEQ cursor",
+            beacon.iv_index, self._iv_index,
+        )
+        self._iv_index = beacon.iv_index
+        self._seq = 0
+        return True
 
     # --------------------------------------------------------------- availability
 
