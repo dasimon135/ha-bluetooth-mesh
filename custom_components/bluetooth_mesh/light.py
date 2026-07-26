@@ -140,6 +140,44 @@ class MeshLight(LightEntity):
         self._brightness: int | None = None
         self._color_temp_kelvin: int | None = None
 
+    # -------------------------------------------------------------- lifecycle
+
+    async def async_added_to_hass(self) -> None:
+        """Seed the cache from the lamp rather than from a blank guess.
+
+        Scheduled in the background: a mesh round trip must never hold up entity
+        setup, and the entity is perfectly usable meanwhile (it just shows the
+        optimistic default until the answer lands).
+        """
+        await super().async_added_to_hass()
+        self.hass.async_create_background_task(
+            self.async_refresh_state(),
+            f"bluetooth_mesh refresh {self._unicast:04x}",
+        )
+
+    async def async_refresh_state(self) -> None:
+        """Ask the lamp what it is actually doing and cache the answer.
+
+        The optimistic cache starts blank, so before this a lamp that was
+        physically lit came back as *off* after every Home Assistant restart and
+        stayed wrong until someone touched it. Reading it is only possible now
+        that the proxy address filter lets Status replies through.
+
+        Best-effort: an unanswered GET leaves the cache exactly as it was —
+        never invent a state from silence.
+        """
+        on = await self._coordinator.async_get_onoff(self._unicast)
+        if on is None:
+            return
+        self._is_on = on
+        # An off lamp reports lightness 0, which is not a brightness worth
+        # showing — HA wants no brightness at all while off.
+        if on and self._attr_color_mode is not ColorMode.ONOFF:
+            level = await self._coordinator.async_get_lightness(self._unicast)
+            if level is not None:
+                self._brightness = self._level_to_brightness(level)
+        self.async_write_ha_state()
+
     # ------------------------------------------------------------- properties
 
     @property
