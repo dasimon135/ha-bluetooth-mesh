@@ -39,7 +39,12 @@ from btmesh.proxy_config import (
     OP_SET_FILTER_TYPE,
     FilterStatus,
 )
-from btmesh.proxy_pdu import MSG_TYPE_NETWORK_PDU, MSG_TYPE_PROXY_CONFIG
+from btmesh.beacon import build_secure_network_beacon
+from btmesh.proxy_pdu import (
+    MSG_TYPE_MESH_BEACON,
+    MSG_TYPE_NETWORK_PDU,
+    MSG_TYPE_PROXY_CONFIG,
+)
 
 FIXTURE = os.path.join(
     os.path.dirname(__file__), "fixtures", "sample.connect.json"
@@ -571,3 +576,60 @@ async def test_onoff_uses_seeded_tid():
     # Generic OnOff Set params = [onoff, tid]; tid must be the seeded 42.
     assert captured[-1].params[1] == 42
     assert controller.tid == 43  # advanced
+
+
+# ------------------------------------------------- secure network beacon
+
+
+async def test_beacon_is_authenticated_and_exposed():
+    """The node announces the subnet's IV Index on every fresh connection.
+
+    Ignoring it is how a client silently goes deaf after an IV Update: our own
+    IV Index goes stale, every PDU we send is discarded and every PDU we
+    receive fails the IVI check, with nothing in the logs to say why.
+    """
+    controller, bearer, _ = make_setup()
+    network = Network.from_connect_file(FIXTURE)
+    await controller.start()
+    try:
+        bearer.feed(
+            build_secure_network_beacon(network.net_key, iv_index=0x2A),
+            msg_type=MSG_TYPE_MESH_BEACON,
+        )
+        assert controller.beacon is not None
+        assert controller.beacon.iv_index == 0x2A
+        assert controller.beacon.iv_update is False
+    finally:
+        await controller.stop()
+
+
+async def test_a_beacon_from_another_network_is_ignored():
+    """A foreign or forged beacon must never reach our IV Index."""
+    controller, bearer, _ = make_setup()
+    await controller.start()
+    try:
+        bearer.feed(
+            build_secure_network_beacon(bytes(16), iv_index=0x99),
+            msg_type=MSG_TYPE_MESH_BEACON,
+        )
+        assert controller.beacon is None
+    finally:
+        await controller.stop()
+
+
+def test_iv_index_override_is_what_the_node_encrypts_with():
+    """The caller carries the IV Index across connections, not the export.
+
+    A .connect export states the IV Index at export time; the mesh moves on
+    without telling the file. Whoever persists the beacon-discovered value
+    passes it back in here.
+    """
+    network = Network.from_connect_file(FIXTURE)
+    controller = MeshController(network, FakeBearer(), iv_index=0x2A)
+    assert controller.iv_index == 0x2A
+
+
+def test_iv_index_defaults_to_the_network_model():
+    network = Network.from_connect_file(FIXTURE)
+    controller = MeshController(network, FakeBearer())
+    assert controller.iv_index == network.iv_index

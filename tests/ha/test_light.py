@@ -403,3 +403,53 @@ async def test_turn_on_from_an_unknown_state_still_switches_the_lamp_on(hass) ->
 
     assert ("set_onoff", UNICAST, True) in coordinator.calls
     assert light.is_on is True
+
+
+# ------------------------------------------- vendor colour-temperature quirk
+
+
+def _standard_ctl_network() -> Network:
+    """A spec-conformant CTL node from another vendor (not Häfele)."""
+    element0 = Element(
+        index=0,
+        unicast=0x0040,
+        models=(
+            Model(model_id=0x1000, bound_appkey_indexes=(0,)),
+            Model(model_id=0x1300, bound_appkey_indexes=(0,)),
+            Model(model_id=0x1303, bound_appkey_indexes=(0,)),
+        ),
+    )
+    node = Node(
+        uuid="99998888-7777-6666-5555-444433332222",
+        unicast=0x0040,
+        device_key=bytes(16),
+        cid=0x0059,  # Nordic Semiconductor, i.e. not the Häfele quirk
+        name="Standard CTL",
+        elements=(element0,),
+    )
+    return replace(_fixture_network(), nodes=(node,))
+
+
+async def test_standard_vendor_temperature_is_not_mirrored(hass) -> None:
+    """The mirror is a Häfele quirk, not the spec.
+
+    Häfele/ThingOS lamps map Light CTL temperature inversely, so the value is
+    mirrored around the exposed range before sending. Applying that to a
+    spec-conformant lamp inverts warm and cool end to end — and the README
+    advertises standard SIG mesh lights.
+    """
+    light, coordinator = _light(_standard_ctl_network(), unicast=0x0040)
+
+    await light.async_turn_on(color_temp_kelvin=4000)
+
+    assert ("set_ctl", 0x0040, 1.0, 4000) in coordinator.calls
+    assert light.color_temp_kelvin == 4000
+
+
+async def test_hafele_temperature_is_still_mirrored(hass) -> None:
+    """The fixture node is Häfele (CID 0x07E9): 2700 + 6500 - 4000 = 5200."""
+    light, coordinator = _light()
+
+    await light.async_turn_on(color_temp_kelvin=4000)
+
+    assert ("set_ctl_temperature", 0x000D, 5200) in coordinator.calls

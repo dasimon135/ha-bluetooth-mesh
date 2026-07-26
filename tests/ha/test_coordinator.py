@@ -66,6 +66,10 @@ class FakeController:
         # controller can no longer transmit anything (commands still return
         # None rather than raising, so this flag is the only signal).
         self.failed = False
+        # Mirrors MeshController: the last authenticated Secure Network Beacon
+        # and the IV Index this controller encrypts with.
+        self.beacon = None
+        self.iv_index = 0
 
     async def start(self) -> None:
         self.started = True
@@ -170,9 +174,9 @@ async def test_command_reuses_held_connection_persists_seq_frees_on_stop(hass) -
         # the next command skips the multi-second connect.
         assert coord._controller is fake
 
-        # SEQ mirrored to the Store after the command.
+        # SEQ (and the IV Index it is only unique within) mirrored to the Store.
         stored = await coord._store.async_load()
-        assert stored == {"seq": fake.seq}
+        assert stored == {"seq": fake.seq, "iv_index": 0}
 
         # No repair issue while healthy.
         assert (
@@ -254,7 +258,7 @@ async def test_failed_controller_construction_disconnects_the_client(hass) -> No
     """Same guarantee when the controller cannot even be built."""
     entry = _make_entry(hass)
 
-    def ctor(network, bearer, *, src_addr, seq, tid):
+    def ctor(network, bearer, *, src_addr, seq, tid, iv_index):
         raise ValueError("bad network model")
 
     with _patch_transport(None, ctor_side_effect=ctor) as client:
@@ -302,7 +306,7 @@ async def test_dead_transport_is_never_reused_by_the_next_command(hass) -> None:
     entry = _make_entry(hass)
     built: list[FakeController] = []
 
-    def ctor(network, bearer, *, src_addr, seq, tid):
+    def ctor(network, bearer, *, src_addr, seq, tid, iv_index):
         built.append(FakeController(seq=seq, tid=tid))
         return built[-1]
 
@@ -365,6 +369,75 @@ async def test_removing_a_listener_stops_the_notifications(hass) -> None:
     await coord.async_stop()
 
 
+class _Beacon:
+    """Stand-in for btmesh.beacon.SecureNetworkBeacon."""
+
+    def __init__(self, iv_index: int, iv_update: bool = False) -> None:
+        self.iv_index = iv_index
+        self.iv_update = iv_update
+
+
+async def test_iv_index_is_seeded_from_the_store(hass) -> None:
+    """The persisted IV Index wins over the one frozen in the .connect export."""
+    entry = _make_entry(hass)
+    store = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.seq")
+    await store.async_save({"seq": 0x100, "iv_index": 7})
+
+    seen: list[int] = []
+
+    def ctor(network, bearer, *, src_addr, seq, tid, iv_index):
+        seen.append(iv_index)
+        return FakeController(seq=seq, tid=tid)
+
+    with _patch_transport(None, ctor_side_effect=ctor):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        assert seen[0] == 7
+    await coord.async_stop()
+
+
+async def test_a_new_iv_index_is_adopted_persisted_and_restarts_the_seq(hass) -> None:
+    """An IV Update the export knows nothing about must not silence us.
+
+    Our IV Index going stale is fatal in silence: every PDU we send is dropped
+    by the mesh and every PDU we receive fails the IVI check. The subnet
+    announces the truth in its Secure Network Beacon, so adopt it — and restart
+    the SEQ cursor, which is only unique per IV Index.
+    """
+    entry = _make_entry(hass)
+    fake = FakeController(seq=0x500)
+    fake.beacon = _Beacon(iv_index=9)
+    with _patch_transport(fake) as client:
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await coord.async_set_onoff(UNICAST, True)
+
+        stored = await coord._store.async_load()
+        assert stored["iv_index"] == 9
+        assert stored["seq"] == 0  # a fresh IV Index restarts the SEQ space
+        # The live link still encrypts with the old index, so it is dropped and
+        # the next command reconnects on the new one.
+        assert coord._controller is None
+        assert client.disconnect.await_count >= 1
+    await coord.async_stop()
+
+
+async def test_a_matching_beacon_changes_nothing(hass) -> None:
+    """The normal case: the beacon confirms what we already use."""
+    entry = _make_entry(hass)
+    fake = FakeController(seq=0x500)
+    fake.beacon = _Beacon(iv_index=0)  # the fixture network's IV Index
+    with _patch_transport(fake):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await coord.async_set_onoff(UNICAST, True)
+
+        stored = await coord._store.async_load()
+        assert stored["seq"] == fake.seq  # untouched
+        assert coord._controller is fake  # link kept
+    await coord.async_stop()
+
+
 async def test_no_proxy_stays_unavailable_and_raises_issue(hass) -> None:
     """No proxy → unavailable (no raise); a repair appears past the threshold."""
     entry = _make_entry(hass)
@@ -402,7 +475,7 @@ async def test_seq_margin_applied_once_not_per_command(hass) -> None:
 
     ctor_seqs: list[int] = []
 
-    def ctor(network, bearer, *, src_addr, seq, tid):
+    def ctor(network, bearer, *, src_addr, seq, tid, iv_index):
         ctor_seqs.append(seq)
         assert src_addr == coordinator_mod.SRC_ADDR
         return FakeController(seq=seq, tid=tid)

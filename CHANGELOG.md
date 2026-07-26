@@ -4,6 +4,34 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **The IV Index is tracked from the subnet's Secure Network Beacon.** It was
+  frozen at whatever the `.connect` export claimed (usually 0), and the mesh
+  moves on without telling the file. A stale IV Index is fatal in silence:
+  every PDU we send is discarded and every PDU we receive fails the IVI check,
+  with nothing in the logs to explain it. The node announces the truth on every
+  connection; the beacon is now authenticated (`k1(NetKey, s1("nkbk"),
+  "id128" || 0x01)`), and a new index is adopted, persisted, and restarts the
+  SEQ cursor — which is only required to be unique *within* an IV Index. An
+  unauthenticated beacon is refused: adopting a forged one would mute the
+  integration.
+- **Redacted diagnostics** (`diagnostics.py`): the Network ID the integration
+  looks for, every 0x1828 advert Home Assistant currently sees, the IV Index
+  and SEQ in use, connection state, and each node's element/model composition.
+  No key material: the NetKey, AppKey and DeviceKeys the config entry stores
+  verbatim are never echoed, which is asserted by a test.
+
+### Fixed
+
+- **The colour-temperature mirror no longer applies to every vendor.**
+  Häfele/ThingOS lamps map Light CTL temperature inversely and the workaround
+  mirrors the requested Kelvin around the exposed range; applied to a
+  spec-conformant lamp it inverted warm and cool end to end. It is now gated on
+  the Häfele company identifier.
+
 ## [0.2.1] — 2026-07-26
 
 ### Fixed
