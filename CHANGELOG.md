@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-07-26
+
+### Changed
+
+- Documentation caught up with the code. The README still described the 0.1.0
+  integration, and both forum drafts carried a claim that had become false —
+  "optimistic state: parallel changes from the vendor app aren't read back".
+  On/off and brightness have been read from the mesh since 0.2.0; colour
+  temperature genuinely is still last-command-wins, so that is what the stated
+  limitation now says. The README also documents reading state, `unknown`
+  instead of a guessed `off`, the reconfigure flow, diagnostics, and the
+  corrected development commands.
+
 ## [0.4.0] — 2026-07-26
 
 ### Added
@@ -200,6 +213,7 @@ ESPHome Bluetooth proxy.
   made from the vendor app in parallel are not read back until HA's next
   command.
 
+[0.4.1]: https://github.com/dasimon135/ha-bluetooth-mesh/releases/tag/v0.4.1
 [0.4.0]: https://github.com/dasimon135/ha-bluetooth-mesh/releases/tag/v0.4.0
 [0.3.0]: https://github.com/dasimon135/ha-bluetooth-mesh/releases/tag/v0.3.0
 [0.2.1]: https://github.com/dasimon135/ha-bluetooth-mesh/releases/tag/v0.2.1
