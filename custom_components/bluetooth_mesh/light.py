@@ -26,7 +26,7 @@ from homeassistant.components.light import (
     ColorMode,
     LightEntity,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -92,6 +92,9 @@ class MeshLight(LightEntity):
 
     _attr_has_entity_name = True
     _attr_name = None
+    # Availability and state are pushed by the coordinator (see
+    # async_added_to_hass); there is nothing for Home Assistant to poll.
+    _attr_should_poll = False
 
     def __init__(self, coordinator: MeshCoordinator, node) -> None:
         self._coordinator = coordinator
@@ -143,13 +146,31 @@ class MeshLight(LightEntity):
     # -------------------------------------------------------------- lifecycle
 
     async def async_added_to_hass(self) -> None:
-        """Seed the cache from the lamp rather than from a blank guess.
+        """Track the coordinator and seed the cache from the lamp itself.
 
-        Scheduled in the background: a mesh round trip must never hold up entity
-        setup, and the entity is perfectly usable meanwhile (it just shows the
-        optimistic default until the answer lands).
+        Reading is only attempted while the mesh is actually reachable. At Home
+        Assistant startup the entity is added before the Bluetooth proxies have
+        finished registering their scanners, so a read fired here finds no proxy
+        and answers nothing — hence the subscription: the read happens when the
+        coordinator BECOMES available, and again after every reconnection, which
+        also catches whatever changed while we were away.
         """
         await super().async_added_to_hass()
+        self.async_on_remove(
+            self._coordinator.async_add_listener(self._handle_availability)
+        )
+        if self._coordinator.available:
+            self._schedule_refresh()
+
+    @callback
+    def _handle_availability(self) -> None:
+        """Push the availability change to HA, and re-read when back online."""
+        self.async_write_ha_state()
+        if self._coordinator.available:
+            self._schedule_refresh()
+
+    def _schedule_refresh(self) -> None:
+        """Read the lamp in the background; a round trip must not block setup."""
         self.hass.async_create_background_task(
             self.async_refresh_state(),
             f"bluetooth_mesh refresh {self._unicast:04x}",

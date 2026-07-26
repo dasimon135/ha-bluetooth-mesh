@@ -322,6 +322,49 @@ async def test_dead_transport_is_never_reused_by_the_next_command(hass) -> None:
     await coord.async_stop()
 
 
+async def test_listeners_fire_only_on_an_availability_transition(hass) -> None:
+    """Entities are told when the mesh comes back, not on every connect.
+
+    They cannot poll for it — the light platform reads availability straight
+    off the coordinator — and re-reading the lamp on every successful command
+    would churn its single proxy slot for nothing.
+    """
+    entry = _make_entry(hass)
+    fake = FakeController()
+    events: list[bool] = []
+
+    with _patch_transport(fake) as client:
+        coord = MeshCoordinator(hass, entry)
+        coord.async_add_listener(lambda: events.append(coord.available))
+
+        await coord.async_start()  # first successful connect: unavailable -> available
+        assert events == [True]
+
+        await coord.async_set_onoff(UNICAST, True)  # still available, no event
+        assert events == [True]
+
+        # Now make every connect fail until the threshold flips us to stale.
+        client.is_connected = False
+        with patch.object(coordinator_mod, "find_proxy_address", return_value=None):
+            for _ in range(UNREACHABLE_THRESHOLD):
+                await coord.async_set_onoff(UNICAST, True)
+
+        assert events == [True, False]
+    await coord.async_stop()
+
+
+async def test_removing_a_listener_stops_the_notifications(hass) -> None:
+    entry = _make_entry(hass)
+    events: list[bool] = []
+    with _patch_transport(FakeController()):
+        coord = MeshCoordinator(hass, entry)
+        remove = coord.async_add_listener(lambda: events.append(coord.available))
+        remove()
+        await coord.async_start()
+        assert events == []
+    await coord.async_stop()
+
+
 async def test_no_proxy_stays_unavailable_and_raises_issue(hass) -> None:
     """No proxy → unavailable (no raise); a repair appears past the threshold."""
     entry = _make_entry(hass)

@@ -146,6 +146,8 @@ class MeshCoordinator:
         self._fail_count = 0
         self._issue_active = False
         self._probe_unsub: CALLBACK_TYPE | None = None
+        # Entities subscribed to availability transitions (see async_add_listener).
+        self._listeners: list[CALLBACK_TYPE] = []
         # The HELD proxy connection (keep-alive): reused across commands and
         # dropped after _idle_timeout seconds of inactivity (0 = never drop).
         # None while disconnected.
@@ -158,6 +160,32 @@ class MeshCoordinator:
         # Serialise everything through a single connection at a time: two
         # commands must never contend for the lamp's single proxy slot.
         self._lock = asyncio.Lock()
+
+    # -------------------------------------------------------------- listeners
+
+    def async_add_listener(self, update_callback: CALLBACK_TYPE) -> CALLBACK_TYPE:
+        """Subscribe to availability changes; returns the unsubscribe callable.
+
+        Entities read :attr:`available` directly, so without this they would
+        only notice a change on Home Assistant's next entity poll. It also tells
+        them when the mesh comes BACK, which is the moment to re-read a lamp
+        whose state may have been changed from the vendor app meanwhile.
+        """
+        self._listeners.append(update_callback)
+
+        def _remove() -> None:
+            if update_callback in self._listeners:
+                self._listeners.remove(update_callback)
+
+        return _remove
+
+    def _notify_listeners(self) -> None:
+        """Fire every listener; one raising must not starve the others."""
+        for update_callback in list(self._listeners):
+            try:
+                update_callback()
+            except Exception:  # noqa: BLE001
+                logger.exception("coordinator listener raised")
 
     # ------------------------------------------------------------- properties
 
@@ -476,10 +504,18 @@ class MeshCoordinator:
     # --------------------------------------------------------------- availability
 
     def _set_available(self) -> None:
-        """Mark reachable: clear the fail count and any active repair issue."""
+        """Mark reachable: clear the fail count and any active repair issue.
+
+        Only an actual transition notifies listeners — this runs on every
+        successful connect, and re-reading every lamp each time would churn the
+        single proxy slot for nothing.
+        """
+        was_available = self._available
         self._available = True
         self._fail_count = 0
         self._clear_issue()
+        if not was_available:
+            self._notify_listeners()
 
     def _set_unavailable(self) -> None:
         """Count a miss; flip to unavailable only once misses are sustained.
@@ -493,8 +529,11 @@ class MeshCoordinator:
         """
         self._fail_count += 1
         if self._fail_count >= UNREACHABLE_THRESHOLD:
+            was_available = self._available
             self._available = False
             self._raise_proxy_issue()
+            if was_available:
+                self._notify_listeners()
 
     # --------------------------------------------------------------- repairs
 

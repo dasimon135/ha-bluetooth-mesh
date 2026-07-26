@@ -48,6 +48,16 @@ class FakeCoordinator:
         # What the lamp reports when asked (None = it stayed silent).
         self.onoff = onoff
         self.lightness = lightness
+        self.listeners: list = []
+
+    def async_add_listener(self, callback_):
+        """Mirror the real coordinator: notified on availability changes."""
+        self.listeners.append(callback_)
+        return lambda: self.listeners.remove(callback_)
+
+    def fire(self) -> None:
+        for callback_ in list(self.listeners):
+            callback_()
 
     async def async_set_onoff(self, unicast: int, on: bool) -> bool:
         self.calls.append(("set_onoff", unicast, on))
@@ -318,3 +328,50 @@ async def test_added_to_hass_refreshes_in_the_background(hass) -> None:
 
     assert ("get_onoff", UNICAST) in coordinator.calls
     assert light.is_on is True
+
+
+async def test_no_refresh_while_the_mesh_is_unreachable(hass) -> None:
+    """Asking an unreachable mesh is pointless — and the answer would be None."""
+    light, coordinator = _light()
+    coordinator.available = False
+    light.hass = hass
+    light.entity_id = "light.mesh_test"
+
+    await light.async_added_to_hass()
+    await hass.async_block_till_done()
+
+    assert coordinator.calls == []
+
+
+async def test_refreshes_when_the_mesh_becomes_reachable(hass) -> None:
+    """The startup race is why this exists.
+
+    At Home Assistant startup the entity is added before the ESPHome proxies
+    have finished registering their scanners, so the mesh is not yet reachable
+    and a one-shot read finds no proxy, returns None and never retries — the
+    lamp stayed shown as off (observed live 2026-07-26). Refreshing when the
+    coordinator BECOMES available fixes that, and re-reads after every
+    reconnection too, catching whatever changed while we were away.
+    """
+    light, coordinator = _light()
+    coordinator.available = False
+    light.hass = hass
+    light.entity_id = "light.mesh_test"
+    await light.async_added_to_hass()
+    await hass.async_block_till_done()
+    assert coordinator.calls == []  # nothing asked yet
+
+    coordinator.available = True
+    coordinator.fire()
+    await hass.async_block_till_done()
+
+    assert ("get_onoff", UNICAST) in coordinator.calls
+    assert light.is_on is True
+    assert light.brightness == 128
+
+
+async def test_availability_change_is_pushed_not_polled(hass) -> None:
+    """The entity must not rely on HA's 30 s poll to notice it went stale."""
+    light, coordinator = _light()
+
+    assert light.should_poll is False
