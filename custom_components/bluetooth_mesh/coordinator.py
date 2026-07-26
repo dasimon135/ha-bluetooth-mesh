@@ -96,12 +96,13 @@ CONNECT_TIMEOUT = 20.0
 # per-command status wait below.
 COMMAND_TIMEOUT = 8.0
 
-# How long a command waits for the node's Status reply before giving up. This is
-# deliberately SHORT: control is fire-and-forget (the Set reaches the node on the
-# wire regardless), and the node does not currently forward Status replies back
-# over the proxy connection (its proxy filter is not configured), so a long wait
-# would only add latency to every button press. If a Status does arrive within
-# the window we still use its confirmed value; otherwise the command is optimistic.
+# How long a command waits for the node's Status reply before giving up.
+# ``MeshController.start`` now configures the proxy's address filter, so Status
+# replies DO come back (a round trip is well under a second) and the confirmed
+# value is normally what we cache. It stays short anyway: control is
+# fire-and-forget — the Set reaches the node on the wire regardless — so a proxy
+# or node that stays silent must not add latency to every button press. Past the
+# window the command is simply optimistic, exactly as before.
 STATUS_TIMEOUT = 1.5
 
 # Default seconds to HOLD the proxy connection open after the last command
@@ -446,7 +447,8 @@ class MeshCoordinator:
         """Reachability check: bring the proxy connection up, then release it.
 
         Availability comes purely from whether the proxy link can be established
-        (no GET — the node does not forward a Status back). Unlike a real command
+        (no GET — bringing the link up already proves the node is reachable, and
+        a GET would cost a round trip for nothing). Unlike a real command
         this does NOT hold the connection: if we were not already connected it
         connects, records availability, and disconnects immediately so a
         background recovery check never keeps the lamp's slot. If a command

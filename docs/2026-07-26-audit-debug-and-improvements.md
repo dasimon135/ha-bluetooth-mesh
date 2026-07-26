@@ -164,7 +164,17 @@ traceback instead of a proper setup failure. Wrap and raise
 
 ## 2. Architecture gaps (the high-value work)
 
-### 2.1 (P1 feature) Configure the proxy filter — the single biggest upgrade
+### 2.1 (P1 feature) Configure the proxy filter — the single biggest upgrade — **IMPLEMENTED**
+
+> Implemented on 2026-07-26: `btmesh.proxy_config` + `MeshNode.build/parse_proxy_config_pdu`
+> + `MeshController._configure_filter()` (accept list, our own address), all
+> best-effort. **Not yet hardware-validated** — the codecs are exercised end to
+> end in tests against a real `MeshNode` peer, but never against the actual
+> lamp. Watch the log on first deploy: a proxy that does not confirm the filter
+> logs a warning and the integration falls back to the previous optimistic
+> behaviour. `STATUS_TIMEOUT` was left at 1.5 s (a round trip is well under a
+> second, and a silent proxy must not slow every button press).
+
 
 `proxy_pdu.py:42` defines `MSG_TYPE_PROXY_CONFIG = 0x02`, and **nothing else in
 the tree implements Proxy Configuration**. That is the root cause documented in
@@ -337,9 +347,8 @@ noted only so it is not "fixed" by accident.
 1. ~~§1.1 client leak + §1.2 dead pump~~ and ~~§3.1 vendoring `--check`~~ —
    **done 2026-07-26**.
 2. §3.2 `iot_class`, §3.3 ruff — short, protects everything after it.
-3. §1.3 CTL mirror gating, §1.4 availability listener, §1.5 unique_id fallback.
-4. §2.4 delayed SEQ save, §2.5 background first probe, §2.3 push discovery.
-5. **§2.1 proxy filter** — then re-open `STATUS_TIMEOUT`, use the existing
-   getters, and flip `iot_class` to `local_push` for real.
+3. ~~§2.1 proxy filter~~ — **done 2026-07-26**, pending hardware validation.
+4. §1.3 CTL mirror gating, §1.4 availability listener, §1.5 unique_id fallback.
+5. §2.4 delayed SEQ save, §2.5 background first probe, §2.3 push discovery.
 6. §2.2 Secure Network Beacon / IV Index tracking, then §2.8 diagnostics +
    reconfigure + restore.

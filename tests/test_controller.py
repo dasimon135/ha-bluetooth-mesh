@@ -27,10 +27,18 @@ from btmesh.access import (
     OP_LIGHT_LIGHTNESS_STATUS,
     encode_opcode,
 )
+from btmesh import controller as controller_mod
 from btmesh.controller import MeshController
 from btmesh.network_model import Network
 from btmesh.node import MeshNode, ReceivedMessage
-from btmesh.proxy_pdu import MSG_TYPE_NETWORK_PDU
+from btmesh.proxy_config import (
+    FILTER_ACCEPT_LIST,
+    OP_ADD_ADDRESSES,
+    OP_FILTER_STATUS,
+    OP_SET_FILTER_TYPE,
+    FilterStatus,
+)
+from btmesh.proxy_pdu import MSG_TYPE_NETWORK_PDU, MSG_TYPE_PROXY_CONFIG
 
 FIXTURE = os.path.join(
     os.path.dirname(__file__), "fixtures", "sample.connect.json"
@@ -47,6 +55,11 @@ class FakeBearer:
         self.device: MeshNode | None = None
         self.started = False
         self.stopped = False
+        # Proxy-configuration messages seen (decoded), and whether this fake
+        # proxy answers them with a Filter Status like a real one would.
+        self.proxy_config: list[bytes] = []
+        self.answer_proxy_config = True
+        self._filter_list_size = 0
 
     async def start(self, on_message) -> None:
         self.on_message = on_message
@@ -54,22 +67,52 @@ class FakeBearer:
 
     async def send(self, msg_type: int, payload: bytes) -> None:
         self.sent.append((msg_type, payload))
-        if self.device is not None:  # None => black hole (timeout tests)
+        if msg_type == MSG_TYPE_PROXY_CONFIG:
+            self._handle_proxy_config(payload)
+        elif self.device is not None:  # None => black hole (timeout tests)
             self.device.handle_network_pdu(payload)
+
+    def _handle_proxy_config(self, payload: bytes) -> None:
+        """Play the proxy server: record the message, answer a Filter Status."""
+        if self.device is None:
+            return
+        message = self.device.parse_proxy_config_pdu(payload)
+        if message is None:
+            return
+        self.proxy_config.append(message)
+        if message[0] == OP_SET_FILTER_TYPE:
+            self._filter_list_size = 0  # setting the type clears the list
+        elif message[0] == OP_ADD_ADDRESSES:
+            self._filter_list_size += (len(message) - 1) // 2
+        if not self.answer_proxy_config:
+            return
+        status = bytes([OP_FILTER_STATUS, FILTER_ACCEPT_LIST]) + (
+            self._filter_list_size
+        ).to_bytes(2, "big")
+        self.feed(
+            self.device.build_proxy_config_pdu(status),
+            msg_type=MSG_TYPE_PROXY_CONFIG,
+        )
 
     async def stop(self) -> None:
         self.stopped = True
 
-    def feed(self, pdu: bytes) -> None:
+    def feed(self, pdu: bytes, msg_type: int = MSG_TYPE_NETWORK_PDU) -> None:
         """Device -> controller: deliver a reply PDU to the controller's RX path."""
-        self.on_message(MSG_TYPE_NETWORK_PDU, pdu)
+        self.on_message(msg_type, pdu)
 
 
-def make_setup(tid: int = 0):
+def make_setup(tid: int = 0, fade: bool = False):
     """Build a started controller wired to a device node through a FakeBearer.
 
     Returns ``(controller, bearer, captured)`` where ``captured`` is the list of
     access :class:`ReceivedMessage`s the device saw (newest last).
+
+    ``fade=True`` makes the device answer like a lamp MID-TRANSITION: the status
+    reports a present value still on its way to the commanded target, plus the
+    target and a remaining time. Real lamps do this on every non-instant
+    transition, and it is the case that makes "present" the wrong thing to
+    trust.
     """
     network = Network.from_connect_file(FIXTURE)
     bearer = FakeBearer()
@@ -98,9 +141,20 @@ def make_setup(tid: int = 0):
             )
         elif msg.opcode == OP_LIGHT_LIGHTNESS_SET:
             lightness = msg.params[0:2]
-            device.send_access(
-                msg.src, encode_opcode(OP_LIGHT_LIGHTNESS_STATUS) + lightness
-            )
+            if fade:
+                # Still ramping: present is halfway, target is what was asked.
+                present = int.from_bytes(lightness, "little") // 2
+                device.send_access(
+                    msg.src,
+                    encode_opcode(OP_LIGHT_LIGHTNESS_STATUS)
+                    + present.to_bytes(2, "little")
+                    + lightness
+                    + bytes([0x0A]),  # remaining time
+                )
+            else:
+                device.send_access(
+                    msg.src, encode_opcode(OP_LIGHT_LIGHTNESS_STATUS) + lightness
+                )
         elif msg.opcode == OP_LIGHT_LIGHTNESS_GET:
             device.send_access(  # report a fixed present lightness of 0x4000
                 msg.src,
@@ -109,12 +163,25 @@ def make_setup(tid: int = 0):
             )
         elif msg.opcode == OP_LIGHT_CTL_TEMPERATURE_SET:
             temperature = msg.params[0:2]
-            device.send_access(
-                msg.src,
-                encode_opcode(OP_LIGHT_CTL_TEMPERATURE_STATUS)
-                + temperature
-                + (0).to_bytes(2, "little", signed=True),  # present delta UV
-            )
+            delta_uv = (0).to_bytes(2, "little", signed=True)
+            if fade:
+                present = int.from_bytes(temperature, "little") - 500
+                device.send_access(
+                    msg.src,
+                    encode_opcode(OP_LIGHT_CTL_TEMPERATURE_STATUS)
+                    + present.to_bytes(2, "little")
+                    + delta_uv
+                    + temperature
+                    + delta_uv
+                    + bytes([0x0A]),  # remaining time
+                )
+            else:
+                device.send_access(
+                    msg.src,
+                    encode_opcode(OP_LIGHT_CTL_TEMPERATURE_STATUS)
+                    + temperature
+                    + delta_uv,  # present delta UV
+                )
         elif msg.opcode == OP_LIGHT_CTL_SET:
             # Light CTL Set params: lightness(2) + temperature(2) + delta_uv(2) + tid.
             lightness = msg.params[0:2]
@@ -271,8 +338,8 @@ async def test_set_ctl_temperature_clamps_to_valid_range():
 
 async def test_set_onoff_returns_none_on_timeout():
     controller, bearer, _ = make_setup()
-    bearer.device = None  # black hole: no reply ever comes back
     await controller.start()
+    bearer.device = None  # black hole: no reply ever comes back
     try:
         result = await controller.set_onoff(
             UNICAST, True, timeout=0.01, retries=0
@@ -284,13 +351,110 @@ async def test_set_onoff_returns_none_on_timeout():
 
 async def test_get_onoff_returns_none_on_timeout():
     controller, bearer, _ = make_setup()
-    bearer.device = None
     await controller.start()
+    bearer.device = None
     try:
         result = await controller.get_onoff(UNICAST, timeout=0.01)
     finally:
         await controller.stop()
     assert result is None
+
+
+# ------------------------------------------------------ mid-transition sets
+
+
+async def test_set_lightness_returns_the_target_not_the_mid_fade_value():
+    """A Set must report where the lamp is GOING, not where it currently is.
+
+    Until the proxy filter was configured no Status ever came back, so this
+    read-back path was dead code. Now that replies arrive, returning the
+    present value mid-fade would drag the Home Assistant brightness slider to
+    a transient half-way value — the display drift that was fixed once by
+    ignoring the reply entirely.
+    """
+    controller, _, _ = make_setup(fade=True)
+    await controller.start()
+    try:
+        result = await controller.set_lightness(UNICAST, 1.0)
+    finally:
+        await controller.stop()
+    assert result == 0xFFFF  # the target, not the 0x7FFF present value
+
+
+async def test_set_ctl_temperature_returns_the_target_not_the_mid_fade_value():
+    controller, _, _ = make_setup(fade=True)
+    await controller.start()
+    try:
+        result = await controller.set_ctl_temperature(UNICAST, 4000)
+    finally:
+        await controller.stop()
+    assert result == 4000  # the target, not the 3500 present value
+
+
+async def test_set_lightness_returns_the_present_value_when_settled():
+    """With no transition in flight there is no target field to prefer."""
+    controller, _, _ = make_setup()
+    await controller.start()
+    try:
+        result = await controller.set_lightness(UNICAST, 1.0)
+    finally:
+        await controller.stop()
+    assert result == 0xFFFF
+
+
+# ------------------------------------------------------- proxy filter setup
+
+
+async def test_start_configures_the_proxy_filter():
+    """Without this, the proxy forwards NOTHING back to us.
+
+    A proxy server starts each connection with an empty accept list (spec
+    §6.5.1), so every Status a node sends is dropped before reaching the
+    client. ``start()`` must claim our own address so replies get through.
+    """
+    controller, bearer, _ = make_setup()
+    await controller.start()
+    try:
+        assert bearer.proxy_config == [
+            bytes([OP_SET_FILTER_TYPE, FILTER_ACCEPT_LIST]),
+            bytes([OP_ADD_ADDRESSES]) + (0x7FFF).to_bytes(2, "big"),
+        ]
+        # The server confirmed one address in an accept list.
+        assert controller.filter_status == FilterStatus(
+            filter_type=FILTER_ACCEPT_LIST, list_size=1
+        )
+    finally:
+        await controller.stop()
+
+
+async def test_start_survives_a_proxy_that_never_answers(monkeypatch):
+    """Filter setup is best-effort: no Filter Status must not break the link.
+
+    Control still reaches the node either way — losing confirmed state is a
+    degradation, not a reason to fail the connection.
+    """
+    monkeypatch.setattr(controller_mod, "FILTER_STATUS_TIMEOUT", 0.05)
+    controller, bearer, _ = make_setup()
+    bearer.answer_proxy_config = False
+    await controller.start()
+    try:
+        assert controller.filter_status is None
+        assert bearer.started is True
+        # The link is usable regardless.
+        assert await controller.set_onoff(UNICAST, True) is True
+    finally:
+        await controller.stop()
+
+
+async def test_proxy_filter_messages_travel_as_proxy_config_pdus():
+    """They must go out under the proxy-config message type, not as mesh traffic."""
+    controller, bearer, _ = make_setup()
+    await controller.start()
+    try:
+        types = [msg_type for msg_type, _ in bearer.sent]
+        assert types == [MSG_TYPE_PROXY_CONFIG, MSG_TYPE_PROXY_CONFIG]
+    finally:
+        await controller.stop()
 
 
 # ----------------------------------------------------------- dead TX pump
@@ -307,12 +471,12 @@ async def test_dead_tx_pump_is_reported_as_failed():
     does nothing until the entry is reloaded.
     """
     controller, bearer, _ = make_setup()
+    await controller.start()
 
     async def dead_send(msg_type, payload):
         raise RuntimeError("GATT write failed: link wedged")
 
     bearer.send = dead_send
-    await controller.start()
     try:
         result = await controller.set_onoff(
             UNICAST, True, timeout=0.05, retries=0

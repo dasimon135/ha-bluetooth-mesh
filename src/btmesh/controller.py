@@ -13,6 +13,7 @@ index; addressing is by element unicast, taken from that same static model.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from .access import (
@@ -35,7 +36,15 @@ from .access import (
 from .bearer import GattBearer
 from .network_model import Network
 from .node import MeshNode, ReceivedMessage
-from .proxy_pdu import MSG_TYPE_NETWORK_PDU
+from .proxy_config import (
+    FILTER_ACCEPT_LIST,
+    FilterStatus,
+    ProxyConfigError,
+    add_addresses,
+    parse_filter_status,
+    set_filter_type,
+)
+from .proxy_pdu import MSG_TYPE_NETWORK_PDU, MSG_TYPE_PROXY_CONFIG
 from .pump import BearerPump
 
 logger = logging.getLogger(__name__)
@@ -47,10 +56,26 @@ __all__ = ["MeshController"]
 _CTL_TEMP_MIN = 800
 _CTL_TEMP_MAX = 20000
 
+# How long start() waits for the proxy to confirm the filter it was just given.
+# Bounded and best-effort: control reaches the node whether or not the proxy
+# answers, so a silent proxy costs us confirmed state, not the connection.
+FILTER_STATUS_TIMEOUT = 2.0
+
 
 def _full_payload(msg: ReceivedMessage) -> bytes:
     """Rebuild the on-air access payload the access.parse_* helpers expect."""
     return encode_opcode(msg.opcode) + msg.params
+
+
+def _settled(present, target):
+    """Where the lamp will END UP: the target while a transition is running.
+
+    A Status sent mid-transition carries the value the lamp is currently
+    passing through plus the one it is heading for. A Set asked for the latter,
+    so reporting the former back would make a caller's cached state chase a
+    transient — a brightness slider snapping to a half-way value mid-fade.
+    """
+    return present if target is None else target
 
 
 class MeshController:
@@ -92,6 +117,11 @@ class MeshController:
         # that can no longer transmit. Mirror it here so the caller can drop the
         # link and reconnect.
         self._pump.on_error = self._on_pump_error
+        self._src = src_addr
+        # Proxy address-filter state (see _configure_filter).
+        self._filter_status: FilterStatus | None = None
+        self._filter_pending = 0
+        self._filter_done: "asyncio.Future[None] | None" = None
         # The Generic OnOff / Lightness / CTL Set messages carry a TID; the node
         # DEDUPLICATES consecutive Sets that share (src, TID) within a short
         # window. So the TID must keep advancing ACROSS commands. When a fresh
@@ -103,9 +133,10 @@ class MeshController:
     # ------------------------------------------------------------- lifecycle
 
     async def start(self) -> None:
-        """Subscribe the bearer to our RX path and start the TX pump."""
+        """Subscribe the bearer, start the TX pump, and claim the proxy filter."""
         await self._bearer.start(self._on_message)
         self._pump.start()
+        await self._configure_filter()
 
     async def stop(self) -> None:
         """Stop the TX pump and the bearer (reverse of :meth:`start`)."""
@@ -115,8 +146,76 @@ class MeshController:
     def _on_message(self, msg_type: int, payload: bytes) -> None:
         if msg_type == MSG_TYPE_NETWORK_PDU:
             self._node.handle_network_pdu(payload)
+        elif msg_type == MSG_TYPE_PROXY_CONFIG:
+            self._handle_proxy_config(payload)
         else:
             logger.debug("ignoring proxy message type %#04x", msg_type)
+
+    # ------------------------------------------------------- proxy filter
+
+    async def _configure_filter(self) -> None:
+        """Ask the proxy to forward the traffic addressed to us.
+
+        A Proxy Server starts every connection with an accept list that is
+        EMPTY (spec §6.5.1) — it forwards nothing inbound until told otherwise,
+        which is why an unconfigured connection never sees a single Status.
+        Setting the type (which clears the list) and adding our own address is
+        what makes confirmed state possible.
+
+        Best-effort throughout: a proxy that ignores or fails this still carries
+        our outbound control perfectly well, so nothing here may break the
+        connection — we log the degradation and carry on optimistically.
+        """
+        self._filter_pending = 2
+        self._filter_done = asyncio.get_running_loop().create_future()
+        try:
+            self._send_proxy_config(set_filter_type(FILTER_ACCEPT_LIST))
+            self._send_proxy_config(add_addresses([self._src]))
+            await asyncio.wait_for(self._filter_done, FILTER_STATUS_TIMEOUT)
+        except TimeoutError:
+            logger.warning(
+                "proxy did not confirm the address filter within %ss; Status "
+                "replies may not be forwarded (state stays optimistic)",
+                FILTER_STATUS_TIMEOUT,
+            )
+        except Exception as exc:  # noqa: BLE001 - never fail the connection
+            logger.warning("could not configure the proxy filter: %s", exc)
+        finally:
+            self._filter_done = None
+
+    def _send_proxy_config(self, message: bytes) -> None:
+        """Queue one proxy configuration message on the shared TX pump."""
+        self._pump.put(
+            self._node.build_proxy_config_pdu(message),
+            msg_type=MSG_TYPE_PROXY_CONFIG,
+        )
+
+    def _handle_proxy_config(self, payload: bytes) -> None:
+        message = self._node.parse_proxy_config_pdu(payload)
+        if message is None:
+            return
+        try:
+            status = parse_filter_status(message)
+        except ProxyConfigError as exc:
+            logger.debug("ignoring proxy configuration message: %s", exc)
+            return
+        logger.debug(
+            "proxy filter: type %#04x, %d address(es)",
+            status.filter_type, status.list_size,
+        )
+        self._filter_status = status
+        self._filter_pending -= 1
+        if (
+            self._filter_pending <= 0
+            and self._filter_done is not None
+            and not self._filter_done.done()
+        ):
+            self._filter_done.set_result(None)
+
+    @property
+    def filter_status(self) -> FilterStatus | None:
+        """The proxy's last Filter Status, or ``None`` if it never answered."""
+        return self._filter_status
 
     def _on_pump_error(self, exc: BaseException) -> None:
         logger.warning("mesh transport died, controller is unusable: %s", exc)
@@ -157,7 +256,7 @@ class MeshController:
     async def set_onoff(
         self, unicast: int, on: bool, *, timeout: float = 5.0, retries: int = 1
     ) -> bool | None:
-        """Set Generic OnOff; return the reported present state, or None on timeout."""
+        """Set Generic OnOff; return the settled state, or None on timeout."""
         payload = generic_onoff_set(on, self._next_tid())
         try:
             resp = await self._node.request(
@@ -167,7 +266,8 @@ class MeshController:
         except TimeoutError:
             logger.debug("set_onoff(%#06x) timed out", unicast)
             return None
-        return bool(parse_generic_onoff_status(_full_payload(resp)).present_onoff)
+        status = parse_generic_onoff_status(_full_payload(resp))
+        return bool(_settled(status.present_onoff, status.target_onoff))
 
     async def get_onoff(
         self, unicast: int, *, timeout: float = 5.0
@@ -200,7 +300,7 @@ class MeshController:
     async def set_lightness(
         self, unicast: int, level_0_1: float, *, timeout: float = 5.0
     ) -> int | None:
-        """Set Light Lightness from a 0..1 level; return present lightness or None."""
+        """Set Light Lightness from a 0..1 level; return settled lightness or None."""
         level = min(1.0, max(0.0, level_0_1))
         lightness = round(level * 0xFFFF)
         payload = light_lightness_set(lightness, self._next_tid())
@@ -211,7 +311,8 @@ class MeshController:
         except TimeoutError:
             logger.debug("set_lightness(%#06x) timed out", unicast)
             return None
-        return parse_light_lightness_status(_full_payload(resp)).present_lightness
+        status = parse_light_lightness_status(_full_payload(resp))
+        return _settled(status.present_lightness, status.target_lightness)
 
     async def set_ctl(
         self, unicast: int, level_0_1: float, kelvin: int, *, timeout: float = 5.0
@@ -221,7 +322,7 @@ class MeshController:
         Tunable-white lamps generally respond to the Light CTL Server's
         ``Light CTL Set`` (which carries lightness, temperature and delta UV
         together) rather than the standalone Light CTL Temperature Set. Returns
-        the present temperature, or None on timeout.
+        the settled temperature, or None on timeout.
         """
         level = min(1.0, max(0.0, level_0_1))
         lightness = round(level * 0xFFFF)
@@ -234,12 +335,13 @@ class MeshController:
         except TimeoutError:
             logger.debug("set_ctl(%#06x) timed out", unicast)
             return None
-        return parse_light_ctl_status(_full_payload(resp)).present_temperature
+        status = parse_light_ctl_status(_full_payload(resp))
+        return _settled(status.present_temperature, status.target_temperature)
 
     async def set_ctl_temperature(
         self, unicast: int, kelvin: int, *, timeout: float = 5.0
     ) -> int | None:
-        """Set Light CTL Temperature only (Temperature Server); present temp or None."""
+        """Set Light CTL Temperature only (Temperature Server); settled temp or None."""
         temperature = min(_CTL_TEMP_MAX, max(_CTL_TEMP_MIN, kelvin))
         payload = light_ctl_temperature_set(temperature, 0, self._next_tid())
         try:
@@ -249,6 +351,5 @@ class MeshController:
         except TimeoutError:
             logger.debug("set_ctl_temperature(%#06x) timed out", unicast)
             return None
-        return parse_light_ctl_temperature_status(
-            _full_payload(resp)
-        ).present_temperature
+        status = parse_light_ctl_temperature_status(_full_payload(resp))
+        return _settled(status.present_temperature, status.target_temperature)

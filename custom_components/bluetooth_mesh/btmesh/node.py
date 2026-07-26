@@ -180,6 +180,43 @@ class MeshNode:
                 )
             )
 
+    # --------------------------------------------------- proxy configuration
+
+    def build_proxy_config_pdu(self, message: bytes) -> bytes:
+        """Wrap a proxy configuration message in a network PDU (spec §6.5).
+
+        Proxy configuration travels with ``CTL=1``, ``TTL=0`` and the unassigned
+        address as destination: it is consumed by the proxy node we are
+        connected to, never relayed into the mesh. It still burns a SEQ like any
+        other network PDU.
+
+        Returned rather than sent: it must go out in a Proxy PDU of type
+        ``MSG_TYPE_PROXY_CONFIG``, not the network-PDU type this node's
+        ``send_network_pdu`` callback is wired to, so routing is the caller's.
+        """
+        if not message:
+            raise NodeError("empty proxy configuration message")
+        return network.encode(
+            self._ctx, ctl=True, ttl=0, seq=self._ctx.next_seq(),
+            src=self._src, dst=0x0000, transport_pdu=message,
+        )
+
+    def parse_proxy_config_pdu(self, raw: bytes) -> bytes | None:
+        """Recover a proxy configuration message; ``None`` for foreign traffic.
+
+        The proxy server answers on its own address rather than the unassigned
+        one, so the destination is deliberately not checked.
+        """
+        try:
+            pdu = network.decode(self._ctx, raw)
+        except NetworkError as exc:
+            logger.debug("ignoring proxy config PDU: %s", exc)
+            return None
+        if not pdu.ctl:
+            logger.debug("proxy config PDU is not a control message, ignoring")
+            return None
+        return pdu.transport_pdu
+
     # ------------------------------------------------------------------- RX
 
     def handle_network_pdu(self, raw: bytes) -> None:
