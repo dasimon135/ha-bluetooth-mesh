@@ -13,7 +13,6 @@ index; addressing is by element unicast, taken from that same static model.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from .access import (
@@ -55,11 +54,6 @@ __all__ = ["MeshController"]
 # (Mesh Model spec §6.1.3.1): 800 K .. 20000 K.
 _CTL_TEMP_MIN = 800
 _CTL_TEMP_MAX = 20000
-
-# How long start() waits for the proxy to confirm the filter it was just given.
-# Bounded and best-effort: control reaches the node whether or not the proxy
-# answers, so a silent proxy costs us confirmed state, not the connection.
-FILTER_STATUS_TIMEOUT = 2.0
 
 
 def _full_payload(msg: ReceivedMessage) -> bytes:
@@ -120,8 +114,6 @@ class MeshController:
         self._src = src_addr
         # Proxy address-filter state (see _configure_filter).
         self._filter_status: FilterStatus | None = None
-        self._filter_pending = 0
-        self._filter_done: "asyncio.Future[None] | None" = None
         # The Generic OnOff / Lightness / CTL Set messages carry a TID; the node
         # DEDUPLICATES consecutive Sets that share (src, TID) within a short
         # window. So the TID must keep advancing ACROSS commands. When a fresh
@@ -136,7 +128,7 @@ class MeshController:
         """Subscribe the bearer, start the TX pump, and claim the proxy filter."""
         await self._bearer.start(self._on_message)
         self._pump.start()
-        await self._configure_filter()
+        self._configure_filter()
 
     async def stop(self) -> None:
         """Stop the TX pump and the bearer (reverse of :meth:`start`)."""
@@ -153,7 +145,7 @@ class MeshController:
 
     # ------------------------------------------------------- proxy filter
 
-    async def _configure_filter(self) -> None:
+    def _configure_filter(self) -> None:
         """Ask the proxy to forward the traffic addressed to us.
 
         A Proxy Server starts every connection with an accept list that is
@@ -162,26 +154,19 @@ class MeshController:
         Setting the type (which clears the list) and adding our own address is
         what makes confirmed state possible.
 
-        Best-effort throughout: a proxy that ignores or fails this still carries
-        our outbound control perfectly well, so nothing here may break the
-        connection — we log the degradation and carry on optimistically.
+        Fire-and-forget by design. The spec says the server answers each change
+        with a Filter Status, but a real ThingOS/Häfele lamp applies the filter
+        and never sends one, so waiting for it added its whole timeout to every
+        connection and warned about replies that were in fact being forwarded.
+        Nothing is lost by not waiting: both messages are queued on the ordered
+        TX pump ahead of any command, so the filter is in place before the first
+        Set reaches the node. A Status is still recorded if one does arrive.
         """
-        self._filter_pending = 2
-        self._filter_done = asyncio.get_running_loop().create_future()
         try:
             self._send_proxy_config(set_filter_type(FILTER_ACCEPT_LIST))
             self._send_proxy_config(add_addresses([self._src]))
-            await asyncio.wait_for(self._filter_done, FILTER_STATUS_TIMEOUT)
-        except TimeoutError:
-            logger.warning(
-                "proxy did not confirm the address filter within %ss; Status "
-                "replies may not be forwarded (state stays optimistic)",
-                FILTER_STATUS_TIMEOUT,
-            )
         except Exception as exc:  # noqa: BLE001 - never fail the connection
             logger.warning("could not configure the proxy filter: %s", exc)
-        finally:
-            self._filter_done = None
 
     def _send_proxy_config(self, message: bytes) -> None:
         """Queue one proxy configuration message on the shared TX pump."""
@@ -204,13 +189,6 @@ class MeshController:
             status.filter_type, status.list_size,
         )
         self._filter_status = status
-        self._filter_pending -= 1
-        if (
-            self._filter_pending <= 0
-            and self._filter_done is not None
-            and not self._filter_done.done()
-        ):
-            self._filter_done.set_result(None)
 
     @property
     def filter_status(self) -> FilterStatus | None:

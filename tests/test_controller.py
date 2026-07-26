@@ -12,6 +12,7 @@ The network keys/unicast come from the sanitized ``sample.connect.json``
 fixture via :meth:`Network.from_connect_file`.
 """
 
+import asyncio
 import os
 
 from btmesh.access import (
@@ -405,6 +406,14 @@ async def test_set_lightness_returns_the_present_value_when_settled():
 # ------------------------------------------------------- proxy filter setup
 
 
+async def _drain_proxy_config(bearer, expected: int) -> None:
+    """Wait for the TX pump to have drained ``expected`` proxy-config messages."""
+    for _ in range(200):
+        if len(bearer.proxy_config) >= expected:
+            return
+        await asyncio.sleep(0.001)
+
+
 async def test_start_configures_the_proxy_filter():
     """Without this, the proxy forwards NOTHING back to us.
 
@@ -414,6 +423,7 @@ async def test_start_configures_the_proxy_filter():
     """
     controller, bearer, _ = make_setup()
     await controller.start()
+    await _drain_proxy_config(bearer, 2)
     try:
         assert bearer.proxy_config == [
             bytes([OP_SET_FILTER_TYPE, FILTER_ACCEPT_LIST]),
@@ -427,19 +437,27 @@ async def test_start_configures_the_proxy_filter():
         await controller.stop()
 
 
-async def test_start_survives_a_proxy_that_never_answers(monkeypatch):
-    """Filter setup is best-effort: no Filter Status must not break the link.
+async def test_start_does_not_wait_for_a_filter_status():
+    """start() must not block on a confirmation the proxy may never send.
 
-    Control still reaches the node either way — losing confirmed state is a
-    degradation, not a reason to fail the connection.
+    Hardware finding (2026-07-26, Häfele/ThingOS lamp): the lamp APPLIES the
+    filter — Status replies started coming back — but never answers with a
+    Filter Status. Blocking on one therefore added its full timeout to every
+    single connection for nothing, and warned that replies "may not be
+    forwarded" while they demonstrably were. The two messages are queued on the
+    ordered TX pump ahead of any command, so the filter is in place before the
+    first Set regardless; waiting buys nothing.
     """
-    monkeypatch.setattr(controller_mod, "FILTER_STATUS_TIMEOUT", 0.05)
     controller, bearer, _ = make_setup()
     bearer.answer_proxy_config = False
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
     await controller.start()
+    elapsed = loop.time() - started
     try:
-        assert controller.filter_status is None
-        assert bearer.started is True
+        assert elapsed < 0.5, f"start() blocked for {elapsed:.2f}s"
+        assert controller.filter_status is None  # nothing to record
         # The link is usable regardless.
         assert await controller.set_onoff(UNICAST, True) is True
     finally:
@@ -450,6 +468,7 @@ async def test_proxy_filter_messages_travel_as_proxy_config_pdus():
     """They must go out under the proxy-config message type, not as mesh traffic."""
     controller, bearer, _ = make_setup()
     await controller.start()
+    await _drain_proxy_config(bearer, 2)
     try:
         types = [msg_type for msg_type, _ in bearer.sent]
         assert types == [MSG_TYPE_PROXY_CONFIG, MSG_TYPE_PROXY_CONFIG]

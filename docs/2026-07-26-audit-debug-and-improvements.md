@@ -167,13 +167,27 @@ traceback instead of a proper setup failure. Wrap and raise
 ### 2.1 (P1 feature) Configure the proxy filter — the single biggest upgrade — **IMPLEMENTED**
 
 > Implemented on 2026-07-26: `btmesh.proxy_config` + `MeshNode.build/parse_proxy_config_pdu`
-> + `MeshController._configure_filter()` (accept list, our own address), all
-> best-effort. **Not yet hardware-validated** — the codecs are exercised end to
-> end in tests against a real `MeshNode` peer, but never against the actual
-> lamp. Watch the log on first deploy: a proxy that does not confirm the filter
-> logs a warning and the integration falls back to the previous optimistic
-> behaviour. `STATUS_TIMEOUT` was left at 1.5 s (a round trip is well under a
-> second, and a silent proxy must not slow every button press).
+> + `MeshController._configure_filter()` (accept list, our own address).
+>
+> **HARDWARE-VALIDATED** the same day on the Häfele lamp through the
+> `atomebuanderie` ESPHome proxy. Status replies now come back in **145–310 ms**
+> where nothing ever came back before, on every command, with no timeout. Two
+> findings from that run:
+>
+> * The lamp **applies the filter but never sends a Filter Status**, though the
+>   spec says it shall. Blocking on that confirmation therefore added its full
+>   2 s timeout to *every* connection and logged a warning claiming replies "may
+>   not be forwarded" while they demonstrably were. Filter setup is now
+>   fire-and-forget: the ordered TX pump is what guarantees both messages
+>   precede the first command (visible in the trace as `0x02, 0x02, 0x00` 1 ms
+>   apart), so waiting bought nothing.
+> * The **Secure Network Beacon is right there** on every connect —
+>   `RX type=0x01 … 000b8150e5fb81e99f 00000000 …` — carrying `IV Index = 0`.
+>   That both confirms the currently hard-coded assumption and shows §2.2 is
+>   directly implementable from data the lamp already sends us.
+>
+> `STATUS_TIMEOUT` was left at 1.5 s: measured round trips are 145–310 ms, so it
+> is ample, and a silent node must not slow every button press.
 
 
 `proxy_pdu.py:42` defines `MSG_TYPE_PROXY_CONFIG = 0x02`, and **nothing else in

@@ -17,6 +17,13 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a Set is confirmed by the lamp and `get_onoff` / `get_lightness` become
   usable. Best-effort: a proxy that does not answer only costs the
   confirmation, never the connection.
+
+  Hardware-validated on a Häfele Connect Mesh lamp through an ESPHome
+  Bluetooth proxy: Status replies now come back in 145–310 ms where nothing
+  ever came back before. Note the lamp applies the filter but never sends the
+  Filter Status the spec asks for, so the setup is deliberately
+  fire-and-forget — both messages are queued ahead of the first command on the
+  ordered TX pump, which is what actually guarantees the filter is in place.
 - `btmesh.proxy_config`: Set Filter Type / Add Addresses To Filter / Filter
   Status codecs, plus `MeshNode.build_proxy_config_pdu` and
   `MeshNode.parse_proxy_config_pdu` for the `CTL=1, TTL=0` network PDU they
