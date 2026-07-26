@@ -101,6 +101,13 @@ class MeshNode:
         self._assembler = SegmentAssembler()
         self._device_keys: dict[int, bytes] = {}
         self._acks: dict[int, SegmentAck] = {}
+        # Last SEQ accepted per source, to drop an immediate duplicate delivery
+        # (a relayed echo of a PDU we already handled). Deliberately NOT the
+        # spec's replay list: rejecting every SEQ *below* the last one would
+        # deafen us permanently to a node that restarted its sequence after a
+        # power cut, and the worst a replayed Status can do is show a stale
+        # value for a moment. The lesser guarantee is the safer trade.
+        self._last_rx_seq: dict[int, int] = {}
         self._waiters: list[tuple[int, int, asyncio.Future[ReceivedMessage]]] = []
         self.received: deque[ReceivedMessage] = deque(maxlen=_RECEIVED_MAXLEN)
         self.on_message: Callable[[ReceivedMessage], None] | None = None
@@ -229,6 +236,12 @@ class MeshNode:
         if pdu.src == self._src:
             logger.debug("ignoring self-echo from %#06x", pdu.src)
             return
+        if self._last_rx_seq.get(pdu.src) == pdu.seq:
+            logger.debug(
+                "ignoring duplicate PDU from %#06x (seq %#x)", pdu.src, pdu.seq
+            )
+            return
+        self._last_rx_seq[pdu.src] = pdu.seq
         if pdu.ctl:
             self._handle_control(pdu)
         else:

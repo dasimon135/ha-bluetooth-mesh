@@ -5,6 +5,7 @@ shaped inputs, SAR send chunking against a fake client, reassembly dispatch
 via fake notifications, and BearerError propagation. bleak is never imported.
 """
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -322,3 +323,44 @@ async def test_find_proxy_node_ignores_foreign_network_id():
     )
     assert match is None
     assert len(candidates) == 1  # foreign subnet still reported as candidate
+
+
+# ------------------------------------------------ start_notify housekeeping
+
+
+class NeverConfirmingClient:
+    """A proxied backend that delivers notifications but never resolves the
+    ``start_notify`` await — the bleak-esphome behaviour START_NOTIFY_TIMEOUT
+    exists for."""
+
+    def __init__(self) -> None:
+        self.mtu_size = 69
+        self.subscribe_cancelled = False
+
+    async def start_notify(self, char, handler):
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.subscribe_cancelled = True
+            raise
+
+    async def stop_notify(self, char):
+        pass
+
+
+async def test_stop_cancels_an_unconfirmed_subscribe():
+    """The pending subscribe must not outlive the bearer.
+
+    start() deliberately proceeds without waiting for confirmation, which
+    leaves a task running against a client the caller is about to disconnect.
+    Nothing cancelled it, so it lingered until the event loop went away.
+    """
+    from btmesh.bearer import GattBearer
+
+    client = NeverConfirmingClient()
+    bearer = GattBearer(client, provisioning=False)
+    await bearer.start(lambda msg_type, payload: None)
+
+    await bearer.stop()
+
+    assert client.subscribe_cancelled is True
