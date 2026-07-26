@@ -45,8 +45,9 @@ makes commands feel instant.
 - **No RGB / full-colour** yet: my hardware is tunable-white only, so I left
   colour unimplemented rather than ship it untested. **If you have a colour mesh
   lamp and want to help validate, please shout** — it's a clean addition.
-- Optimistic state: parallel changes from the vendor app aren't read back until
-  HA's next command.
+- Colour temperature is not read back from the lamp yet, so it reflects the last
+  command. On/off and brightness *are* read from the mesh — including changes
+  you made from the vendor app while HA was away.
 
 ### Install
 

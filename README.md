@@ -14,7 +14,8 @@ that cannot run on Home Assistant OS. This project removes both requirements.
 > **Status:** working, validated on real hardware. A Häfele Connect Mesh
 > tunable-white lamp is controlled end-to-end from Home Assistant through an
 > ESPHome Bluetooth proxy — on/off, brightness, and colour temperature — with a
-> kept-alive proxy connection that makes commands feel instant. See
+> kept-alive proxy connection that makes commands feel instant, and lamp state
+> **read back from the mesh** rather than assumed. See
 > [What it controls](#what-it-controls) for the current capability surface.
 
 ## What it controls
@@ -32,6 +33,29 @@ capabilities read from its mesh composition:
 hardware is tunable-white only, so colour is left unimplemented rather than
 shipped untested — contributions with colour hardware to validate against are
 welcome.
+
+### State is read, not assumed
+
+A Bluetooth Mesh proxy starts every connection forwarding *nothing* inbound
+until the client configures its address filter — which is why early versions
+never saw a single reply and could only display what they had last commanded.
+The integration configures that filter, so:
+
+* on/off and brightness are **read from the lamp** when the mesh becomes
+  reachable, and again after every reconnection — including changes you made
+  from the vendor app while Home Assistant was away;
+* a light whose state has not been read yet reports `unknown` rather than
+  guessing `off` — an invented state is one another integration can act on and
+  make true;
+* colour temperature is not read back yet (there is no CTL Temperature getter
+  in the library), so it still reflects the last command.
+
+Adding a node, or refreshing a key, is a **Reconfigure** on the existing entry:
+paste the new export and keep every entity id and its history. If something is
+not working, **Download diagnostics** on the integration reports the Network ID
+it looks for, every mesh proxy Home Assistant currently sees, the IV Index and
+sequence cursor in use, and each node's composition — with no key material in
+it, so it is safe to paste into an issue.
 
 ## Two deliverables
 
@@ -112,19 +136,30 @@ network.
 ```bash
 # Library only (fast; no Home Assistant):
 uv sync
-uv run pytest tests            # btmesh library test suite
+uv run pytest                  # btmesh library + phase0 harness suites
 
 # Full suite (library + HA integration) in a HA-equipped environment:
 pip install -e .
 pip install -r requirements-test.txt
-pytest tests                   # library + tests/ha/ (Home Assistant) together
+pytest                         # everything: library, phase0, tests/ha
+
+# Lint (CI pins this exact version):
+pip install ruff==0.16.0
+ruff check .
 ```
 
-The `tests/ha/` tree is guarded with `pytest.importorskip` so it stays skipped
-when Home Assistant is not installed, and runs for real when it is. CI installs
-Home Assistant and runs the combined suite on Linux; see
-`.github/workflows/tests.yml` (pytest) and `.github/workflows/validate.yml`
-(hassfest + HACS).
+Run `pytest` with no path argument: `testpaths` in `pyproject.toml` covers the
+library tests, `tests/ha/`, and the `phase0/` harness suite. The `tests/ha/`
+tree is guarded with `pytest.importorskip`, so it stays skipped when Home
+Assistant is not installed and runs for real when it is. CI installs Home
+Assistant and runs the combined suite on Linux; see
+`.github/workflows/tests.yml` (ruff + pytest) and
+`.github/workflows/validate.yml` (hassfest + HACS).
+
+> On Windows, `tests/ha/conftest.py` neutralises `pytest-socket` because the
+> event loop's self-pipe needs a socket there. A test that reaches the network
+> — one that triggers a real config-entry reload, say — will therefore pass
+> locally and fail on Linux CI. That is CI doing its job, not a flake.
 
 ### Vendored library
 
@@ -138,6 +173,11 @@ After changing anything under `src/btmesh/`, re-sync the vendored copy:
 ```bash
 python scripts/sync_vendored_btmesh.py
 ```
+
+CI runs `python scripts/sync_vendored_btmesh.py --check` and fails on drift.
+It has to: each tree is imported by a different half of the test suite, so a
+forgotten re-sync breaks no test and would ship a stale stack to HACS users on
+a green build.
 
 ## Documentation
 

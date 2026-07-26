@@ -48,8 +48,10 @@ les commandes quasi instantanées.
   uniquement, donc j'ai préféré ne pas livrer de la couleur non testée. **Si
   vous avez une lampe mesh couleur et voulez aider à valider, faites signe** —
   c'est un ajout propre.
-- État optimiste : les changements faits en parallèle depuis l'appli ne sont pas
-  relus tant que HA n'a pas envoyé sa commande suivante.
+- La température de couleur n'est pas encore relue depuis la lampe : elle
+  reflète la dernière commande. En revanche l'état allumé/éteint et la
+  luminosité *sont* lus depuis le mesh — y compris les changements faits depuis
+  l'appli pendant que HA était absent.
 
 ### Installation
 
