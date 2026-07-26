@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A light no longer reports *off* before anything has been read.** The blank
+  cache used to claim the lamp was off, which is not a harmless default: any
+  other integration acting on that fabricated value — a light group syncing its
+  members is enough — switches the lamp off for real, and the invented state
+  becomes true. A light is now `unknown` until a read answers or a command is
+  issued.
+
+  Note this is a visible behaviour change: an automation testing
+  `state == 'off'` will not match while the state is unknown.
+
 ## [0.2.0] — 2026-07-26
 
 ### Added
