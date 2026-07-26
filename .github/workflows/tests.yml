@@ -21,6 +21,12 @@ jobs:
           # release it pulls in) requires Python >= 3.14.
           python-version: "3.14"
 
+      # The integration ships its own copy of the library (HACS installs
+      # custom_components/ as-is). Each tree is imported by a different half of
+      # the suite, so drift between them breaks no test — only this check.
+      - name: Check the vendored btmesh copy is in sync
+        run: python scripts/sync_vendored_btmesh.py --check
+
       - name: Install the library
         run: pip install -e .
 

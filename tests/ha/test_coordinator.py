@@ -62,6 +62,10 @@ class FakeController:
         self.seq = seq
         self.tid = tid
         self.calls: list[tuple] = []
+        # Mirrors MeshController.failed: True once the TX pump died, i.e. the
+        # controller can no longer transmit anything (commands still return
+        # None rather than raising, so this flag is the only signal).
+        self.failed = False
 
     async def start(self) -> None:
         self.started = True
@@ -218,6 +222,104 @@ async def test_keepalive_timeout_arms_and_stop_cancels_idle_drop(hass) -> None:
         assert coord._idle_unsub is not None  # idle drop scheduled
     await coord.async_stop()
     assert coord._idle_unsub is None  # cancelled on stop
+
+
+async def test_failed_controller_start_disconnects_the_client(hass) -> None:
+    """A connect that dies after the BLE link is up must still free the slot.
+
+    ``async_connect_bearer`` returns a CONNECTED client; if bringing the mesh
+    controller up on top of it then fails (a GATT subscribe error, or the
+    connect timeout firing during ``start()``), that client is the only thing
+    holding the lamp's single proxy slot. Leaking it locks out Home Assistant
+    AND the vendor app — and the coordinator then blames an unreachable proxy
+    while itself holding the slot.
+    """
+    entry = _make_entry(hass)
+
+    class FailingStartController(FakeController):
+        async def start(self) -> None:
+            raise RuntimeError("could not subscribe to the proxy Data Out")
+
+    with _patch_transport(FailingStartController()) as client:
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()  # probes once, and the connect fails
+
+        assert coord._controller is None
+        assert coord._client is None
+        assert client.disconnect.await_count == 1  # the slot was handed back
+    await coord.async_stop()
+
+
+async def test_failed_controller_construction_disconnects_the_client(hass) -> None:
+    """Same guarantee when the controller cannot even be built."""
+    entry = _make_entry(hass)
+
+    def ctor(network, bearer, *, src_addr, seq, tid):
+        raise ValueError("bad network model")
+
+    with _patch_transport(None, ctor_side_effect=ctor) as client:
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+
+        assert coord._controller is None
+        assert client.disconnect.await_count == 1
+    await coord.async_stop()
+
+
+async def test_dead_transport_drops_the_held_connection(hass) -> None:
+    """A controller whose TX pump died is torn down, not held for reuse.
+
+    Commands are best-effort: a dead transport makes them return None, exactly
+    like an unconfirmed Status, so nothing raises and the error path never runs.
+    Without an explicit check the coordinator would keep the wedged controller
+    forever — the entity stays available while every command silently does
+    nothing until the entry is reloaded.
+    """
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with _patch_transport(fake) as client:
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await coord.async_set_onoff(UNICAST, True)
+        assert coord._controller is fake  # healthy: held for the next command
+
+        fake.failed = True  # the GATT write failed; the pump is dead
+        await coord.async_set_onoff(UNICAST, False)
+
+        assert coord._controller is None  # dropped, so the next call reconnects
+        assert fake.stopped is True
+        assert client.disconnect.await_count >= 1
+    await coord.async_stop()
+
+
+async def test_dead_transport_is_never_reused_by_the_next_command(hass) -> None:
+    """A held controller that died between commands is replaced, not reused.
+
+    The pump dies asynchronously, so it can fail just after a command returned
+    and the post-command check saw a healthy controller. The next command must
+    still notice before reusing the link.
+    """
+    entry = _make_entry(hass)
+    built: list[FakeController] = []
+
+    def ctor(network, bearer, *, src_addr, seq, tid):
+        built.append(FakeController(seq=seq, tid=tid))
+        return built[-1]
+
+    with _patch_transport(None, ctor_side_effect=ctor):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await coord.async_set_onoff(UNICAST, True)
+        held = coord._controller
+
+        # It died after the command returned, so the coordinator still holds it.
+        held.failed = True
+        await coord.async_set_onoff(UNICAST, False)
+
+        assert coord._controller is not held  # reconnected instead of reusing
+        assert held.stopped is True
+        assert coord._controller.calls[-1] == ("set_onoff", UNICAST, False)
+    await coord.async_stop()
 
 
 async def test_no_proxy_stays_unavailable_and_raises_issue(hass) -> None:

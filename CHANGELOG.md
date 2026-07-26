@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A failed connect no longer leaks a live BLE link.** The proxy client is
+  connected before the mesh controller is brought up on top of it; if that
+  second step failed (GATT subscribe error, connect timeout), the client was
+  unreachable from the teardown path and stayed connected — pinning the lamp's
+  single proxy slot, locking out both Home Assistant and the vendor app, and
+  making the coordinator report an unreachable proxy while itself holding it.
+- **A dead mesh transport is now detected instead of being reused forever.** A
+  failed GATT write kills the TX pump, which then stops transmitting for good.
+  Commands are best-effort, so they simply timed out like an unconfirmed
+  Status: the entity stayed *available* while every command silently did
+  nothing until the config entry was reloaded. `MeshController` now exposes
+  `failed` / `failure`, and the coordinator drops and re-establishes the link
+  as soon as the transport dies.
+
+### Changed
+
+- CI verifies that the vendored `custom_components/bluetooth_mesh/btmesh/` copy
+  matches `src/btmesh/` (`scripts/sync_vendored_btmesh.py --check`), so a
+  forgotten re-vendor cannot ship a stale stack while the suite stays green.
+
 ## [0.1.0] — 2026-07-20
 
 First public release. A pure-Python Bluetooth SIG Mesh stack (`btmesh`) and a

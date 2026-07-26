@@ -85,6 +85,13 @@ class MeshController:
             send_network_pdu=self._pump.put,
             seq=seq,
         )
+        # A GATT write failure kills the TX pump: it records the error and stops
+        # draining its queue for good. Commands stay best-effort (they time out
+        # and return None), so without this flag the failure is indistinguishable
+        # from an unconfirmed Status and a caller would keep reusing a controller
+        # that can no longer transmit. Mirror it here so the caller can drop the
+        # link and reconnect.
+        self._pump.on_error = self._on_pump_error
         # The Generic OnOff / Lightness / CTL Set messages carry a TID; the node
         # DEDUPLICATES consecutive Sets that share (src, TID) within a short
         # window. So the TID must keep advancing ACROSS commands. When a fresh
@@ -110,6 +117,25 @@ class MeshController:
             self._node.handle_network_pdu(payload)
         else:
             logger.debug("ignoring proxy message type %#04x", msg_type)
+
+    def _on_pump_error(self, exc: BaseException) -> None:
+        logger.warning("mesh transport died, controller is unusable: %s", exc)
+
+    @property
+    def failure(self) -> BaseException | None:
+        """The transport error that killed the TX pump, if any."""
+        return self._pump.failure
+
+    @property
+    def failed(self) -> bool:
+        """True once the TX pump died: nothing can be transmitted any more.
+
+        Best-effort commands cannot report this by raising, so callers must
+        check it to tell "the node did not answer" (normal, the proxy filter
+        forwards no Status) apart from "we can no longer send at all" — the
+        latter requires dropping the link and reconnecting.
+        """
+        return self._pump.failure is not None
 
     @property
     def seq(self) -> int:
