@@ -671,6 +671,8 @@ def _composition_setup(answer: bool = True):
     from btmesh.access import (
         OP_CONFIG_COMPOSITION_DATA_GET,
         OP_CONFIG_COMPOSITION_DATA_STATUS,
+        OP_CONFIG_RELAY_GET,
+        OP_CONFIG_RELAY_STATUS,
     )
 
     network = Network.from_connect_file(FIXTURE)
@@ -690,11 +692,20 @@ def _composition_setup(answer: bool = True):
     device.add_device(UNICAST, device_key)
 
     def responder(msg: ReceivedMessage) -> None:
-        if msg.opcode == OP_CONFIG_COMPOSITION_DATA_GET and answer:
+        if not answer:
+            return
+        if msg.opcode == OP_CONFIG_COMPOSITION_DATA_GET:
             device.send_access(
                 msg.src,
                 encode_opcode(OP_CONFIG_COMPOSITION_DATA_STATUS)
                 + _COMPOSITION_PARAMS,
+                dev_key=True,
+            )
+        elif msg.opcode == OP_CONFIG_RELAY_GET:
+            # relay on, retransmit count 2, interval steps 5
+            device.send_access(
+                msg.src,
+                encode_opcode(OP_CONFIG_RELAY_STATUS) + bytes([0x01, 0x2A]),
                 dev_key=True,
             )
 
@@ -742,6 +753,37 @@ async def test_get_composition_without_a_device_key_is_not_fatal():
     try:
         # 0x00FF is in no export; nothing is registered for it.
         result = await controller.get_composition(0x00FF, timeout=0.05)
+    finally:
+        await controller.stop()
+
+    assert result is None
+
+
+async def test_get_relay_is_the_probe_that_fits_in_one_segment():
+    """The reachability question, asked so the answer cannot be lost to SAR.
+
+    A Composition Data Status is segmented and this stack transmits no Segment
+    Acks, so its silence proves nothing. A Config Relay Status is two bytes.
+    """
+    controller, _ = _composition_setup()
+    await controller.start()
+    try:
+        relay = await controller.get_relay(UNICAST, timeout=1.0)
+    finally:
+        await controller.stop()
+
+    assert relay is not None
+    assert relay.enabled is True
+    assert relay.supported is True
+    assert relay.retransmit_count == 2
+    assert relay.retransmit_interval_steps == 5
+
+
+async def test_get_relay_returns_none_when_the_node_stays_silent():
+    controller, _ = _composition_setup(answer=False)
+    await controller.start()
+    try:
+        result = await controller.get_relay(UNICAST, timeout=0.05)
     finally:
         await controller.stop()
 

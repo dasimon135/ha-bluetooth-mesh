@@ -30,14 +30,22 @@ PROBE_MAX_NODES = 6
 
 
 async def _probe(coordinator) -> dict[str, Any]:
-    """Ask each node, under its device key, what it actually is.
+    """Ask each node, under its device key, whether it is there and what it is.
 
-    This is the one measurement that separates the two failure modes every
-    silent mesh problem conflates: a message that never reached the node, and a
-    node that received it and declined to act. A Composition Data Get is
-    answered by the Config Server without consulting an AppKey binding, a Light
-    LC mode, or a vendor model — so an answer proves the round trip, and silence
-    points at the transport.
+    Two requests, because they answer different questions and only one of them
+    is trustworthy when it fails:
+
+    * **Config Relay Get** — four bytes of answer, unsegmented in both
+      directions. This is ``answered``, and it is the honest reachability
+      signal: our message reached the node's Config Server and its reply came
+      back. It needs no AppKey binding, no Light LC mode and no vendor model, so
+      it separates "never arrived" from "arrived and was ignored". Its content
+      matters too: a node that does not relay forwards nothing from our proxy
+      connection into the rest of the mesh.
+    * **Composition Data Get** — what the node says it *is*, against which the
+      export (the vendor app's account of it) can be checked. Its Status is
+      segmented, and this stack transmits no Segment Acks, so a null here proves
+      NOTHING. Only its presence is informative.
 
     Skipped entirely when no proxy connection is held: a diagnostics download
     should not spend the connect timeout dialling a proxy that is not there.
@@ -48,36 +56,62 @@ async def _probe(coordinator) -> dict[str, Any]:
     nodes = coordinator.network.nodes[:PROBE_MAX_NODES]
     results: list[dict[str, Any]] = []
     for node in nodes:
+        relay = await coordinator.async_get_relay(node.unicast)
         composition = await coordinator.async_get_composition(node.unicast)
-        if composition is None:
-            results.append({"unicast": f"{node.unicast:#06x}", "answered": False})
-            continue
         results.append(
             {
                 "unicast": f"{node.unicast:#06x}",
-                "answered": True,
-                "cid": f"{composition.cid:#06x}",
-                "pid": f"{composition.pid:#06x}",
-                "vid": f"{composition.vid:#06x}",
-                "crpl": composition.crpl,
-                "features": f"{composition.features:#06x}",
-                "elements": [
+                "answered": relay is not None,
+                "relay": (
                     {
-                        "index": index,
-                        "sig_models": [f"{m:#06x}" for m in element.sig_models],
-                        "vendor_models": [
-                            f"{company:#06x}:{model:#06x}"
-                            for company, model in element.vendor_models
-                        ],
+                        "enabled": relay.enabled,
+                        "supported": relay.supported,
+                        "retransmit_count": relay.retransmit_count,
+                        "retransmit_interval_steps": relay.retransmit_interval_steps,
                     }
-                    for index, element in enumerate(composition.elements)
-                ],
+                    if relay is not None
+                    else None
+                ),
+                "composition": _composition(composition),
             }
         )
     return {
         "ran": True,
+        # Stated in the dump itself: a reader must not take a null composition
+        # for a missing node, which is exactly the mistake this probe was first
+        # shipped inviting.
+        "note": (
+            "'answered' is a Config Relay Get round trip and is the reachability "
+            "signal. 'composition' can be null even when answered is true: its "
+            "Status is segmented and this stack sends no Segment Acks, so its "
+            "absence proves nothing."
+        ),
         "nodes": results,
         "not_probed": len(coordinator.network.nodes) - len(nodes),
+    }
+
+
+def _composition(composition) -> dict[str, Any] | None:
+    """Serialise a CompositionData, or ``None`` when the node did not send one."""
+    if composition is None:
+        return None
+    return {
+        "cid": f"{composition.cid:#06x}",
+        "pid": f"{composition.pid:#06x}",
+        "vid": f"{composition.vid:#06x}",
+        "crpl": composition.crpl,
+        "features": f"{composition.features:#06x}",
+        "elements": [
+            {
+                "index": index,
+                "sig_models": [f"{m:#06x}" for m in element.sig_models],
+                "vendor_models": [
+                    f"{company:#06x}:{model:#06x}"
+                    for company, model in element.vendor_models
+                ],
+            }
+            for index, element in enumerate(composition.elements)
+        ],
     }
 
 

@@ -4,6 +4,37 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4] — 2026-08-24
+
+### Fixed
+
+- **The 0.4.3 composition probe reported a false negative on a healthy node.**
+  Run against the reference lamp — where on/off, brightness and state read-back
+  all work — it answered `answered: false`. A Composition Data Status is
+  segmented, and this stack transmits no Segment Acks (`SegmentAck` in
+  `transport.py` is parse-only; `node.py` says so in its docstring), so a long
+  status never completes and the node looks absent. As shipped, the probe
+  invited exactly the wrong conclusion.
+
+### Changed
+
+- **Reachability is now a Config Relay Get.** Request and Status both fit in a
+  single unsegmented message, so a silence is a real silence. It is device-keyed
+  like before — no AppKey binding, no Light LC mode, no vendor model involved —
+  so it still separates "the message never arrived" from "the node received it
+  and did nothing". Its content earns its place too: a node with the Relay
+  feature off forwards nothing from our proxy connection into the rest of the
+  mesh, which is invisible from every other angle.
+- **The composition is still requested, and now correctly framed.** It is the
+  only place the node's own account of itself can be compared against the
+  export, so it stays — but the dump states, in the dump, that a null
+  composition proves nothing.
+
+### Added
+
+- `MeshController.get_relay()`, `Config Relay Get` / `Config Relay Status` in
+  the access layer (opcodes verified against Zephyr's `foundation.h`).
+
 ## [0.4.3] — 2026-08-23
 
 ### Added

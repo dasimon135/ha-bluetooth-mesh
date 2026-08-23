@@ -424,3 +424,32 @@ def test_parse_model_app_status_sig_form_unchanged():
     s = parse_config_model_app_status(payload)
     assert s.company_id is None
     assert s.model_id == 0x1000
+
+
+# ------------------------------------------------------- Config Relay Get
+
+def test_config_relay_get_bytes():
+    from btmesh.access import config_relay_get
+
+    assert config_relay_get() == bytes.fromhex("8026")
+
+
+def test_parse_config_relay_status():
+    """Two parameter bytes: Relay, then count (3 bits) + interval steps (5)."""
+    from btmesh.access import parse_config_relay_status
+
+    # relay enabled; RelayRetransmit = count 2, interval steps 5 → 0b00101_010
+    status = parse_config_relay_status(bytes.fromhex("8028" "01" "2a"))
+    assert status.enabled is True
+    assert status.retransmit_count == 2
+    assert status.retransmit_interval_steps == 5
+
+    off = parse_config_relay_status(bytes.fromhex("8028" "00" "00"))
+    assert off.enabled is False
+
+
+def test_parse_config_relay_status_rejects_a_wrong_length():
+    from btmesh.access import AccessError, parse_config_relay_status
+
+    with pytest.raises(AccessError):
+        parse_config_relay_status(bytes.fromhex("8028" "01"))

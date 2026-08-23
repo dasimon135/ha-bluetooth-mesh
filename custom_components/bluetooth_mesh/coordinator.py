@@ -584,6 +584,17 @@ class MeshCoordinator:
             )
         )
 
+    async def async_get_relay(self, unicast: int):
+        """Read ``unicast``'s Relay state under its device key; None if silent.
+
+        The reachability probe to trust: request and answer both fit in a single
+        unsegmented message, so silence here is a real silence rather than a
+        segmented reply that never reassembled.
+        """
+        return await self._run_connected(
+            lambda c: c.get_relay(unicast, timeout=PROBE_TIMEOUT)
+        )
+
     async def async_get_composition(self, unicast: int):
         """Read ``unicast``'s Composition Data under its device key; None if silent.
 

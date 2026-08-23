@@ -17,13 +17,16 @@ import logging
 
 from .access import (
     OP_CONFIG_COMPOSITION_DATA_STATUS,
+    OP_CONFIG_RELAY_STATUS,
     OP_GENERIC_ONOFF_STATUS,
     OP_LIGHT_CTL_STATUS,
     OP_LIGHT_CTL_TEMPERATURE_STATUS,
     OP_LIGHT_LIGHTNESS_STATUS,
     AccessError,
     CompositionData,
+    RelayStatus,
     config_composition_data_get,
+    config_relay_get,
     encode_opcode,
     generic_onoff_get,
     generic_onoff_set,
@@ -32,6 +35,7 @@ from .access import (
     light_lightness_get,
     light_lightness_set,
     parse_composition_data_status,
+    parse_config_relay_status,
     parse_generic_onoff_status,
     parse_light_ctl_status,
     parse_light_ctl_temperature_status,
@@ -306,6 +310,38 @@ class MeshController:
         return tid
 
     # ------------------------------------------------------------- commands
+
+    async def get_relay(
+        self, unicast: int, *, timeout: float = 5.0
+    ) -> RelayStatus | None:
+        """Read ``unicast``'s Relay state under its device key; None if silent.
+
+        This is the reachability probe to trust. Both directions fit in one
+        unsegmented message — the request is two bytes, the Status is four — so
+        a silence here is a real silence, not a segmented reply that never
+        reassembled. :meth:`get_composition` cannot make that promise: its
+        Status is segmented and this stack transmits no Segment Acks.
+
+        The answer is worth having for itself, too. A node with the Relay
+        feature off forwards nothing from our proxy connection into the rest of
+        the mesh, which is invisible from every other angle.
+        """
+        try:
+            resp = await self._node.request(
+                unicast, config_relay_get(), OP_CONFIG_RELAY_STATUS,
+                dev_key=True, timeout=timeout, retries=0,
+            )
+        except TimeoutError:
+            logger.debug("get_relay(%#06x) timed out", unicast)
+            return None
+        except NodeError as exc:
+            logger.debug("get_relay(%#06x): %s", unicast, exc)
+            return None
+        try:
+            return parse_config_relay_status(_full_payload(resp))
+        except AccessError as exc:
+            logger.debug("unparseable relay status from %#06x: %s", unicast, exc)
+            return None
 
     async def get_composition(
         self, unicast: int, *, page: int = 0, timeout: float = 5.0

@@ -89,6 +89,9 @@ __all__ = [
     "parse_light_ctl_status",
     "parse_light_ctl_temperature_status",
     "parse_composition_data_status",
+    "RelayStatus",
+    "config_relay_get",
+    "parse_config_relay_status",
 ]
 
 # Foundation model opcodes (Zephyr foundation.h).
@@ -98,6 +101,8 @@ OP_CONFIG_APPKEY_STATUS = 0x8003
 OP_CONFIG_COMPOSITION_DATA_GET = 0x8008
 OP_CONFIG_MODEL_APP_BIND = 0x803D
 OP_CONFIG_MODEL_APP_STATUS = 0x803E
+OP_CONFIG_RELAY_GET = 0x8026
+OP_CONFIG_RELAY_STATUS = 0x8028
 # Generic OnOff model opcodes (Mesh Model spec §7.1, Zephyr mesh sample).
 OP_GENERIC_ONOFF_GET = 0x8201
 OP_GENERIC_ONOFF_SET = 0x8202
@@ -232,6 +237,21 @@ class LightCtlTemperatureStatus(NamedTuple):
     target_temperature: int | None
     target_delta_uv: int | None
     remaining_time: int | None
+
+
+class RelayStatus(NamedTuple):
+    """Config Relay Status (spec §4.3.2.15): the node's Relay feature state.
+
+    ``enabled`` is False both when the feature is off and when the node does
+    not support it at all — the wire values 0x00 and 0x02 respectively.
+    Relevant because a node that does not relay forwards nothing from the proxy
+    connection into the rest of the mesh.
+    """
+
+    enabled: bool
+    supported: bool
+    retransmit_count: int
+    retransmit_interval_steps: int
 
 
 class CompositionElement(NamedTuple):
@@ -454,6 +474,17 @@ def config_node_reset() -> bytes:
     return encode_opcode(OP_NODE_RESET)
 
 
+def config_relay_get() -> bytes:
+    """Config Relay Get (opcode 0x8026, no params) — device-keyed.
+
+    Its Status is two bytes, so the whole exchange fits in one unsegmented
+    message in both directions. That makes it the reachability probe this stack
+    can actually rely on: a Composition Data Status is segmented, and nothing
+    here transmits Segment Acks, so silence there says nothing.
+    """
+    return encode_opcode(OP_CONFIG_RELAY_GET)
+
+
 def config_composition_data_get(page: int = 0) -> bytes:
     """Config Composition Data Get access payload (spec §4.3.2.4)."""
     if not 0 <= page <= 0xFF:
@@ -671,6 +702,22 @@ def parse_light_ctl_temperature_status(
         target_temperature=int.from_bytes(params[4:6], "little"),
         target_delta_uv=int.from_bytes(params[6:8], "little", signed=True),
         remaining_time=params[8],
+    )
+
+
+def parse_config_relay_status(payload: bytes) -> RelayStatus:
+    """Parse a Config Relay Status (spec §4.3.2.15).
+
+    Two parameter bytes: Relay (0x00 off, 0x01 on, 0x02 unsupported), then
+    RelayRetransmit — count in bits 0..2, interval steps in bits 3..7.
+    """
+    params = _expect_params(payload, OP_CONFIG_RELAY_STATUS, (2,))
+    relay, retransmit = params[0], params[1]
+    return RelayStatus(
+        enabled=relay == 0x01,
+        supported=relay != 0x02,
+        retransmit_count=retransmit & 0x07,
+        retransmit_interval_steps=(retransmit >> 3) & 0x1F,
     )
 
 

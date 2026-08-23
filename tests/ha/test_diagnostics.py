@@ -40,11 +40,16 @@ class FakeCoordinator:
         self.app_key_index = 0
         # What each node answers to the device-keyed probe (None = silence).
         self.compositions: dict[int, object] = {}
+        self.relays: dict[int, object] = {}
         self.probed: list[int] = []
 
     async def async_get_composition(self, unicast: int):
         self.probed.append(unicast)
         return self.compositions.get(unicast)
+
+    async def async_get_relay(self, unicast: int):
+        self.probed.append(unicast)
+        return self.relays.get(unicast)
 
 
 def _entry(hass) -> MockConfigEntry:
@@ -158,34 +163,69 @@ def _composition():
     )
 
 
-async def test_probe_reports_what_the_node_says_it_is(hass) -> None:
-    """The export is the vendor app's account of the node; this is the node's.
+def _relay():
+    from custom_components.bluetooth_mesh.btmesh.access import RelayStatus
 
-    Device-keyed, so an answer proves the round trip independently of the
-    AppKey binding or of which model owns the light.
+    return RelayStatus(
+        enabled=True, supported=True,
+        retransmit_count=2, retransmit_interval_steps=5,
+    )
+
+
+async def test_probe_reachability_comes_from_the_unsegmented_request(hass) -> None:
+    """``answered`` must not depend on a segmented reply reassembling.
+
+    A Composition Data Status is segmented and this stack sends no Segment
+    Acks, so a node that is perfectly reachable can stay silent on it. The
+    Config Relay round trip is four bytes and cannot fail that way.
     """
     entry = _entry(hass)
+    entry.runtime_data.relays = {UNICAST: _relay()}
+    entry.runtime_data.compositions = {}  # segmented status never completes
+
+    dump = await async_get_config_entry_diagnostics(hass, entry)
+
+    node = dump["probe"]["nodes"][0]
+    assert node["answered"] is True
+    assert node["composition"] is None
+    assert node["relay"]["enabled"] is True
+    assert node["relay"]["retransmit_count"] == 2
+
+
+async def test_probe_reports_what_the_node_says_it_is(hass) -> None:
+    """The export is the vendor app's account of the node; this is the node's."""
+    entry = _entry(hass)
+    entry.runtime_data.relays = {UNICAST: _relay()}
     entry.runtime_data.compositions = {UNICAST: _composition()}
 
     dump = await async_get_config_entry_diagnostics(hass, entry)
 
-    assert dump["probe"]["ran"] is True
     node = dump["probe"]["nodes"][0]
     assert node["unicast"] == "0x000c"
-    assert node["answered"] is True
-    assert node["cid"] == "0x07e9"
-    assert node["elements"][0]["sig_models"] == ["0x0000", "0x1300"]
-    assert node["elements"][0]["vendor_models"] == ["0x07e9:0x1000"]
+    assert node["composition"]["cid"] == "0x07e9"
+    assert node["composition"]["elements"][0]["sig_models"] == ["0x0000", "0x1300"]
+    assert node["composition"]["elements"][0]["vendor_models"] == ["0x07e9:0x1000"]
 
 
-async def test_probe_records_a_silent_node_as_silent(hass) -> None:
-    """Silence is the finding, not a missing field."""
+async def test_probe_records_an_unreachable_node_as_unanswered(hass) -> None:
+    """Silence on the *unsegmented* request is the finding."""
     entry = _entry(hass)
-    entry.runtime_data.compositions = {}  # nothing answers
 
     dump = await async_get_config_entry_diagnostics(hass, entry)
 
-    assert dump["probe"]["nodes"] == [{"unicast": "0x000c", "answered": False}]
+    node = dump["probe"]["nodes"][0]
+    assert node["answered"] is False
+    assert node["relay"] is None
+    assert node["composition"] is None
+
+
+async def test_probe_states_that_a_null_composition_proves_nothing(hass) -> None:
+    """Shipped once without this, and it invited exactly the wrong reading."""
+    entry = _entry(hass)
+
+    dump = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert "proves nothing" in dump["probe"]["note"]
 
 
 async def test_probe_is_skipped_while_disconnected(hass) -> None:
