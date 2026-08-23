@@ -712,8 +712,10 @@ async def test_get_composition_reads_the_node_under_its_device_key():
     """
     controller, _ = _composition_setup()
     await controller.start()
-
-    comp = await controller.get_composition(UNICAST, timeout=1.0)
+    try:
+        comp = await controller.get_composition(UNICAST, timeout=1.0)
+    finally:
+        await controller.stop()
 
     assert comp is not None
     assert comp.cid == 0x07E9
@@ -725,14 +727,22 @@ async def test_get_composition_returns_none_when_the_node_stays_silent():
     """Best-effort like every other command: silence is None, never a raise."""
     controller, _ = _composition_setup(answer=False)
     await controller.start()
+    try:
+        result = await controller.get_composition(UNICAST, timeout=0.05)
+    finally:
+        await controller.stop()
 
-    assert await controller.get_composition(UNICAST, timeout=0.05) is None
+    assert result is None
 
 
 async def test_get_composition_without_a_device_key_is_not_fatal():
     """A node the export gave no usable device key for must not raise."""
     controller, _ = _composition_setup()
     await controller.start()
+    try:
+        # 0x00FF is in no export; nothing is registered for it.
+        result = await controller.get_composition(0x00FF, timeout=0.05)
+    finally:
+        await controller.stop()
 
-    # 0x00FF is in no export; nothing is registered for it.
-    assert await controller.get_composition(0x00FF, timeout=0.05) is None
+    assert result is None
