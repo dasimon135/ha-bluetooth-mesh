@@ -12,4 +12,5 @@ __pycache__/
 *.apk
 
 # Local agent definitions (per-machine tooling, not project content).
-.claude/
+# Personal Claude Code permissions, never shared
+.claude/settings.local.json
