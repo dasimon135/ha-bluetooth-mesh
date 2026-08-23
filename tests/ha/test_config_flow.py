@@ -23,6 +23,7 @@ pytest.importorskip("pytest_homeassistant_custom_component")
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.bluetooth_mesh import coordinator as coordinator_mod
 from custom_components.bluetooth_mesh.btmesh.network_model import Network
 from custom_components.bluetooth_mesh.const import (
     CONF_CONNECT_JSON,
@@ -93,8 +94,14 @@ async def test_user_flow_rejects_valid_json_but_not_connect(hass) -> None:
     assert result["errors"] == {"base": "invalid_connect"}
 
 
-async def test_options_flow_sets_keepalive(hass) -> None:
-    """The options flow stores the keep-alive timeout (0 = always connected)."""
+async def test_options_flow_sets_keepalive_and_reloads_the_entry(hass) -> None:
+    """The options flow stores the keep-alive timeout (0 = always connected).
+
+    Storing it is only half the job: the coordinator reads the value once, at
+    construction, so the entry has to be reloaded for a change to take effect.
+    ``OptionsFlowWithReload`` does that itself — which is why this test has to
+    survive a real reload, hence the mocked BLE seams and the unload at the end.
+    """
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={CONF_CONNECT_JSON: _connect_text()},
@@ -102,15 +109,34 @@ async def test_options_flow_sets_keepalive(hass) -> None:
     )
     entry.add_to_hass(hass)
 
-    result = await hass.config_entries.options.async_init(entry.entry_id)
-    assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "init"
+    with (
+        # No proxy in range: the coordinator marks itself unavailable and
+        # retries, which is enough for a reload to complete without a radio.
+        patch.object(coordinator_mod, "find_proxy_address", return_value=None),
+        patch.object(coordinator_mod, "discovered_proxies", return_value=[]),
+        patch.object(
+            coordinator_mod,
+            "async_register_proxy_callback",
+            return_value=lambda: None,
+        ),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        assert result["type"] is FlowResultType.FORM
+        assert result["step_id"] == "init"
 
-    result = await hass.config_entries.options.async_configure(
-        result["flow_id"], {CONF_KEEPALIVE: 120}
-    )
-    assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options[CONF_KEEPALIVE] == 120
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {CONF_KEEPALIVE: 120}
+        )
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        assert entry.options[CONF_KEEPALIVE] == 120
+
+        # The scheduled reload runs as a task; let it finish, then tear the
+        # entry down so its periodic probe does not outlive the test.
+        await hass.async_block_till_done()
+        assert entry.runtime_data.keepalive_seconds == 120
+
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
 
 
 async def test_duplicate_network_aborts(hass) -> None:
