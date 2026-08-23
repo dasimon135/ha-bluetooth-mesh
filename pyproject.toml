@@ -1,6 +1,6 @@
 [project]
 name = "btmesh"
-version = "0.4.1"
+version = "0.4.2"
 description = "Pure-Python Bluetooth SIG Mesh stack (rides on an existing mesh network)"
 readme = "README.md"
 requires-python = ">=3.12"
