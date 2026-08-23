@@ -4,6 +4,53 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Four ways a command could be discarded without a word, and no way to tell them
+apart. Reported in [#7](https://github.com/dasimon135/ha-bluetooth-mesh/issues/7):
+the proxy connects, the frames go out, the lamp never reacts and nothing
+answers. None of these is confirmed as that reporter's cause yet — all four are
+real, all four look identical from the outside, and that is the actual defect.
+
+### Fixed
+
+- **A command is addressed to the element that hosts the model**, not to the
+  node's primary address. An element silently ignores an opcode it has no model
+  for — it neither acts nor answers — so a node that lays its lighting servers
+  out across several elements took every command in silence. Light CTL
+  Temperature was already routed this way; on/off, lightness and CTL now are
+  too.
+- **The application key is chosen from what the models bind.** A node matches
+  an incoming message's AID against the keys each of its models was bound to
+  and discards anything else at the upper transport layer. The export's first
+  key was used on faith, which is wrong for any network holding more than one.
+  Every key in the export is now parsed, and the one the driven models actually
+  bind is the one commands are encrypted with.
+- **The source address steps aside for a node that already owns it.** We
+  transmit from unicast `0x7FFF`; if the export gives that address to a node,
+  that node's peers already hold a replay-protection entry for it and drop
+  everything we send — permanently, and re-importing the export does not help.
+  The address is now taken from the export's free range instead of assumed.
+- **A subnet that never beacons says so.** The `.connect` export carries no IV
+  Index, so 0 is an assumption and the Secure Network Beacon is the only thing
+  that can confirm it. Silence now produces one warning naming the unverified
+  index, instead of nothing at all.
+- **The deprecated config-entry update listener is gone.** Home Assistant stops
+  honouring it in 2026.12. The options flow is an `OptionsFlowWithReload` and
+  reloads the entry itself.
+
+### Changed
+
+- **A node whose lighting servers are not on element 0 now gets a light.**
+  Capability detection always scanned every element; entity creation did not,
+  so such a node was hidden entirely rather than exposed with fewer features.
+  Server models only — a remote's client models still yield no entity.
+- **Diagnostics answer the "why is nothing happening" question.** Added: the
+  unicast we transmit from, the AppKey index in use next to the ones the export
+  carries and the ones the models ask for, and each model's `bind` list. The
+  per-element `models` entries are now objects (`{"id", "bind"}`) rather than
+  bare strings.
+
 ## [0.4.1] — 2026-07-26
 
 ### Changed

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -265,7 +266,7 @@ async def test_failed_controller_construction_disconnects_the_client(hass) -> No
     """Same guarantee when the controller cannot even be built."""
     entry = _make_entry(hass)
 
-    def ctor(network, bearer, *, src_addr, seq, tid, iv_index):
+    def ctor(network, bearer, *, src_addr, seq, tid, iv_index, app_key):
         raise ValueError("bad network model")
 
     with _patch_transport(None, ctor_side_effect=ctor) as client:
@@ -313,7 +314,7 @@ async def test_dead_transport_is_never_reused_by_the_next_command(hass) -> None:
     entry = _make_entry(hass)
     built: list[FakeController] = []
 
-    def ctor(network, bearer, *, src_addr, seq, tid, iv_index):
+    def ctor(network, bearer, *, src_addr, seq, tid, iv_index, app_key):
         built.append(FakeController(seq=seq, tid=tid))
         return built[-1]
 
@@ -392,7 +393,7 @@ async def test_iv_index_is_seeded_from_the_store(hass) -> None:
 
     seen: list[int] = []
 
-    def ctor(network, bearer, *, src_addr, seq, tid, iv_index):
+    def ctor(network, bearer, *, src_addr, seq, tid, iv_index, app_key):
         seen.append(iv_index)
         return FakeController(seq=seq, tid=tid)
 
@@ -607,7 +608,7 @@ async def test_seq_margin_applied_once_not_per_command(hass) -> None:
 
     ctor_seqs: list[int] = []
 
-    def ctor(network, bearer, *, src_addr, seq, tid, iv_index):
+    def ctor(network, bearer, *, src_addr, seq, tid, iv_index, app_key):
         ctor_seqs.append(seq)
         assert src_addr == coordinator_mod.SRC_ADDR
         return FakeController(seq=seq, tid=tid)
@@ -651,3 +652,136 @@ async def test_stop_cancels_periodic_probe(hass) -> None:
 
     assert coord.available is False
     assert coord._probe_unsub is None
+
+
+# ------------------------------- source address / application key resolution
+
+_APP_KEY_0 = "63964771734fbd76e3b40519d1d94a48"
+_APP_KEY_1 = "0a1b2c3d4e5f60718293a4b5c6d7e8f9"
+
+
+def _doc(nodes, app_keys=None):
+    """A minimal connect document (the fixture, reshaped for one assertion)."""
+    return {
+        "meshName": "T",
+        "meshUUID": "0F0E0D0C-0B0A-0908-0706-050403020100",
+        "netKeys": [{"key": "7dd7364cd842ad18c17c2b820c84c3d6", "index": 0}],
+        "appKeys": app_keys or [{"key": _APP_KEY_0, "index": 0}],
+        "nodes": nodes,
+    }
+
+
+def _lamp(unicast, *, bind=(0,), elements=1):
+    return {
+        "UUID": f"n{unicast}",
+        "unicastAddress": f"{unicast:04X}",
+        "deviceKey": "9d6dd0e96eb25dc19a40ed9914f8f03f",
+        "cid": "07E9",
+        "elements": [
+            {
+                "index": index,
+                "models": [{"modelId": "1300", "bind": list(bind)}],
+            }
+            for index in range(elements)
+        ],
+    }
+
+
+def _entry_for(hass, doc) -> MockConfigEntry:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CONNECT_JSON: json.dumps(doc)},
+        unique_id="0F0E0D0C-0B0A-0908-0706-050403020100",
+    )
+    entry.add_to_hass(hass)
+    return entry
+
+
+async def test_source_address_defaults_to_7fff_when_nothing_owns_it(hass) -> None:
+    entry = _entry_for(hass, _doc([_lamp(0x000C)]))
+    with _patch_transport(FakeController()):
+        coord = MeshCoordinator(hass, entry)
+
+    assert coord.src_addr == 0x7FFF
+
+
+async def test_source_address_steps_off_an_address_the_export_owns(hass) -> None:
+    """Sharing a unicast with a real node mutes us for good.
+
+    That node's peers hold a replay-protection entry for the address; our
+    sequence cursor starts far below whatever it reached, so every message we
+    send is discarded as a replay — no error, no Status, no physical effect,
+    and re-importing the export changes nothing.
+    """
+    # Two elements at 0x7FFE → the node owns 0x7FFE and 0x7FFF.
+    entry = _entry_for(hass, _doc([_lamp(0x7FFE, elements=2)]))
+    with _patch_transport(FakeController()):
+        coord = MeshCoordinator(hass, entry)
+
+    assert coord.src_addr == 0x7FFD
+
+
+async def test_app_key_follows_what_the_driven_models_bind(hass) -> None:
+    """Encrypting under a key the models never bound is silently fatal."""
+    entry = _entry_for(
+        hass,
+        _doc(
+            [_lamp(0x000C, bind=(4,))],
+            app_keys=[
+                {"key": _APP_KEY_0, "index": 0},
+                {"key": _APP_KEY_1, "index": 4},
+            ],
+        ),
+    )
+    with _patch_transport(FakeController()):
+        coord = MeshCoordinator(hass, entry)
+
+    assert coord.app_key_index == 4
+
+
+async def test_the_resolved_key_and_address_reach_the_controller(hass) -> None:
+    """Resolving them is worthless if the controller is built with the others."""
+    entry = _entry_for(
+        hass,
+        _doc(
+            [_lamp(0x7FFF, bind=(4,))],
+            app_keys=[
+                {"key": _APP_KEY_0, "index": 0},
+                {"key": _APP_KEY_1, "index": 4},
+            ],
+        ),
+    )
+    fake = FakeController()
+    with _patch_transport(fake):
+        with patch.object(
+            coordinator_mod, "MeshController", return_value=fake
+        ) as ctor:
+            coord = MeshCoordinator(hass, entry)
+            await coord.async_start()
+            kwargs = ctor.call_args.kwargs
+            await coord.async_stop()
+
+    assert kwargs["src_addr"] == 0x7FFE
+    assert kwargs["app_key"] == bytes.fromhex(_APP_KEY_1)
+
+
+async def test_a_silent_subnet_is_reported_once(hass, caplog) -> None:
+    """No beacon means the IV Index is a guess, and a wrong guess is invisible.
+
+    The export carries no IV Index at all, so 0 is an assumption; the subnet's
+    Secure Network Beacon is the only thing that can confirm or correct it. A
+    node that never beacons leaves us encrypting with an index the mesh may
+    have moved past, discarding everything we send — worth saying once.
+    """
+    entry = _make_entry(hass)
+    fake = FakeController()  # .beacon stays None
+    with _patch_transport(fake):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        with caplog.at_level("WARNING"):
+            await coord.async_set_onoff(UNICAST, True)
+            await coord.async_set_onoff(UNICAST, False)
+        await coord.async_stop()
+
+    assert coord.beacon is None
+    assert caplog.text.count("no Secure Network Beacon") == 1

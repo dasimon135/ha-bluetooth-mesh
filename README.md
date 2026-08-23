@@ -54,8 +54,12 @@ Adding a node, or refreshing a key, is a **Reconfigure** on the existing entry:
 paste the new export and keep every entity id and its history. If something is
 not working, **Download diagnostics** on the integration reports the Network ID
 it looks for, every mesh proxy Home Assistant currently sees, the IV Index and
-sequence cursor in use, and each node's composition — with no key material in
-it, so it is safe to paste into an issue.
+sequence cursor in use, the unicast address commands are sent from, which
+application key they are encrypted with next to the ones each model is bound
+to, and each node's composition — with no key material in it, so it is safe to
+paste into an issue. That last group matters because a mismatch there is
+invisible on air: a node discards a message it cannot authenticate without
+answering, so the integration transmits perfectly and the lamp does nothing.
 
 ## Two deliverables
 

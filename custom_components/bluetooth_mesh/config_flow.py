@@ -19,7 +19,7 @@ from homeassistant.config_entries import (
     ConfigEntry,
     ConfigFlow,
     ConfigFlowResult,
-    OptionsFlow,
+    OptionsFlowWithReload,
 )
 from homeassistant.core import callback
 from homeassistant.helpers.selector import (
@@ -123,13 +123,18 @@ class BluetoothMeshConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
 
-class BluetoothMeshOptionsFlow(OptionsFlow):
+class BluetoothMeshOptionsFlow(OptionsFlowWithReload):
     """Tune runtime behaviour: how long to hold the proxy connection open.
 
     A mesh node offers a single proxy connection slot. Holding it open makes
     commands instant but locks the vendor (Häfele Connect Mesh) app out of the
     lamp; dropping it after an idle period hands the slot back at the cost of a
     multi-second reconnect on the next command. ``0`` keeps it always open.
+
+    ``OptionsFlowWithReload`` reloads the entry itself when the options change.
+    A config-entry update listener did that job before; Home Assistant reports
+    that pattern as deprecated and stops honouring it in 2026.12, and the two
+    are mutually exclusive — registering a listener makes this class raise.
     """
 
     async def async_step_init(
