@@ -61,6 +61,14 @@ paste into an issue. That last group matters because a mismatch there is
 invisible on air: a node discards a message it cannot authenticate without
 answering, so the integration transmits perfectly and the lamp does nothing.
 
+The dump also **probes each node under its device key** (a `Config Relay Get`,
+whose request and reply both fit in one unsegmented message). Its `answered`
+field is the honest reachability signal — it needs no application key, no model
+binding and no vendor support, so it separates *the message never arrived* from
+*the node received it and did nothing*, which is the single hardest thing to
+tell apart on a mesh. The `relay` block beside it says whether that node
+forwards anything from the proxy connection into the rest of the network.
+
 ## Two deliverables
 
 This repository ships two things, mirroring the `pymadoka-ng` / `daikin_madoka`
