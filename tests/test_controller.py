@@ -632,3 +632,20 @@ def test_iv_index_defaults_to_the_network_model():
     network = Network.from_connect_file(FIXTURE)
     controller = MeshController(network, FakeBearer())
     assert controller.iv_index == network.iv_index
+
+
+async def test_app_key_override_is_what_the_commands_are_encrypted_with():
+    """A network can hold several AppKeys; only the bound one is understood.
+
+    A node checks an incoming message's AID against the keys its models were
+    bound to and drops anything else without a word, so the controller must be
+    able to encrypt with a key other than the export's first.
+    """
+    network, bearer = Network.from_connect_file(FIXTURE), FakeBearer()
+    other = bytes.fromhex("0a1b2c3d4e5f60718293a4b5c6d7e8f9")
+    assert other != network.app_key
+
+    controller = MeshController(network, bearer, app_key=other)
+
+    assert controller.app_key == other
+    assert MeshController(network, bearer).app_key == network.app_key

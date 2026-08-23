@@ -48,6 +48,7 @@ from .btmesh.network_model import Network
 from .const import (
     CONF_CONNECT_JSON,
     CONF_KEEPALIVE,
+    CONTROLLED_MODEL_IDS,
     DEFAULT_KEEPALIVE,
     DOMAIN,
 )
@@ -62,9 +63,12 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["MeshCoordinator"]
 
-# Our provisioner/controller source address on the subnet. 0x7FFF is a spare
-# unicast well clear of the app-provisioned nodes (matches the library default
-# and the Phase-0 harness).
+# Preferred source address for the traffic we originate. 0x7FFF is the top of
+# the unicast range, as far as possible from the addresses a provisioner hands
+# out (it allocates upwards). It is only a PREFERENCE: an export that already
+# gives it to a node makes us step down (see Network.free_unicast), because
+# sharing a unicast with a real node means that node's peers already hold a
+# replay-protection entry for it and discard everything we send.
 SRC_ADDR = 0x7FFF
 
 # Consecutive failed connect attempts before we surface the proxy_unreachable
@@ -141,6 +145,11 @@ class MeshCoordinator:
         self._store: Store = Store(
             hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.seq"
         )
+        # Where our traffic comes FROM, and which key it is encrypted WITH —
+        # both derived from the export rather than assumed, because getting
+        # either wrong fails in complete silence (see the two helpers below).
+        self._src_addr = self._resolve_src_addr()
+        self._app_key = self._resolve_app_key()
         self._seq = 0
         # The IV Index we encrypt with. The .connect export states it as it was
         # at export time and the mesh moves on without telling the file, so the
@@ -157,6 +166,9 @@ class MeshCoordinator:
         # "does the subnet beacon, and do our keys verify it" answers most
         # support questions in one look.
         self._beacon = None
+        # A subnet that never beacons leaves the IV Index unverifiable; say so
+        # once rather than on every command (see _adopt_iv_index).
+        self._beacon_warned = False
         self._stopped = False
         self._fail_count = 0
         self._issue_active = False
@@ -176,6 +188,64 @@ class MeshCoordinator:
         # Serialise everything through a single connection at a time: two
         # commands must never contend for the lamp's single proxy slot.
         self._lock = asyncio.Lock()
+
+    # ------------------------------------------------ derived from the export
+
+    def _resolve_src_addr(self) -> int:
+        """The unicast we transmit from: :data:`SRC_ADDR` unless it is taken.
+
+        A collision here is the worst kind of bug this integration can have:
+        everything looks healthy — the proxy connects, the frames go out — and
+        the lamp simply never reacts, because its peers drop our messages as
+        replays of an address they already know. Nothing in any log says so.
+        """
+        src_addr = self._network.free_unicast(SRC_ADDR)
+        if src_addr != SRC_ADDR:
+            logger.info(
+                "%#06x already belongs to a node of this network; "
+                "transmitting from %#06x instead",
+                SRC_ADDR, src_addr,
+            )
+        return src_addr
+
+    def _resolve_app_key(self):
+        """The AppKey the models we drive are actually bound to.
+
+        A node matches an incoming message's AID against the keys each of its
+        models was bound to and discards anything else at the upper transport
+        layer — no error, no Status, no physical effect. Taking the export's
+        first key on faith is therefore a silent failure waiting for a network
+        that holds more than one.
+        """
+        app_key = self._network.app_key_for_models(CONTROLLED_MODEL_IDS)
+        wanted = self._network.bound_app_key_indexes(CONTROLLED_MODEL_IDS)
+        held = {key.index for key in self._network.app_keys}
+        if wanted and not held.intersection(wanted):
+            logger.warning(
+                "the lighting models of this network bind AppKey index(es) %s, "
+                "but the export only carries %s; falling back to index %d — "
+                "commands are likely to be ignored by the nodes",
+                ", ".join(str(index) for index in wanted),
+                ", ".join(str(index) for index in sorted(held)) or "none",
+                app_key.index,
+            )
+        elif app_key.index != self._network.default_app_key.index:
+            logger.info(
+                "using AppKey index %d (bound by the lighting models) rather "
+                "than the export's first key, index %d",
+                app_key.index, self._network.default_app_key.index,
+            )
+        return app_key
+
+    @property
+    def src_addr(self) -> int:
+        """The unicast address this integration transmits from."""
+        return self._src_addr
+
+    @property
+    def app_key_index(self) -> int:
+        """The AppKey Index the commands are encrypted with."""
+        return self._app_key.index
 
     # -------------------------------------------------------------- listeners
 
@@ -371,8 +441,9 @@ class MeshCoordinator:
             async with asyncio.timeout(CONNECT_TIMEOUT):
                 client, bearer = await async_connect_bearer(self.hass, address)
                 controller = MeshController(
-                    self._network, bearer, src_addr=SRC_ADDR,
+                    self._network, bearer, src_addr=self._src_addr,
                     seq=self._seq, tid=self._tid, iv_index=self._iv_index,
+                    app_key=self._app_key.key,
                 )
                 await controller.start()
         except Exception as exc:  # noqa: BLE001 - transport/GATT/connect
@@ -611,6 +682,15 @@ class MeshCoordinator:
         """
         beacon = getattr(controller, "beacon", None)
         if beacon is None:
+            if not self._beacon_warned:
+                self._beacon_warned = True
+                logger.warning(
+                    "no Secure Network Beacon received from this subnet: the IV "
+                    "Index %#x comes from the .connect export, which does not "
+                    "carry one, and cannot be confirmed. If the mesh has moved "
+                    "past it, every message sent is discarded in silence",
+                    self._iv_index,
+                )
             return False
         self._beacon = beacon
         if beacon.iv_index == self._iv_index:

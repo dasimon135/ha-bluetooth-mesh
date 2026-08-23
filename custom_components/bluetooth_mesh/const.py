@@ -20,3 +20,22 @@ CONF_CONNECT_JSON = "connect_json"
 # reclaim the lamp when Home Assistant is not actively driving it.
 CONF_KEEPALIVE = "keepalive_seconds"
 DEFAULT_KEEPALIVE = 0
+
+# SIG model identifiers the integration drives (spec Mesh Model §6/§7). They
+# live here rather than in ``light.py`` because the coordinator needs them too:
+# the AppKey to encrypt with is the one THESE models are bound to.
+MODEL_GENERIC_ONOFF = 0x1000
+MODEL_LIGHT_LIGHTNESS = 0x1300
+MODEL_LIGHT_CTL = 0x1303
+# The Light CTL Temperature server lives on its OWN (secondary) element and sets
+# temperature WITHOUT touching lightness — unlike Light CTL Set on element 0.
+MODEL_LIGHT_CTL_TEMP = 0x1306
+
+# Every model a command may be addressed to. Used to resolve which application
+# key the network binds to the things we actually drive.
+CONTROLLED_MODEL_IDS = (
+    MODEL_GENERIC_ONOFF,
+    MODEL_LIGHT_LIGHTNESS,
+    MODEL_LIGHT_CTL,
+    MODEL_LIGHT_CTL_TEMP,
+)

@@ -20,6 +20,7 @@ from homeassistant.core import HomeAssistant
 
 from . import BluetoothMeshConfigEntry
 from .btmesh.crypto import k3
+from .const import CONTROLLED_MODEL_IDS
 from .mesh_transport import discovered_proxies
 
 
@@ -39,13 +40,26 @@ async def async_get_config_entry_diagnostics(
             "network_id": k3(network.net_key).hex(),
             "iv_index": coordinator.iv_index,
             "net_key_index": network.net_key_index,
-            "app_key_index": network.app_key_index,
+            # Three different answers to "which application key", because a
+            # mismatch between them is invisible on air: a node silently drops
+            # anything encrypted with a key its models were not bound to.
+            # What we encrypt with / what the export carries / what the models
+            # we drive actually ask for.
+            "app_key_index": coordinator.app_key_index,
+            "app_key_indexes": [key.index for key in network.app_keys],
+            "bound_app_key_indexes": list(
+                network.bound_app_key_indexes(CONTROLLED_MODEL_IDS)
+            ),
             "node_count": len(network.nodes),
         },
         "state": {
             "available": coordinator.available,
             "connected": coordinator.connected,
             "seq": coordinator.seq,
+            # The unicast we transmit FROM. Sharing it with a node of the mesh
+            # makes every message we send look like a replay to that node's
+            # peers, which discard it without a trace.
+            "src_addr": f"{coordinator.src_addr:#06x}",
             "keepalive_seconds": coordinator.keepalive_seconds,
         },
         # A subnet that beacons AND authenticates proves the imported keys are
@@ -75,7 +89,13 @@ async def async_get_config_entry_diagnostics(
                     {
                         "index": element.index,
                         "unicast": f"{element.unicast:#06x}",
-                        "models": [f"{m.model_id:#06x}" for m in element.models],
+                        "models": [
+                            {
+                                "id": f"{m.model_id:#06x}",
+                                "bind": list(m.bound_appkey_indexes),
+                            }
+                            for m in element.models
+                        ],
                     }
                     for element in node.elements
                 ],

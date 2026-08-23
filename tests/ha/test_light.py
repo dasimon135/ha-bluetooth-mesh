@@ -458,3 +458,159 @@ async def test_hafele_temperature_is_still_mirrored(hass) -> None:
     await light.async_turn_on(color_temp_kelvin=4000)
 
     assert ("set_ctl_temperature", 0x000D, 5200) in coordinator.calls
+
+
+# --------------------------------- addressing the element that hosts a model
+
+
+def _split_element_network() -> Network:
+    """A node whose lighting servers do NOT all sit on element 0.
+
+    Element 0 hosts Generic OnOff only; Light Lightness / Light CTL live on
+    element 1 and the CTL Temperature server on element 2. A real composition
+    is free to be laid out this way, and the entity must follow it.
+    """
+    node = Node(
+        uuid="99998888-7777-6666-5555-444433332222",
+        unicast=0x0030,
+        device_key=b"\x00" * 16,
+        cid=0x07E9,
+        name="Split Lamp",
+        elements=(
+            Element(
+                index=0,
+                unicast=0x0030,
+                models=(Model(model_id=0x1000, bound_appkey_indexes=(0,)),),
+            ),
+            Element(
+                index=1,
+                unicast=0x0031,
+                models=(
+                    Model(model_id=0x1300, bound_appkey_indexes=(0,)),
+                    Model(model_id=0x1303, bound_appkey_indexes=(0,)),
+                ),
+            ),
+            Element(
+                index=2,
+                unicast=0x0032,
+                models=(Model(model_id=0x1306, bound_appkey_indexes=(0,)),),
+            ),
+        ),
+    )
+    return replace(_fixture_network(), nodes=(node,))
+
+
+def _element0_has_no_lighting_network() -> Network:
+    """A node whose element 0 hosts no lighting server at all."""
+    node = Node(
+        uuid="12345678-1234-1234-1234-123456789abc",
+        unicast=0x0040,
+        device_key=b"\x00" * 16,
+        cid=0x07E9,
+        name="Secondary Only",
+        elements=(
+            Element(
+                index=0,
+                unicast=0x0040,
+                models=(Model(model_id=0x1201, bound_appkey_indexes=()),),
+            ),
+            Element(
+                index=1,
+                unicast=0x0041,
+                models=(Model(model_id=0x1300, bound_appkey_indexes=(0,)),),
+            ),
+        ),
+    )
+    return replace(_fixture_network(), nodes=(node,))
+
+
+async def test_brightness_is_addressed_to_the_element_hosting_lightness(hass) -> None:
+    """A Set aimed at an element that does not host the model is ignored.
+
+    Silently: the element has nothing to handle the opcode, so it neither acts
+    nor answers. Sending to the node's primary address regardless of where the
+    Light Lightness server actually lives is exactly that mistake.
+    """
+    light, coordinator = _light(_split_element_network(), unicast=0x0030)
+
+    await light.async_turn_on(brightness=128)
+
+    call = next(c for c in coordinator.calls if c[0] == "set_lightness")
+    assert call[1] == 0x0031
+
+
+async def test_onoff_is_addressed_to_the_element_hosting_generic_onoff(hass) -> None:
+    light, coordinator = _light(_split_element_network(), unicast=0x0030)
+
+    await light.async_turn_off()
+
+    assert ("set_onoff", 0x0030, False) in coordinator.calls
+
+
+async def test_ctl_is_addressed_to_the_element_hosting_light_ctl(hass) -> None:
+    """Light CTL Set goes to the CTL server's element, not the node address."""
+    network = _split_element_network()
+    # Drop the dedicated temperature element so turn_on falls back to CTL Set.
+    node = network.nodes[0]
+    node = replace(node, elements=node.elements[:2])
+    light, coordinator = _light(replace(network, nodes=(node,)), unicast=0x0030)
+
+    await light.async_turn_on(color_temp_kelvin=4000)
+
+    call = next(c for c in coordinator.calls if c[0] == "set_ctl")
+    assert call[1] == 0x0031
+
+
+async def test_refresh_reads_each_model_on_its_own_element(hass) -> None:
+    light, coordinator = _light(_split_element_network(), unicast=0x0030)
+
+    await light.async_refresh_state()
+
+    assert ("get_onoff", 0x0030) in coordinator.calls
+    assert ("get_lightness", 0x0031) in coordinator.calls
+
+
+async def test_setup_creates_a_light_for_lighting_on_a_secondary_element(
+    hass,
+) -> None:
+    """Gating entity creation on element 0 hid such a node entirely.
+
+    Capability detection already scans every element (``node.has_model``), so
+    refusing to create the entity unless element 0 carried the server was an
+    inconsistency, not a policy.
+    """
+    coordinator = FakeCoordinator(_element0_has_no_lighting_network())
+    entry = type("Entry", (), {"runtime_data": coordinator})()
+
+    added: list = []
+    await async_setup_entry(hass, entry, lambda ents: added.extend(ents))
+
+    assert len(added) == 1
+    # The identity stays the NODE address; only the addressing follows elements.
+    assert added[0].unique_id == f"{MESH_UUID}_0040"
+
+
+async def test_a_node_with_no_lighting_server_gets_no_entity(hass) -> None:
+    """Widening the gate must not start inventing lights for every node."""
+    node = Node(
+        uuid="dead0000-0000-0000-0000-000000000000",
+        unicast=0x0050,
+        device_key=b"\x00" * 16,
+        cid=0x07E9,
+        name="Remote",
+        # 0x1001 is the Generic OnOff *Client* — a remote, not a light.
+        elements=(
+            Element(
+                index=0,
+                unicast=0x0050,
+                models=(Model(model_id=0x1001, bound_appkey_indexes=(0,)),),
+            ),
+        ),
+    )
+    coordinator = FakeCoordinator(replace(_fixture_network(), nodes=(node,)))
+    entry = type("Entry", (), {"runtime_data": coordinator})()
+
+    added: list = []
+    await async_setup_entry(hass, entry, lambda ents: added.extend(ents))
+
+    assert added == []

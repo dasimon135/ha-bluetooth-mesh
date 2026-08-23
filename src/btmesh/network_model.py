@@ -23,6 +23,8 @@ bound application-key indexes.
 
 import json
 import logging
+from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from .crypto import k3
@@ -30,11 +32,17 @@ from .errors import BtMeshError
 
 __all__ = [
     "NetworkModelError",
+    "AppKey",
     "Model",
     "Element",
     "Node",
     "Network",
 ]
+
+# A unicast address identifies one element (spec §3.4.2); 0x0000 is unassigned
+# and everything from 0x8000 up is a group or virtual address.
+UNICAST_MIN = 0x0001
+UNICAST_MAX = 0x7FFF
 
 
 logger = logging.getLogger(__name__)
@@ -42,6 +50,20 @@ logger = logging.getLogger(__name__)
 
 class NetworkModelError(BtMeshError):
     """A ``.connect`` document was missing required fields or malformed."""
+
+
+@dataclass(frozen=True)
+class AppKey:
+    """One application key from the export (spec §3.8.6.3).
+
+    ``index`` is the key's AppKey Index — the number a model's ``bind`` list
+    refers to. It is what makes a key usable: a message encrypted with a key a
+    model was never bound to is discarded by the node, silently.
+    """
+
+    index: int
+    key: bytes
+    name: str = ""
 
 
 @dataclass(frozen=True)
@@ -125,6 +147,11 @@ class Network:
     app_key_index: int
     iv_index: int
     nodes: tuple[Node, ...]
+    # Every application key the export carries. ``app_key`` / ``app_key_index``
+    # above name the FIRST one, which is not necessarily the one the models we
+    # want to drive are bound to — see :meth:`app_key_for_models`. Defaulted so
+    # a Network built by hand (tests, fixtures) stays valid.
+    app_keys: tuple[AppKey, ...] = ()
 
     @property
     def identifier(self) -> str:
@@ -135,6 +162,84 @@ class Network:
         the subnet's real on-air identity, so it is the honest fallback.
         """
         return self.uuid or k3(self.net_key).hex()
+
+    # ------------------------------------------------- application keys
+
+    def bound_app_key_indexes(self, model_ids: Iterable[int]) -> tuple[int, ...]:
+        """AppKey indexes the export binds to ``model_ids``, most-bound first.
+
+        Reported rather than merely used so a caller can explain itself: an
+        index listed here that the export has no key for is exactly the case
+        where nothing we send can ever be understood, and saying so beats
+        failing in silence.
+        """
+        wanted = frozenset(model_ids)
+        counts: Counter[int] = Counter()
+        for node in self.nodes:
+            for element in node.elements:
+                for model in element.models:
+                    if model.model_id in wanted:
+                        counts.update(model.bound_appkey_indexes)
+        return tuple(
+            index for index, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        )
+
+    def app_key_for_models(self, model_ids: Iterable[int]) -> AppKey:
+        """The AppKey to encrypt messages for ``model_ids`` with.
+
+        A node checks the AID of an incoming access message against the keys
+        each of its models was bound to; a message encrypted with any other key
+        is discarded at the upper transport layer without a word — no error, no
+        Status, no physical effect. So the key is chosen from what the models
+        actually bind rather than by taking the first key in the export and
+        hoping.
+
+        Falls back to the first key when the export binds nothing (or binds an
+        index it carries no key for), which is the only usable guess left.
+        """
+        held = {key.index: key for key in self.app_keys}
+        for index in self.bound_app_key_indexes(model_ids):
+            if index in held:
+                return held[index]
+        return self.default_app_key
+
+    @property
+    def default_app_key(self) -> AppKey:
+        """The export's first application key."""
+        if self.app_keys:
+            return self.app_keys[0]
+        return AppKey(index=self.app_key_index, key=self.app_key)
+
+    # ---------------------------------------------------- source addressing
+
+    def unicast_addresses(self) -> frozenset[int]:
+        """Every element address the export accounts for (spec §3.4.2)."""
+        return frozenset(
+            element.unicast for node in self.nodes for element in node.elements
+        )
+
+    def free_unicast(self, preferred: int = UNICAST_MAX) -> int:
+        """``preferred`` if no imported element owns it, else the next one down.
+
+        Transmitting from an address that already belongs to a node of the mesh
+        is fatal in silence: that node's peers hold a replay-protection entry
+        for the address, our sequence cursor starts far below whatever it
+        reached, and every message we send is discarded as a replay. Nothing is
+        logged anywhere, the lamp simply never reacts.
+
+        Counting DOWN from the preferred address keeps us clear of the range a
+        provisioner hands out next, which it allocates upwards.
+        """
+        if not UNICAST_MIN <= preferred <= UNICAST_MAX:
+            raise NetworkModelError(
+                f"{preferred:#06x} is not a unicast address "
+                f"({UNICAST_MIN:#06x}..{UNICAST_MAX:#06x})"
+            )
+        taken = self.unicast_addresses()
+        for candidate in range(preferred, UNICAST_MIN - 1, -1):
+            if candidate not in taken:
+                return candidate
+        raise NetworkModelError("the export leaves no free unicast address")
 
     @classmethod
     def from_connect(cls, data: dict) -> "Network":
@@ -151,6 +256,7 @@ class Network:
 
         net_key = _hex_bytes(net_key_entry, "key", "netKeys[0].key")
         app_key = _hex_bytes(app_key_entry, "key", "appKeys[0].key")
+        app_keys = _parse_app_keys(data["appKeys"])
 
         raw_nodes = data.get("nodes")
         if not isinstance(raw_nodes, list):
@@ -194,6 +300,7 @@ class Network:
             app_key_index=_as_int(app_key_entry.get("index", 0), "appKeys[0].index"),
             iv_index=_as_int(data.get("ivIndex", 0), "ivIndex"),
             nodes=tuple(nodes),
+            app_keys=app_keys,
         )
 
     @classmethod
@@ -220,6 +327,22 @@ def _first(data: dict, field: str) -> dict:
     if not isinstance(entry, dict):
         raise NetworkModelError(f"'{field}[0]' is not an object")
     return entry
+
+
+def _parse_app_keys(entries: list) -> tuple[AppKey, ...]:
+    """Parse every ``appKeys[]`` entry; the first one is already validated."""
+    keys = []
+    for position, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise NetworkModelError(f"'appKeys[{position}]' is not an object")
+        keys.append(
+            AppKey(
+                index=_as_int(entry.get("index", 0), f"appKeys[{position}].index"),
+                key=_hex_bytes(entry, "key", f"appKeys[{position}].key"),
+                name=str(entry.get("name", "")),
+            )
+        )
+    return tuple(keys)
 
 
 def _hex_bytes(entry: dict, key: str, label: str) -> bytes:

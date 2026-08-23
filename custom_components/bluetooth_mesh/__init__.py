@@ -39,19 +39,13 @@ async def async_setup_entry(
     await coordinator.async_start()
     entry.runtime_data = coordinator
 
-    # Reload when the options (keep-alive timeout) change so the coordinator
-    # picks up the new value.
-    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+    # No config-entry update listener: the options flow is an
+    # ``OptionsFlowWithReload`` and reloads the entry itself, and the
+    # reconfigure flow schedules its own reload. Home Assistant reports the
+    # listener pattern as deprecated and stops honouring it in 2026.12.
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
-
-
-async def _async_update_listener(
-    hass: HomeAssistant, entry: BluetoothMeshConfigEntry
-) -> None:
-    """Reload the entry when its options change."""
-    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(

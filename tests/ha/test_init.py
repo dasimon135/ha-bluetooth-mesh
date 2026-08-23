@@ -205,3 +205,43 @@ async def test_corrupt_entry_data_fails_the_setup_cleanly() -> None:
 
     with pytest.raises(ConfigEntryError):
         await module.async_setup_entry(hass, entry)
+
+
+async def test_no_config_entry_update_listener_is_registered() -> None:
+    """The listener pattern stops working in HA 2026.12.
+
+    Home Assistant reloads the entry itself now: the options flow is an
+    ``OptionsFlowWithReload`` and the reconfigure flow schedules its own
+    reload. Registering a listener on top is not merely redundant — it makes
+    ``OptionsFlowWithReload`` raise.
+    """
+    pytest.importorskip("pytest_homeassistant_custom_component")
+
+    import importlib
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    module = importlib.import_module("custom_components.bluetooth_mesh")
+
+    hass = MagicMock()
+    hass.config_entries.async_forward_entry_setups = AsyncMock(return_value=None)
+    entry = MagicMock()
+
+    coordinator = MagicMock()
+    coordinator.async_start = AsyncMock(return_value=None)
+    with patch.object(module, "MeshCoordinator", return_value=coordinator):
+        assert await module.async_setup_entry(hass, entry) is True
+
+    entry.add_update_listener.assert_not_called()
+
+
+def test_options_flow_reloads_the_entry_itself() -> None:
+    """...which is what replaces the deprecated update listener."""
+    pytest.importorskip("pytest_homeassistant_custom_component")
+
+    from homeassistant.config_entries import OptionsFlowWithReload
+
+    from custom_components.bluetooth_mesh.config_flow import (
+        BluetoothMeshOptionsFlow,
+    )
+
+    assert issubclass(BluetoothMeshOptionsFlow, OptionsFlowWithReload)

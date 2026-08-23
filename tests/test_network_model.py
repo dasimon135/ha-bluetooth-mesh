@@ -194,3 +194,168 @@ def test_a_document_whose_every_node_is_broken_still_raises():
 def test_an_export_with_no_nodes_at_all_is_accepted():
     """An empty list is a legitimate (if useless) network, not a parse error."""
     assert Network.from_connect(_connect_doc([])).nodes == ()
+
+
+# ---------------------------------------------- application-key resolution
+
+_APP_KEY_0 = "63964771734fbd76e3b40519d1d94a48"
+_APP_KEY_1 = "0a1b2c3d4e5f60718293a4b5c6d7e8f9"
+
+
+def _doc(nodes, app_keys=None):
+    """A connect document with an explicit ``appKeys`` list."""
+    doc = _connect_doc(nodes)
+    if app_keys is not None:
+        doc["appKeys"] = app_keys
+    return doc
+
+
+def _node(unicast, elements):
+    return {
+        "UUID": f"n{unicast}",
+        "unicastAddress": f"{unicast:04X}",
+        "deviceKey": "9d6dd0e96eb25dc19a40ed9914f8f03f",
+        "cid": "07E9",
+        "elements": elements,
+    }
+
+
+def test_app_keys_lists_every_key_in_the_export():
+    """Only the first key used to survive parsing; a network can hold several."""
+    network = Network.from_connect(
+        _doc(
+            [_GOOD_NODE],
+            [
+                {"key": _APP_KEY_0, "index": 0, "name": "First"},
+                {"key": _APP_KEY_1, "index": 4, "name": "Second"},
+            ],
+        )
+    )
+
+    assert [(k.index, k.name) for k in network.app_keys] == [
+        (0, "First"),
+        (4, "Second"),
+    ]
+    assert network.app_keys[1].key == bytes.fromhex(_APP_KEY_1)
+
+
+def test_app_key_and_index_still_name_the_first_key():
+    """The historical fields keep their meaning: resolution is explicit."""
+    network = Network.from_connect(
+        _doc(
+            [_GOOD_NODE],
+            [{"key": _APP_KEY_0, "index": 0}, {"key": _APP_KEY_1, "index": 4}],
+        )
+    )
+
+    assert network.app_key == bytes.fromhex(_APP_KEY_0)
+    assert network.app_key_index == 0
+
+
+def test_app_key_for_models_follows_what_the_models_bind():
+    """The key we encrypt with must be the one the target models are bound to.
+
+    Taking ``appKeys[0]`` blindly encrypts under an AppKey the lamp's lighting
+    models never bound: the AID does not match, the node discards the message
+    at the upper transport layer, and nothing is heard back.
+    """
+    node = _node(0x000C, [{"index": 0, "models": [{"modelId": "1300", "bind": [4]}]}])
+    network = Network.from_connect(
+        _doc(
+            [node],
+            [{"key": _APP_KEY_0, "index": 0}, {"key": _APP_KEY_1, "index": 4}],
+        )
+    )
+
+    resolved = network.app_key_for_models([0x1300])
+
+    assert resolved.index == 4
+    assert resolved.key == bytes.fromhex(_APP_KEY_1)
+
+
+def test_app_key_for_models_ignores_models_we_do_not_drive():
+    """A remote's client models may bind another key; they must not sway it."""
+    lamp = _node(0x000C, [{"index": 0, "models": [{"modelId": "1300", "bind": [0]}]}])
+    remote = _node(
+        0x0020,
+        [
+            {"index": 0, "models": [{"modelId": "1001", "bind": [4]}]},
+            {"index": 1, "models": [{"modelId": "1001", "bind": [4]}]},
+            {"index": 2, "models": [{"modelId": "1001", "bind": [4]}]},
+        ],
+    )
+    network = Network.from_connect(
+        _doc(
+            [lamp, remote],
+            [{"key": _APP_KEY_0, "index": 0}, {"key": _APP_KEY_1, "index": 4}],
+        )
+    )
+
+    assert network.app_key_for_models([0x1300]).index == 0
+
+
+def test_app_key_for_models_falls_back_to_the_first_key():
+    """No binding at all (or an index the export has no key for) → the first."""
+    node = _node(0x000C, [{"index": 0, "models": [{"modelId": "1300", "bind": []}]}])
+    network = Network.from_connect(
+        _doc(
+            [node],
+            [{"key": _APP_KEY_0, "index": 0}, {"key": _APP_KEY_1, "index": 4}],
+        )
+    )
+
+    assert network.app_key_for_models([0x1300]).index == 0
+
+
+def test_bound_app_key_indexes_reports_what_the_export_asks_for():
+    """So a caller can say *why* it could not honour the binding."""
+    node = _node(0x000C, [{"index": 0, "models": [{"modelId": "1300", "bind": [7]}]}])
+    network = Network.from_connect(_doc([node]))
+
+    assert network.bound_app_key_indexes([0x1300]) == (7,)
+    # ...and with no key for index 7 the resolution still yields a usable key.
+    assert network.app_key_for_models([0x1300]).index == 0
+
+
+# ------------------------------------------------------ source addressing
+
+
+def test_unicast_addresses_covers_every_element_not_just_the_node():
+    node = _node(
+        0x000C,
+        [
+            {"index": 0, "models": []},
+            {"index": 1, "models": []},
+            {"index": 2, "models": []},
+        ],
+    )
+    network = Network.from_connect(_doc([node]))
+
+    assert network.unicast_addresses() == frozenset({0x000C, 0x000D, 0x000E})
+
+
+def test_free_unicast_keeps_the_preferred_address_when_it_is_free():
+    network = Network.from_connect(_doc([_GOOD_NODE]))
+
+    assert network.free_unicast(0x7FFF) == 0x7FFF
+
+
+def test_free_unicast_steps_past_an_address_the_export_already_owns():
+    """Transmitting from an address another node owns is silently fatal.
+
+    The node's replay protection holds a sequence number for that address; ours
+    starts far below it, so every message we send is discarded and no Status
+    ever comes back — with nothing in any log to say so.
+    """
+    node = _node(0x7FFE, [{"index": 0, "models": []}, {"index": 1, "models": []}])
+    network = Network.from_connect(_doc([node]))
+
+    # 0x7FFF is element 1 of that node, 0x7FFE is element 0 → first free below.
+    assert network.free_unicast(0x7FFF) == 0x7FFD
+
+
+def test_free_unicast_rejects_an_address_outside_the_unicast_range():
+    network = Network.from_connect(_doc([]))
+
+    with pytest.raises(NetworkModelError):
+        network.free_unicast(0xC000)  # a group address, not a unicast

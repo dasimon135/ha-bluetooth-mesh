@@ -1,9 +1,10 @@
 """Light platform for the Bluetooth Mesh integration (Task B4).
 
-Every provisioned node whose primary element (element 0) hosts a Light
-Lightness (0x1300) or a Generic OnOff (0x1000) server becomes a single
-:class:`MeshLight` entity. The entity's capabilities scale with the node's
-composition:
+Every provisioned node hosting a Light Lightness (0x1300) or Generic OnOff
+(0x1000) server — on any element — becomes a single :class:`MeshLight` entity.
+Each command is then addressed to the element that actually hosts the model it
+targets, because an element silently ignores an opcode it has no model for. The
+entity's capabilities scale with the node's composition:
 
 * Light CTL server (0x1303) present → tunable white: HA ``COLOR_TEMP`` mode
   (which in HA implies brightness too).
@@ -31,16 +32,14 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import BluetoothMeshConfigEntry
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    MODEL_GENERIC_ONOFF,
+    MODEL_LIGHT_CTL,
+    MODEL_LIGHT_CTL_TEMP,
+    MODEL_LIGHT_LIGHTNESS,
+)
 from .coordinator import MeshCoordinator
-
-# SIG model identifiers we key capabilities off of (spec Mesh Model §6/§7).
-MODEL_GENERIC_ONOFF = 0x1000
-MODEL_LIGHT_LIGHTNESS = 0x1300
-MODEL_LIGHT_CTL = 0x1303
-# The Light CTL Temperature server lives on its OWN (secondary) element and sets
-# temperature WITHOUT touching lightness — unlike Light CTL Set on element 0.
-MODEL_LIGHT_CTL_TEMP = 0x1306
 
 # HA brightness is a 0..255 byte; mesh Lightness/CTL are 16-bit 0..65535.
 MESH_LEVEL_MAX = 0xFFFF
@@ -70,19 +69,41 @@ def _manufacturer(cid: int) -> str:
     return _KNOWN_CIDS.get(cid, f"CID {cid:#06x}")
 
 
+def _model_unicast(node, model_id: int, *fallback_model_ids: int) -> int:
+    """Address of the element hosting ``model_id`` on ``node``.
+
+    ``fallback_model_ids`` are tried in turn for a model that EXTENDS the one
+    asked for and therefore answers the same opcodes — a Light Lightness Server
+    handles Generic OnOff, so a node that declares only the former is still
+    switched by addressing its element. The node's primary address is the last
+    resort: it is what a single-element composition means anyway.
+    """
+    for candidate in (model_id, *fallback_model_ids):
+        element = node.element_for_model(candidate)
+        if element is not None:
+            return element.unicast
+    return node.unicast
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: BluetoothMeshConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Create one light per node whose element 0 is a lightness/onoff server."""
+    """Create one light per node hosting a lightness or on/off SERVER.
+
+    Any element counts, not just element 0. A composition is free to put the
+    lighting servers on a secondary element, and capability detection below
+    already scans the whole node — gating creation on element 0 hid such a node
+    entirely rather than exposing it with fewer features.
+
+    Server models only (0x1000 / 0x1300): the client counterparts (0x1001, …)
+    are what a remote hosts, and a remote is not a light.
+    """
     coordinator = entry.runtime_data
     entities: list[MeshLight] = []
     for node in coordinator.network.nodes:
-        if not node.elements:
-            continue
-        element0 = node.elements[0]
-        if element0.has_model(MODEL_LIGHT_LIGHTNESS) or element0.has_model(
+        if node.has_model(MODEL_LIGHT_LIGHTNESS) or node.has_model(
             MODEL_GENERIC_ONOFF
         ):
             entities.append(MeshLight(coordinator, node))
@@ -136,9 +157,19 @@ class MeshLight(LightEntity):
             model=model,
         )
 
+        # Every command is addressed to the element that actually HOSTS the
+        # model it targets, not to the node's primary address. An element
+        # ignores an opcode it has no model for — without acting and without
+        # answering — so a node that lays its lighting servers out across
+        # several elements would take every command in silence.
+        self._onoff_unicast = _model_unicast(
+            node, MODEL_GENERIC_ONOFF, MODEL_LIGHT_LIGHTNESS
+        )
+        self._lightness_unicast = _model_unicast(node, MODEL_LIGHT_LIGHTNESS)
+        self._ctl_unicast = _model_unicast(node, MODEL_LIGHT_CTL)
         # The Light CTL Temperature server, if any, is on its own element with
         # its own unicast — address temperature-only changes there so brightness
-        # is left untouched. None → fall back to Light CTL Set on element 0.
+        # is left untouched. None → fall back to Light CTL Set instead.
         temp_element = node.element_for_model(MODEL_LIGHT_CTL_TEMP)
         self._ctl_temp_unicast = (
             temp_element.unicast if temp_element is not None else None
@@ -194,14 +225,14 @@ class MeshLight(LightEntity):
         Best-effort: an unanswered GET leaves the cache exactly as it was —
         never invent a state from silence.
         """
-        on = await self._coordinator.async_get_onoff(self._unicast)
+        on = await self._coordinator.async_get_onoff(self._onoff_unicast)
         if on is None:
             return
         self._is_on = on
         # An off lamp reports lightness 0, which is not a brightness worth
         # showing — HA wants no brightness at all while off.
         if on and self._attr_color_mode is not ColorMode.ONOFF:
-            level = await self._coordinator.async_get_lightness(self._unicast)
+            level = await self._coordinator.async_get_lightness(self._lightness_unicast)
             if level is not None:
                 self._brightness = self._level_to_brightness(level)
         self.async_write_ha_state()
@@ -300,7 +331,8 @@ class MeshLight(LightEntity):
 
         if ATTR_BRIGHTNESS in kwargs:
             result = await self._coordinator.async_set_lightness(
-                self._unicast, self._brightness_to_level(kwargs[ATTR_BRIGHTNESS])
+                self._lightness_unicast,
+                self._brightness_to_level(kwargs[ATTR_BRIGHTNESS]),
             )
             if result is not None:  # confirmed present lightness → trust it
                 self._brightness = self._level_to_brightness(result)
@@ -322,14 +354,14 @@ class MeshLight(LightEntity):
                     self._brightness if self._brightness else HA_BRIGHTNESS_MAX
                 )
                 await self._coordinator.async_set_ctl(
-                    self._unicast, level, mesh_kelvin
+                    self._ctl_unicast, level, mesh_kelvin
                 )
                 drove_lightness = True
 
         if not drove_lightness and (not temp_only or not was_on):
             # Plain turn-on, or a temperature-only turn-on of a lamp that was
             # off: switch it on explicitly so the optimistic on-state is true.
-            await self._coordinator.async_set_onoff(self._unicast, True)
+            await self._coordinator.async_set_onoff(self._onoff_unicast, True)
 
         self.async_write_ha_state()
 
@@ -337,4 +369,4 @@ class MeshLight(LightEntity):
         """Switch the node off via Generic OnOff (optimistic UI first)."""
         self._is_on = False
         self.async_write_ha_state()
-        await self._coordinator.async_set_onoff(self._unicast, False)
+        await self._coordinator.async_set_onoff(self._onoff_unicast, False)

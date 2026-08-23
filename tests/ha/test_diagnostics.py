@@ -36,6 +36,8 @@ class FakeCoordinator:
         self.keepalive_seconds = 0
         self.connected = True
         self.beacon = None
+        self.src_addr = 0x7FFF
+        self.app_key_index = 0
 
 
 def _entry(hass) -> MockConfigEntry:
@@ -88,6 +90,38 @@ async def test_dump_lists_the_node_composition(hass) -> None:
 
     node = next(n for n in dump["nodes"] if n["unicast"] == "0x000c")
     assert node["cid"] == "0x07e9"
-    models = {m for element in node["elements"] for m in element["models"]}
+    models = {
+        m["id"]: m["bind"] for element in node["elements"] for m in element["models"]
+    }
     assert "0x1300" in models  # Light Lightness server
     assert "0x1303" in models  # Light CTL server
+
+
+async def test_dump_shows_which_app_key_each_model_binds(hass) -> None:
+    """The binding decides whether a node can understand us at all.
+
+    A model only accepts messages encrypted with a key it was bound to, so
+    "which key does the export hold, and which one do the models ask for" is
+    the question behind an integration that transmits perfectly and is ignored.
+    """
+    entry = _entry(hass)
+
+    dump = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert dump["network"]["app_key_indexes"] == [0]  # what the export carries
+    assert dump["network"]["app_key_index"] == 0  # what we encrypt with
+    assert dump["network"]["bound_app_key_indexes"] == [0]  # what models want
+    node = next(n for n in dump["nodes"] if n["unicast"] == "0x000c")
+    lightness = next(
+        m for m in node["elements"][0]["models"] if m["id"] == "0x1300"
+    )
+    assert lightness["bind"] == [0]
+
+
+async def test_dump_names_the_address_we_transmit_from(hass) -> None:
+    """Sharing it with a node silently mutes us; it must be visible."""
+    entry = _entry(hass)
+
+    dump = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert dump["state"]["src_addr"] == "0x7fff"

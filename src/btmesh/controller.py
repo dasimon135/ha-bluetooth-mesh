@@ -88,6 +88,8 @@ class MeshController:
     ``seq`` seeds the underlying node's sequence cursor: pass the last persisted
     :attr:`seq` (plus a safety margin) when reconstructing a controller so the
     network never reuses a SEQ the mesh has already seen (replay safety).
+    ``app_key`` overrides the network's first application key, for a network
+    whose target models are bound to a different one.
     """
 
     def __init__(
@@ -99,6 +101,7 @@ class MeshController:
         seq: int = 0,
         tid: int = 0,
         iv_index: int | None = None,
+        app_key: bytes | None = None,
     ) -> None:
         self._bearer = bearer
         self._pump = BearerPump(bearer, MSG_TYPE_NETWORK_PDU)
@@ -108,9 +111,14 @@ class MeshController:
         # persisted from a Secure Network Beacon (see :attr:`beacon`).
         self._iv_index = network.iv_index if iv_index is None else iv_index
         self._beacon: SecureNetworkBeacon | None = None
+        # An export may carry several application keys, and a node only accepts
+        # the one its models were bound to. The caller resolves that binding
+        # (:meth:`btmesh.network_model.Network.app_key_for_models`); the
+        # export's first key is merely the default.
+        self._app_key = network.app_key if app_key is None else app_key
         self._node = MeshNode(
             netkey=network.net_key,
-            appkey=network.app_key,
+            appkey=self._app_key,
             iv_index=self._iv_index,
             src_addr=src_addr,
             send_network_pdu=self._pump.put,
@@ -181,6 +189,11 @@ class MeshController:
             )
         if beacon.iv_update:
             logger.info("subnet is running an IV Update")
+
+    @property
+    def app_key(self) -> bytes:
+        """The application key this controller encrypts commands with."""
+        return self._app_key
 
     @property
     def beacon(self) -> SecureNetworkBeacon | None:
