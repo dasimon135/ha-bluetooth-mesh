@@ -71,6 +71,8 @@ class FakeController:
         # and the IV Index this controller encrypts with.
         self.beacon = None
         self.iv_index = 0
+        # What the node answers to a Composition Data Get (None = silence).
+        self.composition = "composition-sentinel"
 
     async def start(self) -> None:
         self.started = True
@@ -113,6 +115,13 @@ class FakeController:
         self.seq += 1
         self.tid = (self.tid + 1) & 0xFF
         return kelvin
+
+    async def get_composition(
+        self, unicast: int, *, page: int = 0, timeout: float = 5.0
+    ):
+        self.calls.append(("get_composition", unicast))
+        self.seq += 1
+        return self.composition
 
 
 def _make_entry(hass) -> MockConfigEntry:
@@ -785,3 +794,18 @@ async def test_a_silent_subnet_is_reported_once(hass, caplog) -> None:
 
     assert coord.beacon is None
     assert caplog.text.count("no Secure Network Beacon") == 1
+
+
+async def test_composition_probe_reaches_the_controller(hass) -> None:
+    """The device-keyed probe is what tells "never arrived" from "ignored"."""
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with _patch_transport(fake):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+
+        result = await coord.async_get_composition(UNICAST)
+
+        assert result == "composition-sentinel"
+        assert ("get_composition", UNICAST) in fake.calls
+        await coord.async_stop()

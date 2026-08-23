@@ -16,10 +16,14 @@ from __future__ import annotations
 import logging
 
 from .access import (
+    OP_CONFIG_COMPOSITION_DATA_STATUS,
     OP_GENERIC_ONOFF_STATUS,
     OP_LIGHT_CTL_STATUS,
     OP_LIGHT_CTL_TEMPERATURE_STATUS,
     OP_LIGHT_LIGHTNESS_STATUS,
+    AccessError,
+    CompositionData,
+    config_composition_data_get,
     encode_opcode,
     generic_onoff_get,
     generic_onoff_set,
@@ -27,6 +31,7 @@ from .access import (
     light_ctl_temperature_set,
     light_lightness_get,
     light_lightness_set,
+    parse_composition_data_status,
     parse_generic_onoff_status,
     parse_light_ctl_status,
     parse_light_ctl_temperature_status,
@@ -35,7 +40,7 @@ from .access import (
 from .beacon import BeaconError, SecureNetworkBeacon, parse_secure_network_beacon
 from .bearer import GattBearer
 from .network_model import Network
-from .node import MeshNode, ReceivedMessage
+from .node import MeshNode, NodeError, ReceivedMessage
 from .proxy_config import (
     FILTER_ACCEPT_LIST,
     FilterStatus,
@@ -124,6 +129,15 @@ class MeshController:
             send_network_pdu=self._pump.put,
             seq=seq,
         )
+        # Every node's device key, so Foundation-model traffic (the composition
+        # probe) can be addressed to any of them. Device-keyed messages bypass
+        # the AppKey binding entirely, which is what makes them the honest test
+        # of whether a node is reachable at all.
+        for node in network.nodes:
+            try:
+                self._node.add_device(node.unicast, node.device_key)
+            except NodeError as exc:  # a key the export got wrong
+                logger.debug("no usable device key for %#06x: %s", node.unicast, exc)
         # A GATT write failure kills the TX pump: it records the error and stops
         # draining its queue for good. Commands stay best-effort (they time out
         # and return None), so without this flag the failure is indistinguishable
@@ -292,6 +306,39 @@ class MeshController:
         return tid
 
     # ------------------------------------------------------------- commands
+
+    async def get_composition(
+        self, unicast: int, *, page: int = 0, timeout: float = 5.0
+    ) -> CompositionData | None:
+        """Read Composition Data Page 0 from ``unicast``; ``None`` if silent.
+
+        Device-keyed (Foundation model), and that is the whole point: it is
+        answered by the node's Config Server without consulting an AppKey
+        binding, a Light LC mode, or a vendor model. So it separates the two
+        questions every silent mesh failure conflates — *did the message reach
+        the node* and *did the node choose to act on it*. An answer proves the
+        round trip; silence points at the transport rather than the model.
+
+        It also reports what the node says it is, which the ``.connect`` export
+        only claims: the export is the vendor app's account of the node.
+        """
+        try:
+            resp = await self._node.request(
+                unicast, config_composition_data_get(page),
+                OP_CONFIG_COMPOSITION_DATA_STATUS,
+                dev_key=True, timeout=timeout, retries=0,
+            )
+        except TimeoutError:
+            logger.debug("get_composition(%#06x) timed out", unicast)
+            return None
+        except NodeError as exc:  # no device key registered for that address
+            logger.debug("get_composition(%#06x): %s", unicast, exc)
+            return None
+        try:
+            return parse_composition_data_status(_full_payload(resp))
+        except AccessError as exc:
+            logger.debug("unparseable composition from %#06x: %s", unicast, exc)
+            return None
 
     async def set_onoff(
         self, unicast: int, on: bool, *, timeout: float = 5.0, retries: int = 1

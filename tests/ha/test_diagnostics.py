@@ -38,6 +38,13 @@ class FakeCoordinator:
         self.beacon = None
         self.src_addr = 0x7FFF
         self.app_key_index = 0
+        # What each node answers to the device-keyed probe (None = silence).
+        self.compositions: dict[int, object] = {}
+        self.probed: list[int] = []
+
+    async def async_get_composition(self, unicast: int):
+        self.probed.append(unicast)
+        return self.compositions.get(unicast)
 
 
 def _entry(hass) -> MockConfigEntry:
@@ -125,3 +132,68 @@ async def test_dump_names_the_address_we_transmit_from(hass) -> None:
     dump = await async_get_config_entry_diagnostics(hass, entry)
 
     assert dump["state"]["src_addr"] == "0x7fff"
+
+
+def _composition():
+    """A CompositionData as the library would return it."""
+    from custom_components.bluetooth_mesh.btmesh.access import (
+        CompositionData,
+        CompositionElement,
+    )
+
+    return CompositionData(
+        page=0,
+        cid=0x07E9,
+        pid=0x1510,
+        vid=0x3005,
+        crpl=200,
+        features=0x0003,
+        elements=(
+            CompositionElement(
+                loc=0x0000,
+                sig_models=(0x0000, 0x1300),
+                vendor_models=((0x07E9, 0x1000),),
+            ),
+        ),
+    )
+
+
+async def test_probe_reports_what_the_node_says_it_is(hass) -> None:
+    """The export is the vendor app's account of the node; this is the node's.
+
+    Device-keyed, so an answer proves the round trip independently of the
+    AppKey binding or of which model owns the light.
+    """
+    entry = _entry(hass)
+    entry.runtime_data.compositions = {UNICAST: _composition()}
+
+    dump = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert dump["probe"]["ran"] is True
+    node = dump["probe"]["nodes"][0]
+    assert node["unicast"] == "0x000c"
+    assert node["answered"] is True
+    assert node["cid"] == "0x07e9"
+    assert node["elements"][0]["sig_models"] == ["0x0000", "0x1300"]
+    assert node["elements"][0]["vendor_models"] == ["0x07e9:0x1000"]
+
+
+async def test_probe_records_a_silent_node_as_silent(hass) -> None:
+    """Silence is the finding, not a missing field."""
+    entry = _entry(hass)
+    entry.runtime_data.compositions = {}  # nothing answers
+
+    dump = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert dump["probe"]["nodes"] == [{"unicast": "0x000c", "answered": False}]
+
+
+async def test_probe_is_skipped_while_disconnected(hass) -> None:
+    """Downloading diagnostics must not spend 20s dialling an absent proxy."""
+    entry = _entry(hass)
+    entry.runtime_data.connected = False
+
+    dump = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert dump["probe"]["ran"] is False
+    assert entry.runtime_data.probed == []

@@ -649,3 +649,90 @@ async def test_app_key_override_is_what_the_commands_are_encrypted_with():
 
     assert controller.app_key == other
     assert MeshController(network, bearer).app_key == network.app_key
+
+
+# ------------------------------------------------------- composition probe
+
+# Synthetic Composition Data Page 0: CID 0x07E9, PID 1, VID 2, CRPL 10,
+# features 0x0007; one element with SIG models 0x0000 + 0x1300 and vendor
+# model 0x07E9:0x0001.
+_COMPOSITION_PARAMS = bytes.fromhex(
+    "00" "e907" "0100" "0200" "0a00" "0700"
+    "0001" "02" "01" "0000" "0013" "e907" "0100"
+)
+
+
+def _composition_setup(answer: bool = True):
+    """A controller wired to a device that answers Composition Data Get.
+
+    The device answers under its DEVICE key (AKF=0), which is what makes this
+    probe independent of the AppKey binding — the point of the whole exercise.
+    """
+    from btmesh.access import (
+        OP_CONFIG_COMPOSITION_DATA_GET,
+        OP_CONFIG_COMPOSITION_DATA_STATUS,
+    )
+
+    network = Network.from_connect_file(FIXTURE)
+    device_key = network.nodes[0].device_key
+    bearer = FakeBearer()
+    controller = MeshController(network, bearer)
+
+    device = MeshNode(
+        netkey=network.net_key,
+        appkey=network.app_key,
+        iv_index=network.iv_index,
+        src_addr=UNICAST,
+        send_network_pdu=bearer.feed,
+        seq=0x2000,
+    )
+    # Its own key, so send_access(dev_key=True) encrypts a reply with it.
+    device.add_device(UNICAST, device_key)
+
+    def responder(msg: ReceivedMessage) -> None:
+        if msg.opcode == OP_CONFIG_COMPOSITION_DATA_GET and answer:
+            device.send_access(
+                msg.src,
+                encode_opcode(OP_CONFIG_COMPOSITION_DATA_STATUS)
+                + _COMPOSITION_PARAMS,
+                dev_key=True,
+            )
+
+    device.on_message = responder
+    bearer.device = device
+    return controller, bearer
+
+
+async def test_get_composition_reads_the_node_under_its_device_key():
+    """What the node says it is, rather than what the export claims.
+
+    Device-keyed, so it answers whatever the AppKey binding, the Light LC mode
+    or the vendor models are doing — which is what makes it usable to tell "the
+    message never arrived" apart from "the model declined to act".
+    """
+    controller, _ = _composition_setup()
+    await controller.start()
+
+    comp = await controller.get_composition(UNICAST, timeout=1.0)
+
+    assert comp is not None
+    assert comp.cid == 0x07E9
+    assert comp.elements[0].sig_models == (0x0000, 0x1300)
+    assert comp.elements[0].vendor_models == ((0x07E9, 0x0001),)
+
+
+async def test_get_composition_returns_none_when_the_node_stays_silent():
+    """Best-effort like every other command: silence is None, never a raise."""
+    controller, _ = _composition_setup(answer=False)
+    await controller.start()
+
+    assert await controller.get_composition(UNICAST, timeout=0.05) is None
+
+
+async def test_get_composition_without_a_device_key_is_not_fatal():
+    """A node the export gave no usable device key for must not raise."""
+    controller, _ = _composition_setup()
+    await controller.start()
+
+    # 0x00FF is in no export; nothing is registered for it.
+    assert await controller.get_composition(0x00FF, timeout=0.05) is None

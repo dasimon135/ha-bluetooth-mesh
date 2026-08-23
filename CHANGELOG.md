@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] — 2026-08-23
+
+### Added
+
+- **A composition probe in the diagnostics dump.** Every silent mesh failure
+  conflates two questions — did the message reach the node, and did the node
+  choose to act on it — and nothing in the dump could tell them apart. A
+  `Config Composition Data Get` is answered by a node's Config Server under its
+  **device key**, without consulting an AppKey binding, a Light LC mode or a
+  vendor model. So an answer proves the round trip and points at the model
+  layer; silence points at the transport. It also reports what each node says
+  it *is*: the rest of the dump is the vendor app's account of the network,
+  parsed from the export, and this is the only place the two can be compared.
+
+  Bounded on purpose: skipped entirely when no proxy connection is held (a
+  download must not spend the connect timeout dialling an absent proxy), capped
+  at the first 6 nodes, and whatever is left out is reported rather than
+  silently dropped.
+
+- `MeshController.get_composition()` in the library, and every node's device key
+  registered on the runtime node so Foundation-model traffic can be addressed
+  to any of them.
+
 ## [0.4.2] — 2026-08-23
 
 Four ways a command could be discarded without a word, and no way to tell them

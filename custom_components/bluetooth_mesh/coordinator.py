@@ -115,6 +115,12 @@ COMMAND_TIMEOUT = 8.0
 # window the command is simply optimistic, exactly as before.
 STATUS_TIMEOUT = 1.5
 
+# How long the diagnostics composition probe waits for a node's Config Server.
+# Longer than STATUS_TIMEOUT because a Composition Data Status is segmented, but
+# still short: the probe runs once per node inside a diagnostics download, and a
+# silent node is itself the answer we are after.
+PROBE_TIMEOUT = 3.0
+
 # Default seconds to HOLD the proxy connection open after the last command
 # before dropping it to free the lamp's single proxy slot. Opening a proxy
 # connection over an ESPHome BLE proxy costs several seconds, so holding it makes
@@ -576,6 +582,17 @@ class MeshCoordinator:
             lambda c: c.set_onoff(
                 unicast, on, timeout=STATUS_TIMEOUT, retries=0
             )
+        )
+
+    async def async_get_composition(self, unicast: int):
+        """Read ``unicast``'s Composition Data under its device key; None if silent.
+
+        Device-keyed, so it answers regardless of the AppKey binding or of which
+        model owns the light — which is what separates "the message never
+        reached the node" from "the node received it and did nothing".
+        """
+        return await self._run_connected(
+            lambda c: c.get_composition(unicast, timeout=PROBE_TIMEOUT)
         )
 
     async def async_get_onoff(self, unicast: int) -> bool | None:
