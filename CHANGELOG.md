@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.7] — 2026-08-24
+
+### Fixed
+
+- **Reassembly is per source; two peers segmenting at once no longer destroy
+  each other's transfer** ([#11](https://github.com/dasimon135/ha-bluetooth-mesh/issues/11)).
+  `MeshNode` held a single `SegmentAssembler`, and the transfer identity it
+  keyed on carried no source address. A segment from one node arriving
+  mid-transfer from another did not interleave, it *reset*: the first node's
+  partial reassembly was dropped and its acknowledgment timer cancelled with
+  it. Neither message was ever delivered, and nothing anywhere said so.
+
+  This was original Phase-0 behaviour, on the stated grounds that the stack
+  talked to a single peer. That justification expired on both halves: the proxy
+  address filter now lets Status traffic from any node reach us, and since
+  0.4.6 we acknowledge segmented messages — which actively invites peers to
+  send them.
+
+  Reassembly state and both SAR timers are now held per source address. The
+  table is bounded (`MAX_TRACKED_SEGMENT_SOURCES`), evicting an idle peer
+  before one with a transfer in flight, and a stranded transfer is dropped
+  outright when its incomplete timer expires rather than merely reset.
+
 ## [0.4.6] — 2026-08-24
 
 ### Added

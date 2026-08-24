@@ -23,7 +23,12 @@ from btmesh.access import (
 from btmesh.crypto import k4
 from btmesh.errors import BtMeshError
 from btmesh.node import MeshNode, ReceivedMessage
-from btmesh.transport import SegmentAck, build_unsegmented_access, encrypt_access
+from btmesh.transport import (
+    SegmentAck,
+    build_unsegmented_access,
+    encrypt_access,
+    parse_control_lower,
+)
 
 NET_KEY = bytes.fromhex("7dd7364cd842ad18c17c2b820c84c3d6")
 APP_KEY = bytes.fromhex("63964771734fbd76e3b40519d1d94a48")
@@ -359,6 +364,121 @@ async def test_close_cancels_a_pending_ack_timer(monkeypatch):
     await asyncio.sleep(0.05)
 
     assert a.last_ack(0) is None
+
+
+def _peer(unicast: int, seq: int):
+    """A node that captures its outgoing PDUs instead of delivering them."""
+    pdus: list[bytes] = []
+    node = MeshNode(
+        netkey=NET_KEY, appkey=APP_KEY, iv_index=IV_INDEX,
+        src_addr=unicast, send_network_pdu=pdus.append, seq=seq,
+    )
+    return node, pdus
+
+
+def _receiver():
+    """The node under test, plus the list of PDUs it emits."""
+    sent: list[bytes] = []
+    node = MeshNode(
+        netkey=NET_KEY, appkey=APP_KEY, iv_index=IV_INDEX,
+        src_addr=0x0001, send_network_pdu=sent.append,
+    )
+    return node, sent
+
+
+def _long_status(filler: bytes) -> bytes:
+    """A Generic OnOff Status padded to 22 bytes — three segments."""
+    return bytes.fromhex("8204") + filler * 20
+
+
+def test_two_peers_segmenting_concurrently_both_deliver():
+    """Reassembly must be per source (#11).
+
+    One shared assembler meant the second peer's first segment reset the
+    first peer's partial transfer. Neither message ever arrived, and nothing
+    anywhere said so.
+    """
+    receiver, _ = _receiver()
+    peer_a, a_pdus = _peer(0x0002, 0x1000)
+    peer_b, b_pdus = _peer(0x0003, 0x2000)
+
+    peer_a.send_access(0x0001, _long_status(b"A"))
+    peer_b.send_access(0x0001, _long_status(b"B"))
+    assert len(a_pdus) == len(b_pdus) == 3
+
+    for from_a, from_b in zip(a_pdus, b_pdus):  # A0 B0 A1 B1 A2 B2
+        receiver.handle_network_pdu(from_a)
+        receiver.handle_network_pdu(from_b)
+
+    assert [(m.src, m.params) for m in receiver.received] == [
+        (0x0002, b"A" * 20),
+        (0x0003, b"B" * 20),
+    ]
+    receiver.close()
+
+
+async def test_one_peers_segment_does_not_cancel_anothers_ack_timer(monkeypatch):
+    """A gap reported for peer A must survive peer B talking over it."""
+    _fast_sar_timers(monkeypatch)
+    receiver, sent = _receiver()
+    peer_a, a_pdus = _peer(0x0002, 0x1000)
+    peer_b, b_pdus = _peer(0x0003, 0x2000)
+    peer_a.send_access(0x0001, _long_status(b"A"))
+    peer_b.send_access(0x0001, _long_status(b"B"))
+
+    receiver.handle_network_pdu(a_pdus[0])  # A incomplete, its timer armed
+    for pdu in b_pdus:  # B completes, and used to cancel A's timer with it
+        receiver.handle_network_pdu(pdu)
+    sent.clear()
+
+    await asyncio.sleep(0.05)
+
+    assert len(sent) == 1  # exactly one: A's gap, nothing for the completed B
+    decoded = network.decode(peer_a.ctx, sent[0])
+    assert decoded.dst == 0x0002
+    assert parse_control_lower(decoded.transport_pdu) == SegmentAck(
+        obo=False, seq_zero=0x1000 & 0x1FFF, block_ack=0b001
+    )
+    receiver.close()
+
+
+async def test_close_cancels_every_peers_timers(monkeypatch):
+    """close() must not leave one peer armed because it only cleared another."""
+    _fast_sar_timers(monkeypatch)
+    receiver, sent = _receiver()
+    peer_a, a_pdus = _peer(0x0002, 0x1000)
+    peer_b, b_pdus = _peer(0x0003, 0x2000)
+    peer_a.send_access(0x0001, _long_status(b"A"))
+    peer_b.send_access(0x0001, _long_status(b"B"))
+    receiver.handle_network_pdu(a_pdus[0])
+    receiver.handle_network_pdu(b_pdus[0])
+    sent.clear()
+
+    receiver.close()
+    await asyncio.sleep(0.05)
+
+    assert sent == []
+
+
+def test_tracked_sources_are_bounded():
+    """A completed transfer is kept per peer so it can be re-acked; not forever.
+
+    Without a cap the table gains an entry for every node that ever sends us a
+    segmented message, and nothing removes one that completed cleanly.
+    """
+    receiver, _ = _receiver()
+
+    for i in range(node_module.MAX_TRACKED_SEGMENT_SOURCES + 5):
+        peer, pdus = _peer(0x0010 + i, 0x1000 * (i + 1))
+        peer.send_access(0x0001, _long_status(b"X"))
+        for pdu in pdus:
+            receiver.handle_network_pdu(pdu)
+
+    assert (
+        receiver.tracked_segment_sources
+        <= node_module.MAX_TRACKED_SEGMENT_SOURCES
+    )
+    receiver.close()
 
 
 def test_segment_ack_is_stored_and_queryable():
