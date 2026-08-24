@@ -44,8 +44,11 @@ async def _probe(coordinator) -> dict[str, Any]:
       connection into the rest of the mesh.
     * **Composition Data Get** — what the node says it *is*, against which the
       export (the vendor app's account of it) can be checked. Its Status is
-      segmented, and this stack transmits no Segment Acks, so a null here proves
-      NOTHING. Only its presence is informative.
+      segmented. That used to make a null here meaningless, because the stack
+      transmitted no Segment Acks and the reply could never complete (#9);
+      since 0.4.6 it acknowledges them, so on a node that *answered* the relay
+      request a null composition is now a finding in its own right rather than
+      an artefact of our own transport.
 
     Skipped entirely when no proxy connection is held: a diagnostics download
     should not spend the connect timeout dialling a proxy that is not there.
@@ -77,14 +80,14 @@ async def _probe(coordinator) -> dict[str, Any]:
         )
     return {
         "ran": True,
-        # Stated in the dump itself: a reader must not take a null composition
-        # for a missing node, which is exactly the mistake this probe was first
+        # Stated in the dump itself, because the two fields fail differently
+        # and reading one as the other is the mistake this probe was first
         # shipped inviting.
         "note": (
             "'answered' is a Config Relay Get round trip and is the reachability "
-            "signal. 'composition' can be null even when answered is true: its "
-            "Status is segmented and this stack sends no Segment Acks, so its "
-            "absence proves nothing."
+            "signal. 'composition' comes from a segmented Status; since 0.4.6 "
+            "this stack does acknowledge segments, so a null composition on a "
+            "node that answered is a finding, not an artefact of our transport."
         ),
         "nodes": results,
         "not_probed": len(coordinator.network.nodes) - len(nodes),
