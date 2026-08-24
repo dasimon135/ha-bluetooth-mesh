@@ -12,6 +12,26 @@ plausible setup, **P3** = hardening / polish.
 
 ---
 
+## Status as of 2026-08-24 (re-verified against the tree, not against this file)
+
+This roadmap had drifted badly: most items below were fixed in the 0.2–0.4
+line without the heading being updated, so reading it top-down overstated
+what was left by about a dozen entries. Every heading has now been checked
+against the code and carries the evidence.
+
+**Still open:**
+
+* §1.6, second half — the import skips a malformed node and logs it, but the
+  config-flow form still says only `invalid_connect`; which node failed, and
+  why, never reaches the user.
+* §2.8 — provisioning from Home Assistant (`RestoreEntity` turned out to be
+  the wrong fix and was superseded; see the entry).
+* §3.5 — moot: the tag in question is eight releases behind.
+
+Everything else is done.
+
+---
+
 ## 1. Confirmed bugs
 
 ### 1.1 (P1) A failed `controller.start()` leaks a live BLE connection — **FIXED**
@@ -134,7 +154,10 @@ Fix (both halves together, or availability stops updating at all): add
 `MeshLight` subscribe in `async_added_to_hass`, and set
 `_attr_should_poll = False`.
 
-### 1.5 (P2) Empty `meshUUID` collapses the config-entry unique_id
+### 1.5 (P2) Empty `meshUUID` collapses the config-entry unique_id — **FIXED**
+
+> `Network.identifier` (`network_model.py`) falls back to `k3(net_key).hex()`;
+> `config_flow.py` and `light.py:131` both key off it.
 
 `config_flow.py:74` uses `network.uuid`, which `network_model.py:148` builds
 with `str(data.get("meshUUID", ""))`. An export without that field yields
@@ -145,7 +168,7 @@ same weakness — two networks would produce colliding entity unique_ids.
 Fix: fall back to `k3(net_key).hex()` — the Network ID, which is the network's
 real on-air identity and is already computed everywhere else.
 
-### 1.6 (P3) One malformed node aborts the whole import
+### 1.6 (P3) One malformed node aborts the whole import — **HALF DONE**
 
 `network_model.py:257-277` requires `unicastAddress`, `deviceKey` and `cid` on
 **every** node. A single odd entry (a provisioner record from another app
@@ -157,7 +180,15 @@ node is at fault.
 Fix: skip + `logger.warning` unparseable nodes (keep hard failures for the
 keys), and surface `str(exc)` through `description_placeholders` in the form.
 
-### 1.7 (P3) Corrupt entry data raises instead of failing cleanly
+> The skip half is done (`Network.from_connect` collects and logs the
+> unparseable nodes, and still hard-fails when *none* survive). The form half
+> is not: `_parse()` in `config_flow.py` swallows the exception and returns
+> `None`, so every failure reads `invalid_connect` no matter the cause.
+
+### 1.7 (P3) Corrupt entry data raises instead of failing cleanly — **FIXED**
+
+> `__init__.py:async_setup_entry` catches `JSONDecodeError` / `NetworkModelError`
+> / `KeyError` and raises `ConfigEntryError` naming the reconfigure flow.
 
 `__init__.py:22` → `MeshCoordinator.__init__` → `json.loads` /
 `Network.from_connect` can raise on a corrupted entry, producing a raw
@@ -233,14 +264,18 @@ logs it as "ignoring proxy message type 0x01". Parse it, authenticate it with
 the beacon key (`k1`, already implemented), adopt the IV Index, and persist it
 next to the SEQ cursor. Self-healing, ~60 lines.
 
-### 2.3 (P2) Push discovery is implemented but dead
+### 2.3 (P2) Push discovery is implemented but dead — **FIXED**
+
+> Wired at `coordinator.py:374` (`self._discovery_unsub = async_register_proxy_callback(...)`).
 
 `mesh_transport.py:169` `async_register_proxy_callback()` is production-ready
 and unit-tested — and called from nowhere. Today recovery waits for the 15 s
 `PROBE_INTERVAL_UNAVAILABLE` tick. Wiring it in the coordinator would trigger a
 reconnect the moment a matching 0x1828 advert reappears.
 
-### 2.4 (P2) One `.storage` write per button press
+### 2.4 (P2) One `.storage` write per button press — **FIXED**
+
+> `coordinator.py:725` uses `async_delay_save`; `SEQ_SAFETY_MARGIN` is 32.
 
 `coordinator.py:314` calls `await self._store.async_save(...)` on **every**
 command. On HA OS / Green / Yellow that is an SD or eMMC write per tap. Switch
@@ -248,7 +283,9 @@ to `Store.async_delay_save` (HA flushes it on shutdown) and raise
 `SEQ_SAFETY_MARGIN` above the worst-case number of commands inside the debounce
 window (32 is already comfortable for a 10 s delay).
 
-### 2.5 (P2) Setup blocks on a full connect
+### 2.5 (P2) Setup blocks on a full connect — **FIXED**
+
+> `coordinator.py:368` fires the first probe as `async_create_background_task`.
 
 `async_start()` (`coordinator.py:186`) awaits `_async_probe()` inside
 `async_setup_entry`, so a cold/absent proxy stalls the entry for up to
@@ -257,14 +294,19 @@ window (32 is already comfortable for a 10 s delay).
 background task (`entry.async_create_background_task`) and let the 15 s retry
 loop converge.
 
-### 2.6 (P3) `GattBearer.start()` can orphan a `start_notify` task
+### 2.6 (P3) `GattBearer.start()` can orphan a `start_notify` task — **FIXED**
+
+> `bearer.py` keeps `self._subscribe_task`; `stop()` cancels *and awaits* it.
 
 `bearer.py:145-161`: on the `START_NOTIFY_TIMEOUT` path the shielded task is
 deliberately left running with a result-swallowing callback, but `stop()`
 (`bearer.py:169`) never cancels it. Keep the handle on the instance and cancel
 it in `stop()`.
 
-### 2.7 (P3) No RX replay/dedup cache
+### 2.7 (P3) No RX replay/dedup cache — **FIXED**
+
+> `node.py` keeps `_last_rx_seq: dict[int, int]`, deliberately a duplicate guard
+> rather than the spec's replay list (see the comment there for why).
 
 `node.handle_network_pdu` accepts any PDU that authenticates, with no per-SRC
 SEQ tracking. Low risk while nothing is forwarded to us — but it becomes real
@@ -274,21 +316,24 @@ window.
 ### 2.8 (P3) Missing HA surfaces
 
 * ~~**`diagnostics.py`**~~ — **DONE (v0.3.0)**, redaction asserted by test.
+* ~~**`async_step_reconfigure`**~~ — **DONE**, with a unique-id mismatch guard
+  so pasting a *different* network cannot silently repoint every entity.
 * **Originally:** this integration's entire support burden is "which
   proxy sees what". A redacted dump (Network ID, IV Index, SEQ cursor,
   keep-alive, node/element/model inventory, `discovered_proxies()` output,
   connection state) would replace most log requests. **Must redact** NetKey,
   AppKey and every DeviceKey — `CONF_CONNECT_JSON` holds them all verbatim.
-* **`async_step_reconfigure`** — re-importing a `.connect` export (node added,
-  key refresh) currently means deleting the entry and losing every entity id
-  and its history.
-* **`RestoreEntity`** — after a restart every lamp shows `off` at brightness
-  `None` regardless of reality, because the optimistic cache starts empty
-  (`light.py:139-141`). Restoring last state is the honest default until §2.1
-  makes real read-back possible.
-* **Provisioning** — `provisioner.py` is complete in the library but
-  unreachable from HA; adding an unprovisioned node still requires the vendor
-  app. Natural v0.3 headline.
+* ~~**`RestoreEntity`**~~ — **SUPERSEDED**, deliberately not implemented. The
+  complaint was that a lamp came back as `off` after a restart; the fix was to
+  stop claiming `off` at all (`is_on` returns `None` → `unknown`) and to read
+  the lamp for real from `async_refresh_state()` as soon as the coordinator
+  becomes available, which §2.1 made possible. Restoring a remembered state
+  would be *less* honest than `unknown`: it asserts a value nobody has checked,
+  and another integration acting on it — a light group syncing its members is
+  enough — makes the invention true.
+* **Provisioning** — **STILL OPEN**, and now the only substantial item left on
+  this roadmap. `provisioner.py` is complete in the library but unreachable
+  from HA; adding an unprovisioned node still requires the vendor app.
 
 ---
 
@@ -306,30 +351,41 @@ identical today, but a forgotten run would ship a stale stack to users while CI
 stays green. Add a `--check` mode (diff, non-zero exit) and a CI step. Cheapest
 high-value fix in this document.
 
-### 3.2 (P2) `iot_class` is wrong
+### 3.2 (P2) `iot_class` is wrong — **FIXED**
+
+> `manifest.json` declares `local_polling`. It stays honest: §2.1 landed, but
+> state is still read by explicit Get, not pushed.
 
 `manifest.json` declares `local_push`, but nothing pushes: state is optimistic
 and availability comes from a periodic probe. It should be `local_polling`
 today — and can honestly become `local_push` once §2.1 lands.
 
-### 3.3 (P2) No lint job
+### 3.3 (P2) No lint job — **FIXED**
+
+> `[tool.ruff]` in `pyproject.toml`, `ruff==0.16.0` job in `tests.yml`.
 
 No `[tool.ruff]` section and no lint step in either workflow, while the sibling
 `daikin_madoka` repo runs ruff 0.16. Add the config + a job; the code is
 already clean enough that it should pass on day one.
 
-### 3.4 (P3) `phase0/tests` never runs in CI
+### 3.4 (P3) `phase0/tests` never runs in CI — **FIXED**
+
+> The workflow runs a bare `pytest -q`, so `testpaths` governs both sides.
 
 `pyproject.toml` sets `testpaths = ["tests", "phase0/tests"]`, but
 `.github/workflows/tests.yml` runs `pytest tests -q`. Either add it to CI or
 drop it from `testpaths` so local and CI agree.
 
-### 3.5 (P3) The `v0.1.0` tag predates the brand assets
+### 3.5 (P3) The `v0.1.0` tag predates the brand assets — **MOOT**
+
+> Overtaken by events: v0.4.5 is current and carries the assets.
 
 `v0.1.0` points at `3d9a964`; the icons landed in `4062840`. HACS installs the
 tagged release, so users currently get no brand icon. Cut `v0.1.1`.
 
-### 3.6 (P3) `hacs.json` declares no minimum core version
+### 3.6 (P3) `hacs.json` declares no minimum core version — **FIXED**
+
+> `"homeassistant": "2024.11.0"`.
 
 The integration uses `entry.runtime_data` and PEP 695 `type` aliases →
 HA ≥ 2024.6 / Python 3.12. Add `"homeassistant": "2024.6.0"` so HACS blocks
