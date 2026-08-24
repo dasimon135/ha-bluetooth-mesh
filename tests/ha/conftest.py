@@ -46,13 +46,12 @@ _ALLOW_SKIP = "BTMESH_SKIP_HA_TESTS"
 
 if not _HAS_HHCC and _ALLOW_SKIP not in os.environ:
     raise pytest.UsageError(
-        "tests/ha needs Home Assistant + pytest-homeassistant-custom-component, "
-        "and neither is importable here — every test in this tree would skip "
-        "and the run would still report success. "
-        "Run them with: pip install -r requirements-test.txt "
-        "(needs Python >= 3.14; on Windows also set "
-        "PYTHONPATH=tests/ha/_winshims). "
-        f"Or opt out on purpose by setting {_ALLOW_SKIP}=1."
+        f"Set {_ALLOW_SKIP}=1 to run the library tests alone. "
+        "Refusing to collect tests/ha: Home Assistant is not importable "
+        "here, so every test in this tree would skip and the run would "
+        "still report success for code that never executed. To run it: "
+        "pip install -r requirements-test.txt (Python >= 3.14; on Windows "
+        "also PYTHONPATH=tests/ha/_winshims)."
     )
 
 if _HAS_HHCC and sys.platform == "win32":  # pragma: no cover - platform shim
