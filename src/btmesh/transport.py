@@ -232,9 +232,10 @@ def parse_access_lower(pdu: bytes) -> UnsegmentedAccess | AccessSegment:
 class SegmentAssembler:
     """Reassemble one segmented access message at a time (spec §3.5.3.4).
 
-    Segments belonging to a different message (any change in AKF/AID/SZMIC/
-    SeqZero/SegN) silently restart the assembly — Phase 0 talks to a single
-    peer, so at most one segmented message is in flight.
+    One instance tracks one transfer: segments belonging to a different message
+    (any change in AKF/AID/SZMIC/SeqZero/SegN) silently restart the assembly.
+    Peers are kept apart by holding an instance per source address — that is
+    :class:`~btmesh.node.MeshNode`'s job, not this class's.
 
     The transfer identity, the block-ack bitfield and the completion flag stay
     readable after :meth:`add` so the caller can acknowledge (spec §3.5.3.3).

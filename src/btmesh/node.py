@@ -41,6 +41,7 @@ __all__ = [
     "SEG_ACK_TIMEOUT_BASE",
     "SEG_ACK_TIMEOUT_PER_TTL",
     "SEG_INCOMPLETE_TIMEOUT",
+    "MAX_TRACKED_SEGMENT_SOURCES",
     "NodeError",
     "ReceivedMessage",
     "MeshNode",
@@ -53,6 +54,11 @@ DEFAULT_TTL = 7  # hops enough for any Phase 0 topology (matches Zephyr default)
 SEG_ACK_TIMEOUT_BASE = 0.150
 SEG_ACK_TIMEOUT_PER_TTL = 0.050
 SEG_INCOMPLETE_TIMEOUT = 10.0
+# Peers whose segmented traffic we track at once. A completed transfer is
+# kept so a retransmission can be re-acknowledged instead of re-delivered,
+# so entries do not clear themselves; without a cap the table would gain one
+# for every node that ever sends us a segmented message and never shrink.
+MAX_TRACKED_SEGMENT_SOURCES = 16
 _RECEIVED_MAXLEN = 128
 
 
@@ -109,9 +115,11 @@ class MeshNode:
         self._iv_index = iv_index
         self._src = src_addr
         self._send = send_network_pdu
-        self._assembler = SegmentAssembler()
-        self._ack_timer: asyncio.TimerHandle | None = None
-        self._incomplete_timer: asyncio.TimerHandle | None = None
+        # Reassembly is per source: two peers segmenting at once must not
+        # reset each other's transfer, and each owns its own SAR timers.
+        self._assemblers: dict[int, SegmentAssembler] = {}
+        self._ack_timers: dict[int, asyncio.TimerHandle | None] = {}
+        self._incomplete_timers: dict[int, asyncio.TimerHandle | None] = {}
         self._device_keys: dict[int, bytes] = {}
         self._acks: dict[int, SegmentAck] = {}
         # Last SEQ accepted per source, to drop an immediate duplicate delivery
@@ -278,25 +286,28 @@ class MeshNode:
             )
 
     def close(self) -> None:
-        """Release the reassembly timers (call when the bearer goes away).
+        """Release every peer's reassembly state (call when the bearer goes away).
 
         Idempotent: a node that never received a segment has nothing pending.
         """
-        self._cancel_sar_timers()
-        self._assembler.reset()
+        for src in {*self._assemblers, *self._ack_timers, *self._incomplete_timers}:
+            self._cancel_sar_timers(src)
+        self._assemblers.clear()
 
-    def _send_segment_ack(self, pdu: network.DecodedNetworkPDU) -> None:
-        """Acknowledge the transfer the assembler is tracking (spec §3.5.3.3).
+    def _send_segment_ack(
+        self, pdu: network.DecodedNetworkPDU, assembler: SegmentAssembler
+    ) -> None:
+        """Acknowledge the transfer ``assembler`` is tracking (spec §3.5.3.3).
 
         Only ever called for segments addressed to our own unicast: a
         segmented message sent to a group or virtual address must not be
         acknowledged, or every subscriber would answer at once.
         """
-        seq_zero = self._assembler.seq_zero
+        seq_zero = assembler.seq_zero
         if seq_zero is None:
             return
         lower = build_segment_ack(
-            seq_zero=seq_zero, block_ack=self._assembler.block_ack
+            seq_zero=seq_zero, block_ack=assembler.block_ack
         )
         # A message that reached us with TTL 0 came straight from a neighbour;
         # answering it with a routable TTL would leak the ack into the mesh.
@@ -308,7 +319,43 @@ class MeshNode:
             )
         )
 
-    def _on_segment_for_us(self, pdu: network.DecodedNetworkPDU) -> None:
+    @property
+    def tracked_segment_sources(self) -> int:
+        """How many peers currently have reassembly state held for them."""
+        return len(self._assemblers)
+
+    def _assembler_for(self, src: int) -> SegmentAssembler:
+        """Reassembly state for ``src``, evicting a stale peer if the table is full."""
+        assembler = self._assemblers.get(src)
+        if assembler is not None:
+            return assembler
+        if len(self._assemblers) >= MAX_TRACKED_SEGMENT_SOURCES:
+            self._evict_one_source()
+        assembler = SegmentAssembler()
+        self._assemblers[src] = assembler
+        return assembler
+
+    def _evict_one_source(self) -> None:
+        """Drop the least recently started peer, preferring one with nothing in flight.
+
+        Evicting an idle peer costs only the ability to re-acknowledge a
+        retransmission it is unlikely to send; evicting a peer mid-transfer
+        loses a message, so that is the fallback rather than the rule.
+        """
+        victim = next(
+            (src for src, a in self._assemblers.items() if not a.pending),
+            next(iter(self._assemblers)),
+        )
+        logger.debug(
+            "tracking %d segmented sources, dropping %#06x to make room",
+            len(self._assemblers), victim,
+        )
+        self._cancel_sar_timers(victim)
+        del self._assemblers[victim]
+
+    def _on_segment_for_us(
+        self, pdu: network.DecodedNetworkPDU, assembler: SegmentAssembler
+    ) -> None:
         """Run the SAR acknowledgment rules for a segment addressed to us.
 
         A completed transfer is acknowledged at once — that is the ack the
@@ -316,17 +363,22 @@ class MeshNode:
         timer instead: answering immediately on every segment would put an ack
         on air between each one, so we wait out the gap and then report the
         bitfield, which tells the peer exactly what to retransmit. Each new
-        segment restarts both timers; the incomplete timer bounds the whole
-        thing so an abandoned transfer cannot complete minutes later.
+        segment from that peer restarts its timers; the incomplete timer bounds
+        the whole thing so an abandoned transfer cannot complete minutes later.
+
+        All of it is keyed on ``pdu.src``: another peer's traffic must not
+        cancel this one's timer any more than it resets its reassembly.
         """
-        self._cancel_sar_timers()
-        if not self._assembler.pending:  # complete, and therefore ackable now
-            self._send_segment_ack(pdu)
+        self._cancel_sar_timers(pdu.src)
+        if not assembler.pending:  # complete, and therefore ackable now
+            self._send_segment_ack(pdu, assembler)
             return
         delay = SEG_ACK_TIMEOUT_BASE + SEG_ACK_TIMEOUT_PER_TTL * pdu.ttl
-        self._ack_timer = self._call_later(delay, self._send_segment_ack, pdu)
-        self._incomplete_timer = self._call_later(
-            SEG_INCOMPLETE_TIMEOUT, self._abandon_transfer
+        self._ack_timers[pdu.src] = self._call_later(
+            delay, self._send_segment_ack, pdu, assembler
+        )
+        self._incomplete_timers[pdu.src] = self._call_later(
+            SEG_INCOMPLETE_TIMEOUT, self._abandon_transfer, pdu.src
         )
 
     def _call_later(self, delay, callback, *args) -> "asyncio.TimerHandle | None":
@@ -342,21 +394,24 @@ class MeshNode:
             return None
         return loop.call_later(delay, callback, *args)
 
-    def _cancel_sar_timers(self) -> None:
-        for timer in (self._ack_timer, self._incomplete_timer):
+    def _cancel_sar_timers(self, src: int) -> None:
+        for timers in (self._ack_timers, self._incomplete_timers):
+            timer = timers.pop(src, None)
             if timer is not None:
                 timer.cancel()
-        self._ack_timer = self._incomplete_timer = None
 
-    def _abandon_transfer(self) -> None:
-        logger.debug(
-            "incomplete timer expired, dropping partial segmented message "
-            "(SeqZero %s, block ack %#x)",
-            self._assembler.seq_zero,
-            self._assembler.block_ack,
-        )
-        self._cancel_sar_timers()
-        self._assembler.reset()
+    def _abandon_transfer(self, src: int) -> None:
+        assembler = self._assemblers.get(src)
+        if assembler is not None:
+            logger.debug(
+                "incomplete timer expired for %#06x, dropping partial segmented "
+                "message (SeqZero %s, block ack %#x)",
+                src, assembler.seq_zero, assembler.block_ack,
+            )
+        self._cancel_sar_timers(src)
+        # Dropped rather than reset: a peer that stranded a transfer has no
+        # state here worth keeping, and this is what bounds the table.
+        self._assemblers.pop(src, None)
 
     def _handle_access(self, pdu: network.DecodedNetworkPDU) -> None:
         try:
@@ -364,9 +419,10 @@ class MeshNode:
             if isinstance(parsed, UnsegmentedAccess):
                 upper, seq_auth = parsed.upper_pdu, pdu.seq
             else:
-                upper = self._assembler.add(parsed)
+                assembler = self._assembler_for(pdu.src)
+                upper = assembler.add(parsed)
                 if pdu.dst == self._src:
-                    self._on_segment_for_us(pdu)
+                    self._on_segment_for_us(pdu, assembler)
                 if upper is None:
                     return  # more segments pending, or already delivered
                 seq_auth = _seq_auth(pdu.seq, parsed.seq_zero)
