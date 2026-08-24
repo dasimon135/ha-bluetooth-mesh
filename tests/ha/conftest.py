@@ -2,11 +2,12 @@
 
 This ``tests/ha`` tree is collected by two environments:
 
-* the **library** venv (``uv run pytest tests``) which has *no* Home Assistant —
-  only the HA-independent parts of ``test_init.py`` run there (the rest
-  ``importorskip`` HA); and
-* the **daikin_madoka** venv which has HA + ``pytest-homeassistant-custom-
-  component`` (HHCC) and actually runs the ``hass``-backed tests.
+* the **library** venv, which has *no* Home Assistant. Collecting this tree
+  there is refused outright (see ``_ALLOW_SKIP`` below) rather than skipped,
+  because a skip here is a false green; and
+* a venv with HA + ``pytest-homeassistant-custom-component`` (HHCC), which
+  actually runs the ``hass``-backed tests. HA needs a newer Python than the
+  library pins, so in practice that is a second venv.
 
 So everything HA-specific here is gated on HHCC being importable, otherwise the
 library collection would blow up importing ``pytest_socket`` / requesting the
@@ -25,6 +26,7 @@ Linux/CI keeps HHCC's socket safety net untouched.
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 
 import pytest
@@ -32,6 +34,26 @@ import pytest
 _HAS_HHCC = (
     importlib.util.find_spec("pytest_homeassistant_custom_component") is not None
 )
+
+# Skipping this tree is a FALSE GREEN, not a neutral outcome: a run that reports
+# "N passed, 10 skipped" looks like success while the entire Home Assistant half
+# of the integration — config flow, coordinator, light entity, diagnostics — has
+# not executed at all. That is exactly how an untested change reaches CI.
+#
+# So refuse to collect rather than skip quietly. Set the environment variable to
+# opt out when you genuinely mean to run only the library tests.
+_ALLOW_SKIP = "BTMESH_SKIP_HA_TESTS"
+
+if not _HAS_HHCC and _ALLOW_SKIP not in os.environ:
+    raise pytest.UsageError(
+        "tests/ha needs Home Assistant + pytest-homeassistant-custom-component, "
+        "and neither is importable here — every test in this tree would skip "
+        "and the run would still report success. "
+        "Run them with: pip install -r requirements-test.txt "
+        "(needs Python >= 3.14; on Windows also set "
+        "PYTHONPATH=tests/ha/_winshims). "
+        f"Or opt out on purpose by setting {_ALLOW_SKIP}=1."
+    )
 
 if _HAS_HHCC and sys.platform == "win32":  # pragma: no cover - platform shim
     import pytest_socket
