@@ -34,6 +34,7 @@ from custom_components.bluetooth_mesh import coordinator as coordinator_mod
 from custom_components.bluetooth_mesh.const import (
     CONF_CONNECT_JSON,
     CONF_KEEPALIVE,
+    CONF_SRC_ADDR,
     DOMAIN,
 )
 from custom_components.bluetooth_mesh.coordinator import (
@@ -809,3 +810,46 @@ async def test_composition_probe_reaches_the_controller(hass) -> None:
         assert result == "composition-sentinel"
         assert ("get_composition", UNICAST) in fake.calls
         await coord.async_stop()
+
+
+async def test_a_configured_source_address_overrides_the_derived_one(hass) -> None:
+    """The last hypothesis an export cannot rule out needs a way to be tested.
+
+    An export lists no provisioner node, so the address the vendor app gave
+    itself is invisible. If that address is ours, every message we send is
+    dropped as a replay before any model sees it, and nothing anywhere says so.
+    Moving off it is the only way to find out.
+    """
+    entry = _entry_for(hass, _doc([_lamp(0x000C)]))
+    hass.config_entries.async_update_entry(entry, options={CONF_SRC_ADDR: 0x0030})
+    with _patch_transport(FakeController()):
+        coord = MeshCoordinator(hass, entry)
+
+    assert coord.src_addr == 0x0030
+
+
+async def test_a_configured_address_a_node_already_owns_is_refused(hass) -> None:
+    """Deliberate or not, that address is unusable — fall back rather than mute."""
+    entry = _entry_for(hass, _doc([_lamp(0x000C, elements=2)]))
+    hass.config_entries.async_update_entry(entry, options={CONF_SRC_ADDR: 0x000D})
+    with _patch_transport(FakeController()):
+        coord = MeshCoordinator(hass, entry)
+
+    assert coord.src_addr == 0x7FFF
+
+
+async def test_a_configured_address_outside_the_unicast_range_is_refused(hass) -> None:
+    entry = _entry_for(hass, _doc([_lamp(0x000C)]))
+    hass.config_entries.async_update_entry(entry, options={CONF_SRC_ADDR: 0xC000})
+    with _patch_transport(FakeController()):
+        coord = MeshCoordinator(hass, entry)
+
+    assert coord.src_addr == 0x7FFF
+
+
+async def test_no_configured_address_keeps_the_derived_default(hass) -> None:
+    entry = _entry_for(hass, _doc([_lamp(0x000C)]))
+    with _patch_transport(FakeController()):
+        coord = MeshCoordinator(hass, entry)
+
+    assert coord.src_addr == 0x7FFF

@@ -32,7 +32,14 @@ from homeassistant.helpers.selector import (
 )
 
 from .btmesh.network_model import Network, NetworkModelError
-from .const import CONF_CONNECT_JSON, CONF_KEEPALIVE, DEFAULT_KEEPALIVE, DOMAIN
+from .const import (
+    CONF_CONNECT_JSON,
+    CONF_KEEPALIVE,
+    CONF_SRC_ADDR,
+    DEFAULT_KEEPALIVE,
+    DEFAULT_SRC_ADDR,
+    DOMAIN,
+)
 
 
 def _parse(text: str) -> Network | None:
@@ -143,11 +150,17 @@ class BluetoothMeshOptionsFlow(OptionsFlowWithReload):
         """Show/store the keep-alive timeout."""
         if user_input is not None:
             return self.async_create_entry(
-                data={CONF_KEEPALIVE: int(user_input[CONF_KEEPALIVE])}
+                data={
+                    CONF_KEEPALIVE: int(user_input[CONF_KEEPALIVE]),
+                    CONF_SRC_ADDR: int(user_input[CONF_SRC_ADDR]),
+                }
             )
 
         current = self.config_entry.options.get(
             CONF_KEEPALIVE, DEFAULT_KEEPALIVE
+        )
+        current_src = self.config_entry.options.get(
+            CONF_SRC_ADDR, DEFAULT_SRC_ADDR
         )
         schema = vol.Schema(
             {
@@ -155,6 +168,13 @@ class BluetoothMeshOptionsFlow(OptionsFlowWithReload):
                     NumberSelectorConfig(
                         min=0, max=3600, step=1, unit_of_measurement="s",
                         mode=NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Required(
+                    CONF_SRC_ADDR, default=current_src
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0, max=0x7FFF, step=1, mode=NumberSelectorMode.BOX,
                     )
                 ),
             }

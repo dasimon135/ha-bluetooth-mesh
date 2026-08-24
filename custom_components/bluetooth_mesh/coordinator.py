@@ -44,12 +44,14 @@ from homeassistant.helpers.storage import Store
 
 from .btmesh.controller import MeshController
 from .btmesh.crypto import k3
-from .btmesh.network_model import Network
+from .btmesh.network_model import UNICAST_MAX, UNICAST_MIN, Network
 from .const import (
     CONF_CONNECT_JSON,
     CONF_KEEPALIVE,
+    CONF_SRC_ADDR,
     CONTROLLED_MODEL_IDS,
     DEFAULT_KEEPALIVE,
+    DEFAULT_SRC_ADDR,
     DOMAIN,
 )
 from .mesh_transport import (
@@ -205,6 +207,12 @@ class MeshCoordinator:
         the lamp simply never reacts, because its peers drop our messages as
         replays of an address they already know. Nothing in any log says so.
         """
+        configured = self.entry.options.get(CONF_SRC_ADDR, DEFAULT_SRC_ADDR)
+        if configured:
+            chosen = self._configured_src_addr(int(configured))
+            if chosen is not None:
+                logger.info("transmitting from the configured %#06x", chosen)
+                return chosen
         src_addr = self._network.free_unicast(SRC_ADDR)
         if src_addr != SRC_ADDR:
             logger.info(
@@ -213,6 +221,30 @@ class MeshCoordinator:
                 SRC_ADDR, src_addr,
             )
         return src_addr
+
+    def _configured_src_addr(self, configured: int) -> int | None:
+        """Validate an explicitly configured source address, else ``None``.
+
+        Refused rather than honoured when it is not a unicast, or when a node of
+        the imported network already owns it — that address is unusable no
+        matter what the user meant, and taking it would mute the integration in
+        exactly the way this option exists to escape.
+        """
+        if not UNICAST_MIN <= configured <= UNICAST_MAX:
+            logger.warning(
+                "configured source address %#06x is not a unicast address "
+                "(%#06x..%#06x); deriving one instead",
+                configured, UNICAST_MIN, UNICAST_MAX,
+            )
+            return None
+        if configured in self._network.unicast_addresses():
+            logger.warning(
+                "configured source address %#06x already belongs to a node of "
+                "this network; deriving one instead",
+                configured,
+            )
+            return None
+        return configured
 
     def _resolve_app_key(self):
         """The AppKey the models we drive are actually bound to.

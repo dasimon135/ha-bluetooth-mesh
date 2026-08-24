@@ -28,6 +28,7 @@ from custom_components.bluetooth_mesh.btmesh.network_model import Network
 from custom_components.bluetooth_mesh.const import (
     CONF_CONNECT_JSON,
     CONF_KEEPALIVE,
+    CONF_SRC_ADDR,
     DOMAIN,
 )
 
@@ -258,3 +259,40 @@ async def test_reconfigure_rejects_garbage(hass) -> None:
 
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": "invalid_connect"}
+
+
+async def test_options_flow_stores_a_source_address_override(hass) -> None:
+    """The escape hatch for the one collision an export cannot reveal.
+
+    Exports carry no provisioner node, so if the vendor app claimed the address
+    we transmit from, every message we send is dropped as a replay before any
+    model sees it — invisibly. Moving off it has to be reachable from the UI.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CONNECT_JSON: _connect_text()},
+        unique_id="0F0E0D0C-0B0A-0908-0706-050403020100",
+    )
+    entry.add_to_hass(hass)
+
+    with (
+        patch.object(coordinator_mod, "find_proxy_address", return_value=None),
+        patch.object(coordinator_mod, "discovered_proxies", return_value=[]),
+        patch.object(
+            coordinator_mod,
+            "async_register_proxy_callback",
+            return_value=lambda: None,
+        ),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {CONF_KEEPALIVE: 0, CONF_SRC_ADDR: 0x0030}
+        )
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        assert entry.options[CONF_SRC_ADDR] == 0x0030
+
+        await hass.async_block_till_done()
+        assert entry.runtime_data.src_addr == 0x0030
+
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()

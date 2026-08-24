@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5] — 2026-08-24
+
+### Added
+
+- **The source address is configurable** (options flow, `0` = derive it). One
+  thing a `.connect` export structurally cannot tell us is which unicast the
+  vendor app gave *itself*: exports carry no provisioner node. If that address
+  is the one we transmit from, every message we send is discarded as a replay by
+  nodes holding a sequence number for it — before any model sees it, with
+  nothing in any log to say so, and unaffected by re-importing the export.
+  Moving off it was impossible until now; it is the last hypothesis standing in
+  [#7](https://github.com/dasimon135/ha-bluetooth-mesh/issues/7).
+
+  An address that is not a unicast, or that a node of the imported network
+  already owns, is refused with a warning and the derived one is used instead —
+  honouring it would mute the integration in exactly the way the option exists
+  to escape.
+
 ## [0.4.4] — 2026-08-24
 
 ### Fixed

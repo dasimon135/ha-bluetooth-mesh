@@ -21,6 +21,18 @@ CONF_CONNECT_JSON = "connect_json"
 CONF_KEEPALIVE = "keepalive_seconds"
 DEFAULT_KEEPALIVE = 0
 
+# Options-flow key: the unicast address the integration transmits FROM.
+# 0 means "derive it" — the top of the unicast range, stepping down past any
+# address the imported network already uses.
+#
+# It is overridable because the one thing an export cannot tell us is which
+# address the vendor app gave ITSELF: exports carry no provisioner node. If that
+# address happens to be ours, every message we send is discarded as a replay by
+# nodes that hold a sequence number for it, before any model sees it — with
+# nothing in any log to say so. Moving off it is the only way to find out.
+CONF_SRC_ADDR = "src_addr"
+DEFAULT_SRC_ADDR = 0
+
 # SIG model identifiers the integration drives (spec Mesh Model §6/§7). They
 # live here rather than in ``light.py`` because the coordinator needs them too:
 # the AppKey to encrypt with is the one THESE models are bound to.

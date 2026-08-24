@@ -38,10 +38,12 @@
         "title": "Bluetooth Mesh options",
         "description": "A mesh lamp offers a single Bluetooth proxy connection slot. Keeping it open makes commands instant, but prevents the Häfele Connect Mesh app from connecting to the lamp while this integration is loaded.",
         "data": {
-          "keepalive_seconds": "Keep connection open for (seconds)"
+          "keepalive_seconds": "Keep connection open for (seconds)",
+          "src_addr": "Transmit from unicast address"
         },
         "data_description": {
-          "keepalive_seconds": "How long to hold the proxy connection after the last command. 0 = always connected (most responsive; the Häfele app cannot use the lamp). A positive value hands the lamp back to the app after that idle time, at the cost of a few seconds to reconnect on the next command."
+          "keepalive_seconds": "How long to hold the proxy connection after the last command. 0 = always connected (most responsive; the Häfele app cannot use the lamp). A positive value hands the lamp back to the app after that idle time, at the cost of a few seconds to reconnect on the next command.",
+          "src_addr": "The address Home Assistant sends from. 0 derives it automatically, which is almost always right. Set it only if commands are ignored with no error: an export lists no provisioner, so if the vendor app claimed the same address, every message is discarded as a replay and nothing anywhere says so."
         }
       }
     }
