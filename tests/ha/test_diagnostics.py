@@ -175,9 +175,9 @@ def _relay():
 async def test_probe_reachability_comes_from_the_unsegmented_request(hass) -> None:
     """``answered`` must not depend on a segmented reply reassembling.
 
-    A Composition Data Status is segmented and this stack sends no Segment
-    Acks, so a node that is perfectly reachable can stay silent on it. The
-    Config Relay round trip is four bytes and cannot fail that way.
+    The Config Relay round trip is four bytes in each direction; a Composition
+    Data Status is segmented and has more ways to fail. Keeping them apart is
+    the whole point of asking twice.
     """
     entry = _entry(hass)
     entry.runtime_data.relays = {UNICAST: _relay()}
@@ -219,13 +219,22 @@ async def test_probe_records_an_unreachable_node_as_unanswered(hass) -> None:
     assert node["composition"] is None
 
 
-async def test_probe_states_that_a_null_composition_proves_nothing(hass) -> None:
-    """Shipped once without this, and it invited exactly the wrong reading."""
+async def test_probe_note_no_longer_disowns_the_composition_field(hass) -> None:
+    """The caveat outlived the defect it described (#9).
+
+    v0.4.4 shipped a note telling the reader that a null composition proves
+    nothing, because the stack sent no Segment Acks and a segmented Status
+    could never complete. It sends them now, so that sentence would hand the
+    reader a reason to discard the one field that has become informative.
+    """
     entry = _entry(hass)
 
     dump = await async_get_config_entry_diagnostics(hass, entry)
+    note = dump["probe"]["note"]
 
-    assert "proves nothing" in dump["probe"]["note"]
+    assert "proves nothing" not in note
+    assert "no Segment Acks" not in note
+    assert "acknowledge" in note  # says what changed, rather than going silent
 
 
 async def test_probe_is_skipped_while_disconnected(hass) -> None:
