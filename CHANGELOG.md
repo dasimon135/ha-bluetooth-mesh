@@ -4,6 +4,56 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.6] — 2026-08-24
+
+### Added
+
+- **The transport acknowledges segmented messages** (spec §3.5.3.3). `SegmentAck`
+  had a parser and no builder: nothing anywhere emitted one. A peer that
+  segments its reply and waits to be acknowledged therefore gave up, and the
+  exchange failed with no error anywhere — the request timed out exactly as if
+  the node had never received it ([#9](https://github.com/dasimon135/ha-bluetooth-mesh/issues/9)).
+
+  Now a segmented message addressed to our own unicast is acknowledged the
+  moment it is complete, which is the ack the sender is blocked on. An
+  incomplete one arms the §3.5.3.3 acknowledgment timer (150 ms + 50 ms per TTL
+  hop) and then reports the block-ack bitfield, so the peer retransmits the
+  segment that is actually missing rather than the whole message; the
+  incomplete timer abandons a stranded transfer after 10 s. A transfer that is
+  already delivered is re-acknowledged rather than reassembled a second time —
+  a peer whose ack was lost retransmits, and that must not surface as a
+  duplicate message.
+
+  Messages sent to a group or virtual address are deliberately **not**
+  acknowledged: every subscriber would answer the sender at once.
+
+  Nothing in the integration depended on this — every lighting command and
+  Status fits in one segment, which is why it went unnoticed. It blocked the
+  first device-keyed exchange that does not, which is why v0.4.4 had to abandon
+  Config Composition Data as a reachability probe and fall back to Config Relay.
+
+### Changed
+
+- **The diagnostics probe no longer disowns its own `composition` field.**
+  v0.4.4 shipped a note telling the reader that a null composition proves
+  nothing, which was true then: the Status is segmented and nothing could ever
+  complete it. It completes now, so on a node whose `answered` is true a null
+  composition is a finding rather than an artefact of our transport, and the
+  note says so.
+
+### Fixed
+
+- **A rejected `.connect` paste now says why.** The import and reconfigure forms
+  collapsed a truncated paste, a file that is not an export at all, and an
+  export whose every node is unparseable into one `invalid_connect` — three
+  different problems with three different fixes, rendered identically. The
+  parser's own message is carried through to the form.
+
+- **A reassembly timer could outlive the connection.** `MeshController.stop()`
+  now closes the node, so a pending acknowledgment cannot fire against a bearer
+  that is already gone — which would have burned a persisted sequence number on
+  an ack nothing could carry.
+
 ## [0.4.5] — 2026-08-24
 
 ### Added
