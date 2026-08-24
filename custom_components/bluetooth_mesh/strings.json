@@ -24,7 +24,7 @@
       }
     },
     "error": {
-      "invalid_connect": "The pasted text is not a valid .connect network export. Paste the full contents of the exported file."
+      "invalid_connect": "The pasted text is not a valid .connect network export: {error}. Paste the full contents of the exported file."
     },
     "abort": {
       "already_configured": "This mesh network is already configured.",
