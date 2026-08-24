@@ -11,6 +11,7 @@ import asyncio
 import pytest
 
 from btmesh import network
+from btmesh import node as node_module
 from btmesh.access import (
     OP_CONFIG_APPKEY_ADD,
     OP_CONFIG_APPKEY_STATUS,
@@ -261,6 +262,103 @@ async def test_request_with_device_key():
 
 
 # ------------------------------------------------------------------ control
+
+
+def test_completed_segmented_message_is_acknowledged():
+    """A peer that segments its reply waits to be acked before it moves on (#9).
+
+    Config AppKey Add is 20 bytes of access payload — two segments — so this is
+    the smallest real exchange that exercises the SAR handshake end to end.
+    """
+    a, b, a_sent = make_pair()
+
+    a.send_access(0x0002, config_appkey_add(0x456, 0x123, APP_KEY), dev_key=True)
+
+    assert len(a_sent) == 2  # went out segmented
+    assert len(b.received) == 1  # and B reassembled it
+    # A's SEQ started at 0, so the transfer's SeqZero is 0 and both segments
+    # are acknowledged.
+    assert a.last_ack(0) == SegmentAck(obo=False, seq_zero=0, block_ack=0b11)
+
+
+def test_segments_to_a_group_address_are_not_acknowledged():
+    """Only unicast-addressed transfers are acked (spec §3.5.3.3).
+
+    A group message reaches every subscriber; acking it would have all of them
+    answer the sender at once.
+    """
+    a, b, a_sent = make_pair()
+    payload = bytes.fromhex("8204") + bytes(20)  # 22 bytes → three segments
+
+    a.send_access(0xC000, payload)
+
+    assert len(a_sent) == 3
+    assert len(b.received) == 1  # still reassembled and delivered
+    assert a.last_ack(0) is None  # but answered by nobody
+
+
+def _fast_sar_timers(monkeypatch, *, incomplete=1.0):
+    """Compress the §3.5.3.3 timers so the real ones can be exercised in a test."""
+    monkeypatch.setattr(node_module, "SEG_ACK_TIMEOUT_BASE", 0.01)
+    monkeypatch.setattr(node_module, "SEG_ACK_TIMEOUT_PER_TTL", 0.0)
+    monkeypatch.setattr(node_module, "SEG_INCOMPLETE_TIMEOUT", incomplete)
+
+
+async def test_ack_timer_reports_which_segments_are_missing(monkeypatch):
+    """A gap must not go silent (#9).
+
+    The peer needs to be told what arrived, or it cannot know which segment to
+    retransmit — it just times out as if we had never heard it.
+    """
+    _fast_sar_timers(monkeypatch)
+    a, b, a_sent = make_pair(a_send_filter=lambda pdu, n: n != 2)  # drop SegO=1
+
+    a.send_access(0x0002, config_appkey_add(0x456, 0x123, APP_KEY), dev_key=True)
+
+    assert not b.received  # incomplete, so nothing delivered
+    assert a.last_ack(0) is None  # and nothing acked yet either
+
+    await asyncio.sleep(0.05)
+
+    assert a.last_ack(0) == SegmentAck(obo=False, seq_zero=0, block_ack=0b01)
+    b.close()  # the incomplete timer is still armed, as the spec requires
+
+
+async def test_incomplete_timer_abandons_a_stranded_transfer(monkeypatch):
+    """A half-received transfer must not linger and complete minutes later."""
+    _fast_sar_timers(monkeypatch, incomplete=0.03)
+    a, b, a_sent = make_pair(a_send_filter=lambda pdu, n: n != 2)  # drop SegO=1
+    a.send_access(0x0002, config_appkey_add(0x456, 0x123, APP_KEY), dev_key=True)
+
+    await asyncio.sleep(0.1)
+    b.handle_network_pdu(a_sent[1])  # the missing segment, far too late
+
+    assert not b.received  # it starts a new transfer instead of finishing the old
+    b.close()  # that late segment armed a fresh pair of timers
+
+
+async def test_completing_a_transfer_stops_its_timers(monkeypatch):
+    """Once acked on completion, nothing further may be emitted for the transfer."""
+    _fast_sar_timers(monkeypatch)
+    a, b, _ = make_pair()
+    a.send_access(0x0002, config_appkey_add(0x456, 0x123, APP_KEY), dev_key=True)
+    seq_after_ack = b.ctx.seq
+
+    await asyncio.sleep(0.05)
+
+    assert b.ctx.seq == seq_after_ack  # no second ack burned a SEQ
+
+
+async def test_close_cancels_a_pending_ack_timer(monkeypatch):
+    """A torn-down node must not put an ack on air through a stopped bearer."""
+    _fast_sar_timers(monkeypatch)
+    a, b, _ = make_pair(a_send_filter=lambda pdu, n: n != 2)  # drop SegO=1
+    a.send_access(0x0002, config_appkey_add(0x456, 0x123, APP_KEY), dev_key=True)
+
+    b.close()
+    await asyncio.sleep(0.05)
+
+    assert a.last_ack(0) is None
 
 
 def test_segment_ack_is_stored_and_queryable():

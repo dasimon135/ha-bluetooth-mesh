@@ -1,8 +1,9 @@
 """Upper and lower transport layers (Mesh Profile spec §3.5, §3.6).
 
-Scope (Phase 0): access messages with 32-bit TransMIC (SZMIC=0) over app or
-device keys; segmentation for TX and reassembly for RX; control messages are
-parse-only (we never send Segment Acks). No friendship, no SZMIC=1.
+Scope: access messages with 32-bit TransMIC (SZMIC=0) over app or device keys;
+segmentation for TX and reassembly for RX. Of the control messages, Segment
+Acknowledgment is both parsed and built (:func:`build_segment_ack`); the rest
+are parse-only. No friendship, no SZMIC=1.
 """
 
 from typing import NamedTuple
@@ -26,6 +27,7 @@ __all__ = [
     "encrypt_access",
     "decrypt_access",
     "build_unsegmented_access",
+    "build_segment_ack",
     "segment_access_message",
     "parse_access_lower",
     "parse_control_lower",
@@ -233,14 +235,52 @@ class SegmentAssembler:
     Segments belonging to a different message (any change in AKF/AID/SZMIC/
     SeqZero/SegN) silently restart the assembly — Phase 0 talks to a single
     peer, so at most one segmented message is in flight.
+
+    The transfer identity, the block-ack bitfield and the completion flag stay
+    readable after :meth:`add` so the caller can acknowledge (spec §3.5.3.3).
+    A completed transfer is *kept*, not discarded: a peer whose ack we lost
+    retransmits, and those segments must be re-acknowledged rather than
+    reassembled into a duplicate delivery.
     """
 
     def __init__(self) -> None:
         self._key: tuple[bool, int, int, int, int] | None = None
         self._parts: dict[int, bytes] = {}
+        self._complete = False
+
+    @property
+    def seq_zero(self) -> int | None:
+        """SeqZero of the transfer being tracked, or ``None`` when idle."""
+        return None if self._key is None else self._key[3]
+
+    @property
+    def block_ack(self) -> int:
+        """Bitfield of the segments received so far; bit *n* = SegO *n*."""
+        return sum(1 << seg_o for seg_o in self._parts)
+
+    @property
+    def complete(self) -> bool:
+        """True once the tracked transfer has been delivered."""
+        return self._complete
+
+    @property
+    def pending(self) -> bool:
+        """True while a transfer is partially received."""
+        return self._key is not None and not self._complete
+
+    def reset(self) -> None:
+        """Drop whatever is tracked (incomplete timer expiry, spec §3.5.3.4)."""
+        self._key = None
+        self._parts = {}
+        self._complete = False
 
     def add(self, seg: AccessSegment) -> bytes | None:
-        """Add one segment; returns the full upper-transport PDU when complete."""
+        """Add one segment; returns the full upper-transport PDU when complete.
+
+        Returns ``None`` both while segments are still missing and for a
+        retransmission of an already-delivered transfer — :attr:`complete`
+        tells the two apart.
+        """
         if seg.seg_o > seg.seg_n:
             raise TransportError(f"SegO {seg.seg_o} > SegN {seg.seg_n}")
         if seg.seg_o < seg.seg_n and len(seg.segment) != SEGMENT_SIZE:
@@ -252,16 +292,43 @@ class SegmentAssembler:
         if key != self._key:
             self._key = key
             self._parts = {}
+            self._complete = False
         self._parts[seg.seg_o] = seg.segment
+        if self._complete:
+            return None
         if len(self._parts) < seg.seg_n + 1:
             return None
-        upper = b"".join(self._parts[i] for i in range(seg.seg_n + 1))
-        self._key = None
-        self._parts = {}
-        return upper
+        self._complete = True
+        return b"".join(self._parts[i] for i in range(seg.seg_n + 1))
 
 
 # ------------------------------------------------------ lower layer, control
+
+
+def build_segment_ack(
+    *, seq_zero: int, block_ack: int, obo: bool = False
+) -> bytes:
+    """Build a Segment Acknowledgment lower-transport PDU (spec §3.5.3.3).
+
+    ``seq_zero`` identifies the transfer being acknowledged (the 13 LSBs of its
+    first segment's SEQ) and ``block_ack`` is the bitfield of segments received
+    so far, bit *n* set meaning SegO *n* arrived. ``obo`` ("on behalf of") is
+    set only by a Friend answering for a low-power node, which we never are.
+
+    The result travels in a network PDU with ``CTL=1``, addressed to the
+    unicast the segments came from.
+    """
+    if not 0 <= seq_zero <= 0x1FFF:
+        raise TransportError(f"SeqZero out of range: {seq_zero}")
+    if not 0 <= block_ack <= 0xFFFFFFFF:
+        raise TransportError(f"BlockAck out of range: {block_ack}")
+    # SEG(1)=0 | Opcode(7)=0x00, then OBO(1) | SeqZero(13) | RFU(2)=0.
+    head = (int(obo) << 15) | (seq_zero << 2)
+    return (
+        bytes([_SEG_ACK_OPCODE])
+        + head.to_bytes(2, "big")
+        + block_ack.to_bytes(4, "big")
+    )
 
 
 def parse_control_lower(pdu: bytes) -> SegmentAck | UnknownControl:

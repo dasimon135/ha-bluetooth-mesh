@@ -22,6 +22,7 @@ from btmesh.transport import (
     TransportError,
     UnknownControl,
     UnsegmentedAccess,
+    build_segment_ack,
     build_unsegmented_access,
     decrypt_access,
     encrypt_access,
@@ -250,6 +251,47 @@ def test_reassemble_restarts_on_new_seq_zero():
     assert assembler.add(parse_access_lower(MSG6_SEGMENTS[1][1])) is None
 
 
+def test_assembler_tracks_the_block_ack_bitfield():
+    """The ack bitfield names the segments that arrived, bit n = SegO n."""
+    assembler = SegmentAssembler()
+    assert assembler.block_ack == 0
+    assert assembler.seq_zero is None
+
+    assembler.add(parse_access_lower(MSG6_SEGMENTS[1][1]))  # SegO=1 first
+    assert assembler.block_ack == 0b10
+    assert assembler.seq_zero == MSG6_FIRST_SEQ & 0x1FFF
+    assert assembler.pending is True
+
+    assembler.add(parse_access_lower(MSG6_SEGMENTS[0][1]))
+    assert assembler.block_ack == 0b11
+    assert assembler.pending is False
+
+
+def test_assembler_does_not_redeliver_a_completed_transfer():
+    """A retransmission after our ack was lost must be re-acked, not re-delivered."""
+    assembler = SegmentAssembler()
+    seg0 = parse_access_lower(MSG6_SEGMENTS[0][1])
+    seg1 = parse_access_lower(MSG6_SEGMENTS[1][1])
+    assembler.add(seg0)
+    assert assembler.add(seg1) == MSG6_UPPER
+
+    assert assembler.add(seg1) is None  # same transfer, already delivered
+    assert assembler.complete is True
+    assert assembler.block_ack == 0b11  # still ackable
+    assert assembler.seq_zero == MSG6_FIRST_SEQ & 0x1FFF
+
+
+def test_assembler_reset_clears_a_partial_transfer():
+    """The incomplete timer drops a partial transfer; the next one starts clean."""
+    assembler = SegmentAssembler()
+    assembler.add(parse_access_lower(MSG6_SEGMENTS[0][1]))
+    assembler.reset()
+    assert assembler.pending is False
+    assert assembler.block_ack == 0
+    assert assembler.seq_zero is None
+    assert assembler.add(parse_access_lower(MSG6_SEGMENTS[1][1])) is None
+
+
 # ------------------------------------------------------ lower layer, control
 
 
@@ -257,6 +299,28 @@ def test_parse_segment_ack_message7():
     """§8.3.7: OBO=1, SeqZero=0x09AB, BlockAck acknowledges segment 1."""
     parsed = parse_control_lower(MSG7_LOWER)
     assert parsed == SegmentAck(obo=True, seq_zero=0x09AB, block_ack=0x00000002)
+
+
+def test_build_segment_ack_message7():
+    """§8.3.7 on the TX side: the same fields must re-encode to the same bytes."""
+    assert (
+        build_segment_ack(seq_zero=0x09AB, block_ack=0x00000002, obo=True)
+        == MSG7_LOWER
+    )
+
+
+def test_build_segment_ack_round_trips_through_the_parser():
+    pdu = build_segment_ack(seq_zero=0x1FFF, block_ack=0xFFFFFFFF)
+    assert parse_control_lower(pdu) == SegmentAck(
+        obo=False, seq_zero=0x1FFF, block_ack=0xFFFFFFFF
+    )
+
+
+def test_build_segment_ack_rejects_out_of_range_fields():
+    with pytest.raises(TransportError):
+        build_segment_ack(seq_zero=0x2000, block_ack=0)
+    with pytest.raises(TransportError):
+        build_segment_ack(seq_zero=0, block_ack=0x1_0000_0000)
 
 
 def test_parse_unknown_control_message1():
