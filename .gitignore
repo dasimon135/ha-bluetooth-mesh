@@ -1,4 +1,7 @@
 .venv/
+# Also the side venvs: tests/ha needs Home Assistant, which needs a newer
+# Python than the library venv pins, so running it locally means a second one.
+.venv-*/
 __pycache__/
 *.pyc
 .pytest_cache/
