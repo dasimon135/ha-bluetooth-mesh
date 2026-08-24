@@ -172,6 +172,9 @@ class MeshController:
         """Stop the TX pump and the bearer (reverse of :meth:`start`)."""
         await self._pump.stop()
         await self._bearer.stop()
+        # Release the node's reassembly timers last: one could otherwise fire
+        # after the bearer is gone, burning a SEQ on an ack nothing can carry.
+        self._node.close()
 
     def _on_message(self, msg_type: int, payload: bytes) -> None:
         if msg_type == MSG_TYPE_NETWORK_PDU:

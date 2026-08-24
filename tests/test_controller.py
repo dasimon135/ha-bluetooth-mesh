@@ -15,6 +15,7 @@ fixture via :meth:`Network.from_connect_file`.
 import asyncio
 import os
 
+from btmesh import node as node_module
 from btmesh.access import (
     OP_GENERIC_ONOFF_GET,
     OP_GENERIC_ONOFF_SET,
@@ -788,3 +789,63 @@ async def test_get_relay_returns_none_when_the_node_stays_silent():
         await controller.stop()
 
     assert result is None
+
+
+# ------------------------------------------------------------ segmentation
+
+
+async def test_segmented_reply_from_a_device_is_acknowledged():
+    """A peer that segments its reply is blocked until we acknowledge it (#9).
+
+    Every lighting Status fits in one segment, which is why this went unnoticed;
+    it bites the first time a device-keyed exchange needs more than 15 bytes.
+    """
+    controller, bearer, _ = make_setup()
+    await controller.start()
+    device = bearer.device
+    first_seq = device.ctx.seq
+
+    # 22 bytes of access payload → three segments.
+    device.send_access(0x7FFF, encode_opcode(OP_GENERIC_ONOFF_STATUS) + bytes(20))
+    await _drain()
+
+    assert device.last_ack(first_seq & 0x1FFF) is not None
+    assert device.last_ack(first_seq & 0x1FFF).block_ack == 0b111
+    await controller.stop()
+
+
+async def test_stop_cancels_a_pending_segment_ack(monkeypatch):
+    """A stopped controller must not put an ack on air through a dead bearer.
+
+    Observed on the SEQ cursor rather than the bearer: a fired ack burns a
+    sequence number whether or not the pump is still there to carry it, and
+    that cursor is persisted across restarts.
+    """
+    monkeypatch.setattr(node_module, "SEG_ACK_TIMEOUT_BASE", 0.01)
+    monkeypatch.setattr(node_module, "SEG_ACK_TIMEOUT_PER_TTL", 0.0)
+    controller, bearer, _ = make_setup()
+    await controller.start()
+    device = bearer.device
+
+    # Capture the device's three segments instead of delivering them...
+    segments: list[bytes] = []
+    real_feed = bearer.feed
+    bearer.feed = lambda pdu, msg_type=MSG_TYPE_NETWORK_PDU: segments.append(pdu)
+    device.send_access(0x7FFF, encode_opcode(OP_GENERIC_ONOFF_STATUS) + bytes(20))
+    bearer.feed = real_feed
+
+    # ...then hand over only the first, which arms the acknowledgment timer.
+    real_feed(segments[0])
+    await _drain()
+    seq_at_stop = controller.seq
+
+    await controller.stop()
+    await asyncio.sleep(0.05)
+
+    assert controller.seq == seq_at_stop
+
+
+async def _drain(rounds: int = 5) -> None:
+    """Let the TX pump move queued PDUs onto the fake bearer."""
+    for _ in range(rounds):
+        await asyncio.sleep(0)

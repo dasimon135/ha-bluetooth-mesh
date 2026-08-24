@@ -2,8 +2,9 @@
 
 One node = one subnet (single NetKey/AppKey, fixed IV Index) talking through a
 raw network-PDU callback; the bearer (GATT proxy) wraps and unwraps proxy
-framing outside this class. Phase 0 scope: no relay, no publish/subscribe,
-no ack transmission, no virtual addressing.
+framing outside this class. Segmented messages addressed to our unicast are
+acknowledged per spec §3.5.3.3. Out of scope: relay, publish/subscribe,
+virtual addressing.
 """
 
 import asyncio
@@ -24,6 +25,7 @@ from .transport import (
     SegmentAssembler,
     TransportError,
     UnsegmentedAccess,
+    build_segment_ack,
     build_unsegmented_access,
     decrypt_access,
     encrypt_access,
@@ -36,12 +38,21 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "DEFAULT_TTL",
+    "SEG_ACK_TIMEOUT_BASE",
+    "SEG_ACK_TIMEOUT_PER_TTL",
+    "SEG_INCOMPLETE_TIMEOUT",
     "NodeError",
     "ReceivedMessage",
     "MeshNode",
 ]
 
 DEFAULT_TTL = 7  # hops enough for any Phase 0 topology (matches Zephyr default)
+# Segmentation-and-reassembly timings (spec §3.5.3.3). The acknowledgment timer
+# is 150 ms + 50 ms per TTL hop; the incomplete timer is a flat 10 s after which
+# a half-received transfer is abandoned.
+SEG_ACK_TIMEOUT_BASE = 0.150
+SEG_ACK_TIMEOUT_PER_TTL = 0.050
+SEG_INCOMPLETE_TIMEOUT = 10.0
 _RECEIVED_MAXLEN = 128
 
 
@@ -99,6 +110,8 @@ class MeshNode:
         self._src = src_addr
         self._send = send_network_pdu
         self._assembler = SegmentAssembler()
+        self._ack_timer: asyncio.TimerHandle | None = None
+        self._incomplete_timer: asyncio.TimerHandle | None = None
         self._device_keys: dict[int, bytes] = {}
         self._acks: dict[int, SegmentAck] = {}
         # Last SEQ accepted per source, to drop an immediate duplicate delivery
@@ -264,6 +277,87 @@ class MeshNode:
                 "unknown control opcode %#04x from %#06x", msg.opcode, pdu.src
             )
 
+    def close(self) -> None:
+        """Release the reassembly timers (call when the bearer goes away).
+
+        Idempotent: a node that never received a segment has nothing pending.
+        """
+        self._cancel_sar_timers()
+        self._assembler.reset()
+
+    def _send_segment_ack(self, pdu: network.DecodedNetworkPDU) -> None:
+        """Acknowledge the transfer the assembler is tracking (spec §3.5.3.3).
+
+        Only ever called for segments addressed to our own unicast: a
+        segmented message sent to a group or virtual address must not be
+        acknowledged, or every subscriber would answer at once.
+        """
+        seq_zero = self._assembler.seq_zero
+        if seq_zero is None:
+            return
+        lower = build_segment_ack(
+            seq_zero=seq_zero, block_ack=self._assembler.block_ack
+        )
+        # A message that reached us with TTL 0 came straight from a neighbour;
+        # answering it with a routable TTL would leak the ack into the mesh.
+        ttl = 0 if pdu.ttl == 0 else DEFAULT_TTL
+        self._send(
+            network.encode(
+                self._ctx, ctl=True, ttl=ttl, seq=self._ctx.next_seq(),
+                src=self._src, dst=pdu.src, transport_pdu=lower,
+            )
+        )
+
+    def _on_segment_for_us(self, pdu: network.DecodedNetworkPDU) -> None:
+        """Run the SAR acknowledgment rules for a segment addressed to us.
+
+        A completed transfer is acknowledged at once — that is the ack the
+        sender is blocked on. An incomplete one starts the acknowledgment
+        timer instead: answering immediately on every segment would put an ack
+        on air between each one, so we wait out the gap and then report the
+        bitfield, which tells the peer exactly what to retransmit. Each new
+        segment restarts both timers; the incomplete timer bounds the whole
+        thing so an abandoned transfer cannot complete minutes later.
+        """
+        self._cancel_sar_timers()
+        if not self._assembler.pending:  # complete, and therefore ackable now
+            self._send_segment_ack(pdu)
+            return
+        delay = SEG_ACK_TIMEOUT_BASE + SEG_ACK_TIMEOUT_PER_TTL * pdu.ttl
+        self._ack_timer = self._call_later(delay, self._send_segment_ack, pdu)
+        self._incomplete_timer = self._call_later(
+            SEG_INCOMPLETE_TIMEOUT, self._abandon_transfer
+        )
+
+    def _call_later(self, delay, callback, *args) -> "asyncio.TimerHandle | None":
+        """Schedule ``callback``, or skip it when there is no running loop.
+
+        The RX path is synchronous and is exercised without a loop in tests;
+        losing the timers there costs only the partial-transfer ack, never the
+        completion ack the sender actually waits for.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        return loop.call_later(delay, callback, *args)
+
+    def _cancel_sar_timers(self) -> None:
+        for timer in (self._ack_timer, self._incomplete_timer):
+            if timer is not None:
+                timer.cancel()
+        self._ack_timer = self._incomplete_timer = None
+
+    def _abandon_transfer(self) -> None:
+        logger.debug(
+            "incomplete timer expired, dropping partial segmented message "
+            "(SeqZero %s, block ack %#x)",
+            self._assembler.seq_zero,
+            self._assembler.block_ack,
+        )
+        self._cancel_sar_timers()
+        self._assembler.reset()
+
     def _handle_access(self, pdu: network.DecodedNetworkPDU) -> None:
         try:
             parsed = parse_access_lower(pdu.transport_pdu)
@@ -271,8 +365,10 @@ class MeshNode:
                 upper, seq_auth = parsed.upper_pdu, pdu.seq
             else:
                 upper = self._assembler.add(parsed)
+                if pdu.dst == self._src:
+                    self._on_segment_for_us(pdu)
                 if upper is None:
-                    return  # more segments pending
+                    return  # more segments pending, or already delivered
                 seq_auth = _seq_auth(pdu.seq, parsed.seq_zero)
                 if seq_auth < 0:
                     logger.debug("implausible SeqAuth, dropping reassembled message")
