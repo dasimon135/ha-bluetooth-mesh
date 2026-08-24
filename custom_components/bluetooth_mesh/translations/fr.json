@@ -24,7 +24,7 @@
       }
     },
     "error": {
-      "invalid_connect": "Le texte collé n'est pas un export réseau .connect valide. Collez le contenu complet du fichier exporté."
+      "invalid_connect": "Le texte collé n'est pas un export réseau .connect valide : {error}. Collez le contenu complet du fichier exporté."
     },
     "abort": {
       "already_configured": "Ce réseau mesh est déjà configuré.",

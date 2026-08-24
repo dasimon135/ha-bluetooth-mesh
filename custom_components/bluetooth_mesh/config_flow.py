@@ -42,12 +42,21 @@ from .const import (
 )
 
 
-def _parse(text: str) -> Network | None:
-    """Parse a pasted ``.connect`` export, or ``None`` if it is not one."""
+def _parse(text: str) -> tuple[Network | None, str]:
+    """Parse a pasted ``.connect`` export.
+
+    Returns ``(network, "")`` on success and ``(None, reason)`` otherwise. The
+    reason is carried rather than swallowed: a truncated paste, a file that is
+    not an export at all, and an export whose every node is unparseable are
+    three different problems with three different fixes, and a bare
+    ``invalid_connect`` renders them identically.
+    """
     try:
-        return Network.from_connect(json.loads(text))
-    except (json.JSONDecodeError, NetworkModelError):
-        return None
+        return Network.from_connect(json.loads(text)), ""
+    except json.JSONDecodeError as exc:
+        return None, f"the text is not valid JSON ({exc})"
+    except NetworkModelError as exc:
+        return None, str(exc)
 
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
@@ -78,9 +87,10 @@ class BluetoothMeshConfigFlow(ConfigFlow, domain=DOMAIN):
         """Import a ``.connect`` network export pasted as JSON text."""
         errors: dict[str, str] = {}
 
+        reason = ""
         if user_input is not None:
             text = user_input[CONF_CONNECT_JSON]
-            network = _parse(text)
+            network, reason = _parse(text)
             if network is None:
                 errors["base"] = "invalid_connect"
             else:
@@ -95,6 +105,7 @@ class BluetoothMeshConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=STEP_USER_DATA_SCHEMA,
             errors=errors,
+            description_placeholders={"error": reason},
         )
 
     async def async_step_reconfigure(
@@ -107,10 +118,11 @@ class BluetoothMeshConfigFlow(ConfigFlow, domain=DOMAIN):
         it, which costs every entity id and the history behind it.
         """
         errors: dict[str, str] = {}
+        reason = ""
 
         if user_input is not None:
             text = user_input[CONF_CONNECT_JSON]
-            network = _parse(text)
+            network, reason = _parse(text)
             if network is None:
                 errors["base"] = "invalid_connect"
             else:
@@ -127,6 +139,7 @@ class BluetoothMeshConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="reconfigure",
             data_schema=STEP_USER_DATA_SCHEMA,
             errors=errors,
+            description_placeholders={"error": reason},
         )
 
 

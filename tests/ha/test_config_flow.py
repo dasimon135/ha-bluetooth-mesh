@@ -95,6 +95,42 @@ async def test_user_flow_rejects_valid_json_but_not_connect(hass) -> None:
     assert result["errors"] == {"base": "invalid_connect"}
 
 
+async def test_user_flow_says_why_the_export_was_rejected(hass) -> None:
+    """`invalid_connect` on its own leaves the user with nowhere to go.
+
+    Exports come from another vendor's app; a node missing a field, a truncated
+    paste and a file that is not an export at all are three different problems
+    with three different fixes, and the form used to render them identically.
+    """
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": "user"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_CONNECT_JSON: "{}"}
+    )
+
+    assert result["errors"] == {"base": "invalid_connect"}
+    assert "netKeys" in result["description_placeholders"]["error"]
+
+
+async def test_reconfigure_flow_says_why_the_export_was_rejected(hass) -> None:
+    """The reconfigure form owes the same explanation as the import form."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CONNECT_JSON: _connect_text()},
+        unique_id=Network.from_connect(json.loads(_connect_text())).identifier,
+    )
+    entry.add_to_hass(hass)
+
+    result = await entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_CONNECT_JSON: "not json"}
+    )
+
+    assert result["errors"] == {"base": "invalid_connect"}
+    assert result["description_placeholders"]["error"]
+
+
 async def test_options_flow_sets_keepalive_and_reloads_the_entry(hass) -> None:
     """The options flow stores the keep-alive timeout (0 = always connected).
 
