@@ -245,3 +245,65 @@ def test_options_flow_reloads_the_entry_itself() -> None:
     )
 
     assert issubclass(BluetoothMeshOptionsFlow, OptionsFlowWithReload)
+
+
+async def test_corrupt_entry_data_error_is_translatable() -> None:
+    """The setup failure is UI text, so it must not be hardcoded English.
+
+    ConfigEntryError renders on the integration card, not just in the log. A
+    French user got an English sentence there, because the message was built
+    with an f-string instead of a translation key.
+    """
+    pytest.importorskip("homeassistant")
+
+    import importlib
+    import re
+    from unittest.mock import MagicMock
+
+    from homeassistant.exceptions import ConfigEntryError
+
+    module = importlib.import_module("custom_components.bluetooth_mesh")
+    from custom_components.bluetooth_mesh.const import CONF_CONNECT_JSON
+
+    hass = MagicMock()
+    entry = MagicMock()
+    entry.data = {CONF_CONNECT_JSON: "{ not json"}
+    entry.options = {}
+
+    with pytest.raises(ConfigEntryError) as excinfo:
+        await module.async_setup_entry(hass, entry)
+
+    exc = excinfo.value
+    assert exc.translation_domain == "bluetooth_mesh"
+    strings = json.loads(
+        (INTEGRATION_DIR / "strings.json").read_text(encoding="utf-8")
+    )
+    message = strings["exceptions"][exc.translation_key]["message"]
+    assert set(exc.translation_placeholders or {}) == set(
+        re.findall(r"\{(\w+)\}", message)
+    )
+
+
+def test_every_shipped_language_covers_every_string() -> None:
+    """A key present in strings.json but missing from a translation renders
+    in English, silently, for that language only. Compare the key sets.
+    """
+
+    def _paths(obj: dict, prefix: str = "") -> set[str]:
+        found: set[str] = set()
+        for key, value in obj.items():
+            path = f"{prefix}.{key}" if prefix else key
+            if isinstance(value, dict):
+                found |= _paths(value, path)
+            else:
+                found.add(path)
+        return found
+
+    reference = _paths(
+        json.loads((INTEGRATION_DIR / "strings.json").read_text(encoding="utf-8"))
+    )
+    translations = sorted((INTEGRATION_DIR / "translations").glob("*.json"))
+    assert translations, "no translations shipped"
+    for path in translations:
+        keys = _paths(json.loads(path.read_text(encoding="utf-8")))
+        assert keys == reference, f"{path.name} diverges from strings.json"

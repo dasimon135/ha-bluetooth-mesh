@@ -70,7 +70,7 @@ async def test_user_flow_imports_connect_network(hass) -> None:
 
 
 async def test_user_flow_rejects_garbage(hass) -> None:
-    """Non-JSON / non-.connect text re-shows the form with an error."""
+    """Text that is not JSON at all re-shows the form with an error."""
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": "user"}
     )
@@ -79,7 +79,7 @@ async def test_user_flow_rejects_garbage(hass) -> None:
     )
 
     assert result["type"] is FlowResultType.FORM
-    assert result["errors"] == {"base": "invalid_connect"}
+    assert result["errors"] == {"base": "invalid_json"}
 
 
 async def test_user_flow_rejects_valid_json_but_not_connect(hass) -> None:
@@ -127,7 +127,7 @@ async def test_reconfigure_flow_says_why_the_export_was_rejected(hass) -> None:
         result["flow_id"], {CONF_CONNECT_JSON: "not json"}
     )
 
-    assert result["errors"] == {"base": "invalid_connect"}
+    assert result["errors"] == {"base": "invalid_json"}
     assert result["description_placeholders"]["error"]
 
 
@@ -294,7 +294,7 @@ async def test_reconfigure_rejects_garbage(hass) -> None:
     )
 
     assert result["type"] is FlowResultType.FORM
-    assert result["errors"] == {"base": "invalid_connect"}
+    assert result["errors"] == {"base": "invalid_json"}
 
 
 async def test_options_flow_stores_a_source_address_override(hass) -> None:
@@ -332,3 +332,22 @@ async def test_options_flow_stores_a_source_address_override(hass) -> None:
 
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
+
+
+async def test_a_truncated_paste_is_told_apart_from_a_bad_export(hass) -> None:
+    """Unparseable text and a well-formed non-export need different advice.
+
+    They also need different *languages*: the reason detail is interpolated
+    into a translated sentence, so it cannot be hand-written English prose.
+    The decoder's own message is the exception — it points at a byte offset in
+    a file whose field names are English anyway.
+    """
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": "user"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_CONNECT_JSON: "this is not json {{{"}
+    )
+
+    assert result["errors"] == {"base": "invalid_json"}
+    assert "not valid JSON" not in result["description_placeholders"]["error"]

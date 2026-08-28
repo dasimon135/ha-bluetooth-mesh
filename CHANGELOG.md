@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.8] — 2026-08-28
+
+### Fixed
+
+- **Setup failures and import errors are no longer English-only.** Two strings
+  reached the user interface without passing through a translation. The
+  `ConfigEntryError` raised when a stored `.connect` export cannot be read
+  renders on the integration card, and it was built with an f-string, so a
+  French install showed an English sentence there; it now carries the
+  `corrupt_connect_export` translation key. The config-flow rejection reason
+  was worse — the sentence around it was translated while the reason injected
+  into it was hand-written English, producing a half-translated line.
+
+  A paste that is not JSON at all and a well-formed document that is not an
+  export are now two separate errors, `invalid_json` and `invalid_connect`,
+  because their fixes differ: the first is usually a truncated or word-wrapped
+  paste, the second is the wrong file. Only the parser's own detail stays in
+  English — it names JSON fields that are English in the export itself.
+
+  A test now compares the key set of every shipped translation against
+  `strings.json`, so a key added to one file and forgotten in another fails
+  the suite instead of silently rendering in English for that language.
+
 ## [0.4.7] — 2026-08-24
 
 ### Fixed

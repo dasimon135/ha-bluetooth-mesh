@@ -24,7 +24,8 @@
       }
     },
     "error": {
-      "invalid_connect": "Le texte collé n'est pas un export réseau .connect valide : {error}. Collez le contenu complet du fichier exporté."
+      "invalid_connect": "Le texte collé n'est pas un export réseau .connect valide : {error}. Collez le contenu complet du fichier exporté.",
+      "invalid_json": "Le texte collé n'est pas du JSON valide : {error}. Collez le contenu complet du fichier exporté, une copie partielle ou coupée en lignes ne peut pas être lue."
     },
     "abort": {
       "already_configured": "Ce réseau mesh est déjà configuré.",
@@ -52,6 +53,11 @@
     "proxy_unreachable": {
       "title": "Aucun proxy Bluetooth pour le réseau mesh {network}",
       "description": "Home Assistant ne trouve aucun proxy Bluetooth diffusant le réseau mesh « {network} » (Network ID attendu : {network_id}). Un nœud mesh n'offre qu'un seul emplacement de connexion proxy : si l'application Häfele Connect Mesh (ou un autre client) est connectée à une lampe, elle occupe cet emplacement et Home Assistant est bloqué. Fermez l'application et libérez la lampe, et assurez-vous qu'au moins une lampe est alimentée et à portée d'un proxy Bluetooth.\n\nDiagnostic — annonces de proxy mesh que Home Assistant voit actuellement : {seen}\n\nHome Assistant réessaie en continu et efface automatiquement ce problème dès qu'un proxy est joignable."
+    }
+  },
+  "exceptions": {
+    "corrupt_connect_export": {
+      "message": "L'export .connect enregistré n'a pas pu être lu ({error}). Reconfigurez l'entrée avec un nouvel export."
     }
   }
 }
