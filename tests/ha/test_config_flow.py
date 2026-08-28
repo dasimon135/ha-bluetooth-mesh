@@ -23,10 +23,12 @@ pytest.importorskip("pytest_homeassistant_custom_component")
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.bluetooth_mesh import config_flow
 from custom_components.bluetooth_mesh import coordinator as coordinator_mod
 from custom_components.bluetooth_mesh.btmesh.network_model import Network
 from custom_components.bluetooth_mesh.const import (
     CONF_CONNECT_JSON,
+    CONF_INVERTED_CTL,
     CONF_KEEPALIVE,
     CONF_SRC_ADDR,
     DOMAIN,
@@ -351,3 +353,145 @@ async def test_a_truncated_paste_is_told_apart_from_a_bad_export(hass) -> None:
 
     assert result["errors"] == {"base": "invalid_json"}
     assert "not valid JSON" not in result["description_placeholders"]["error"]
+
+
+async def test_options_flow_stores_inverted_lamps_as_addresses(hass) -> None:
+    """The colour-temperature mirror is chosen per lamp, from the form.
+
+    The selector deals in the hexadecimal form this integration writes unicasts
+    in everywhere; what gets stored has to be the integer, because that is what
+    the light platform matches node addresses against.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CONNECT_JSON: _connect_text()},
+        unique_id="0F0E0D0C-0B0A-0908-0706-050403020100",
+    )
+    entry.add_to_hass(hass)
+
+    with (
+        patch.object(coordinator_mod, "find_proxy_address", return_value=None),
+        patch.object(coordinator_mod, "discovered_proxies", return_value=[]),
+        patch.object(
+            coordinator_mod,
+            "async_register_proxy_callback",
+            return_value=lambda: None,
+        ),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        assert CONF_INVERTED_CTL in {
+            str(key) for key in result["data_schema"].schema
+        }
+
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                CONF_KEEPALIVE: 0,
+                CONF_SRC_ADDR: 0,
+                CONF_INVERTED_CTL: ["000c"],
+            },
+        )
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        assert entry.options[CONF_INVERTED_CTL] == [0x000C]
+
+        await hass.async_block_till_done()
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_options_flow_can_clear_every_inverted_lamp(hass) -> None:
+    """Unchecking the last lamp has to be storable, not read as "unset".
+
+    Setup seeds the option from the old vendor rule, so the fixture's Häfele
+    lamp starts checked. Turning the mirror off is exactly what issue #7 needs,
+    and an empty list is the only way to say it.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CONNECT_JSON: _connect_text()},
+        unique_id="0F0E0D0C-0B0A-0908-0706-050403020100",
+    )
+    entry.add_to_hass(hass)
+
+    with (
+        patch.object(coordinator_mod, "find_proxy_address", return_value=None),
+        patch.object(coordinator_mod, "discovered_proxies", return_value=[]),
+        patch.object(
+            coordinator_mod,
+            "async_register_proxy_callback",
+            return_value=lambda: None,
+        ),
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert entry.options[CONF_INVERTED_CTL] == [0x000C]  # seeded
+
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {CONF_KEEPALIVE: 0, CONF_SRC_ADDR: 0, CONF_INVERTED_CTL: []},
+        )
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        assert entry.options[CONF_INVERTED_CTL] == []
+
+        await hass.async_block_till_done()
+        # The reload must not put the seeded lamp back.
+        assert entry.options[CONF_INVERTED_CTL] == []
+
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_options_flow_keeps_inverted_lamps_when_the_field_is_absent(
+    hass,
+) -> None:
+    """Saving options must not drop a setting the form did not render.
+
+    The field is omitted when the network has no colour-temperature lamp, and
+    ``async_create_entry`` REPLACES the whole options dict — so anything not
+    resubmitted is deleted. Deleting it is worse than it looks: the entry then
+    reloads with the key absent, which is precisely the state the seed treats as
+    "never configured", so it puts the vendor default back and silently undoes
+    the user's choice.
+
+    Asserted with an EMPTY stored list, because that is the case the two
+    behaviours disagree on. A non-empty one would come back from the seed
+    looking identical and prove nothing.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CONNECT_JSON: _connect_text()},
+        options={CONF_INVERTED_CTL: []},
+        unique_id="0F0E0D0C-0B0A-0908-0706-050403020100",
+    )
+    entry.add_to_hass(hass)
+
+    with (
+        patch.object(coordinator_mod, "find_proxy_address", return_value=None),
+        patch.object(coordinator_mod, "discovered_proxies", return_value=[]),
+        patch.object(
+            coordinator_mod,
+            "async_register_proxy_callback",
+            return_value=lambda: None,
+        ),
+        patch.object(
+            config_flow.BluetoothMeshOptionsFlow, "_ctl_nodes", return_value=[]
+        ),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        assert CONF_INVERTED_CTL not in {
+            str(key) for key in result["data_schema"].schema
+        }
+
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {CONF_KEEPALIVE: 0, CONF_SRC_ADDR: 0}
+        )
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        assert entry.options[CONF_INVERTED_CTL] == []
+
+        # The reload that follows must not read the survivor as "unconfigured".
+        await hass.async_block_till_done()
+        assert entry.options[CONF_INVERTED_CTL] == []
+
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()

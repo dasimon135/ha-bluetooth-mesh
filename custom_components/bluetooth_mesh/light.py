@@ -33,6 +33,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import BluetoothMeshConfigEntry
 from .const import (
+    CONF_INVERTED_CTL,
     DOMAIN,
     MODEL_GENERIC_ONOFF,
     MODEL_LIGHT_CTL,
@@ -56,12 +57,6 @@ DEFAULT_MAX_KELVIN = 6500
 _KNOWN_CIDS = {
     0x07E9: "Häfele",
 }
-
-# Company identifiers whose lamps map Light CTL temperature INVERSELY: dragging
-# toward warm produces cool and vice-versa. The workaround mirrors the requested
-# Kelvin around the exposed range, and must stay confined to those vendors —
-# applying it to a spec-conformant lamp inverts warm and cool end to end.
-_INVERTED_CTL_CIDS = frozenset({0x07E9})  # Häfele / ThingOS
 
 
 def _manufacturer(cid: int) -> str:
@@ -101,12 +96,19 @@ async def async_setup_entry(
     are what a remote hosts, and a remote is not a light.
     """
     coordinator = entry.runtime_data
+    # Read once here rather than per command in the entity: the options flow is
+    # an ``OptionsFlowWithReload``, so changing this rebuilds every entity.
+    inverted = set(entry.options.get(CONF_INVERTED_CTL, ()))
     entities: list[MeshLight] = []
     for node in coordinator.network.nodes:
         if node.has_model(MODEL_LIGHT_LIGHTNESS) or node.has_model(
             MODEL_GENERIC_ONOFF
         ):
-            entities.append(MeshLight(coordinator, node))
+            entities.append(
+                MeshLight(
+                    coordinator, node, invert_ctl=node.unicast in inverted
+                )
+            )
     async_add_entities(entities)
 
 
@@ -123,10 +125,16 @@ class MeshLight(LightEntity):
     # async_added_to_hass); there is nothing for Home Assistant to poll.
     _attr_should_poll = False
 
-    def __init__(self, coordinator: MeshCoordinator, node) -> None:
+    def __init__(
+        self, coordinator: MeshCoordinator, node, *, invert_ctl: bool = False
+    ) -> None:
         self._coordinator = coordinator
         self._node = node
         self._unicast = node.unicast
+        # Whether this lamp's CTL server maps temperature inversely. Frozen at
+        # construction rather than read per command: the options flow is an
+        # ``OptionsFlowWithReload``, so changing it rebuilds every entity.
+        self._invert_ctl = invert_ctl
 
         self._attr_unique_id = (
             f"{coordinator.network.identifier}_{node.unicast:04x}"
@@ -279,19 +287,24 @@ class MeshLight(LightEntity):
     def _mesh_kelvin(self, kelvin: int) -> int:
         """HA color temperature → the value this lamp's CTL server expects.
 
-        Häfele/ThingOS lamps map the Light CTL temperature inversely to their
-        warm/cool LEDs (dragging toward warm produced cool and vice-versa), so
-        for those the requested Kelvin is mirrored around the midpoint of the
-        exposed range before sending: ``min + max - K``. The mirror stays inside
-        the exposed 2700..6500 K band, so the controller's spec-range clamp
-        never triggers, and HA keeps displaying the un-mirrored value the user
-        selected.
+        Some lamps map the Light CTL temperature inversely to their warm/cool
+        LEDs (dragging toward warm produces cool and vice-versa), so for a lamp
+        marked as one the requested Kelvin is mirrored around the midpoint of
+        the exposed range before sending: ``min + max - K``. The mirror stays
+        inside the exposed 2700..6500 K band, so the controller's spec-range
+        clamp never triggers, and HA keeps displaying the un-mirrored value the
+        user selected.
 
-        Every other vendor gets the value untouched: the mirror is a quirk, not
+        Every unmarked lamp gets the value untouched: the mirror is a quirk, not
         the spec, and applying it to a conformant lamp would invert warm and
         cool end to end.
+
+        Which lamps are marked is a stored option, not a property of the vendor.
+        It was gated on the company identifier until 0.4.9, when issue #7 turned
+        up a Häfele lamp that the mirror was itself inverting: the quirk varies
+        within a vendor, by model or firmware, so a CID cannot predict it.
         """
-        if self._node.cid not in _INVERTED_CTL_CIDS:
+        if not self._invert_ctl:
             return kelvin
         return (
             self._attr_min_color_temp_kelvin

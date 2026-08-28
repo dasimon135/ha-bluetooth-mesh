@@ -26,6 +26,10 @@ from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
@@ -34,11 +38,13 @@ from homeassistant.helpers.selector import (
 from .btmesh.network_model import Network, NetworkModelError
 from .const import (
     CONF_CONNECT_JSON,
+    CONF_INVERTED_CTL,
     CONF_KEEPALIVE,
     CONF_SRC_ADDR,
     DEFAULT_KEEPALIVE,
     DEFAULT_SRC_ADDR,
     DOMAIN,
+    MODEL_LIGHT_CTL,
 )
 
 
@@ -166,12 +172,24 @@ class BluetoothMeshOptionsFlow(OptionsFlowWithReload):
     ) -> ConfigFlowResult:
         """Show/store the keep-alive timeout."""
         if user_input is not None:
-            return self.async_create_entry(
-                data={
-                    CONF_KEEPALIVE: int(user_input[CONF_KEEPALIVE]),
-                    CONF_SRC_ADDR: int(user_input[CONF_SRC_ADDR]),
-                }
-            )
+            data = {
+                CONF_KEEPALIVE: int(user_input[CONF_KEEPALIVE]),
+                CONF_SRC_ADDR: int(user_input[CONF_SRC_ADDR]),
+            }
+            # The field is absent from the form when the network has no CTL
+            # lamp. Carry the stored value through rather than letting it go:
+            # this replaces the whole options dict, and a dropped key is not
+            # read as "empty" but as "never configured" — so the next setup
+            # would seed the vendor default back over the user's choice.
+            if CONF_INVERTED_CTL in user_input:
+                data[CONF_INVERTED_CTL] = [
+                    int(value, 16) for value in user_input[CONF_INVERTED_CTL]
+                ]
+            elif CONF_INVERTED_CTL in self.config_entry.options:
+                data[CONF_INVERTED_CTL] = self.config_entry.options[
+                    CONF_INVERTED_CTL
+                ]
+            return self.async_create_entry(data=data)
 
         current = self.config_entry.options.get(
             CONF_KEEPALIVE, DEFAULT_KEEPALIVE
@@ -196,4 +214,46 @@ class BluetoothMeshOptionsFlow(OptionsFlowWithReload):
                 ),
             }
         )
+        if ctl_nodes := self._ctl_nodes():
+            current_inverted = self.config_entry.options.get(
+                CONF_INVERTED_CTL, []
+            )
+            schema = schema.extend(
+                {
+                    vol.Optional(
+                        CONF_INVERTED_CTL,
+                        default=[f"{a:04x}" for a in current_inverted],
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(
+                                    value=f"{node.unicast:04x}",
+                                    label=node.name
+                                    or f"Mesh {node.unicast:04x}",
+                                )
+                                for node in ctl_nodes
+                            ],
+                            multiple=True,
+                            mode=SelectSelectorMode.LIST,
+                        )
+                    )
+                }
+            )
         return self.async_show_form(step_id="init", data_schema=schema)
+
+    def _ctl_nodes(self) -> list:
+        """The nodes whose colour temperature the mirror could apply to.
+
+        Read from the stored export rather than from the running coordinator so
+        the form still lists the lamps when no proxy is in range. A damaged
+        export is not this step's problem — the setup already refuses the entry
+        with a message pointing at the reconfigure flow — so it degrades to an
+        empty list and simply omits the field.
+        """
+        try:
+            network = Network.from_connect(
+                json.loads(self.config_entry.data[CONF_CONNECT_JSON])
+            )
+        except (json.JSONDecodeError, NetworkModelError, KeyError):
+            return []
+        return [n for n in network.nodes if n.has_model(MODEL_LIGHT_CTL)]
