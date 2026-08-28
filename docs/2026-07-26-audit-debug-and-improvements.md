@@ -21,14 +21,15 @@ against the code and carries the evidence.
 
 **Still open:**
 
-* §1.6, second half — the import skips a malformed node and logs it, but the
-  config-flow form still says only `invalid_connect`; which node failed, and
-  why, never reaches the user.
 * §2.8 — provisioning from Home Assistant (`RestoreEntity` turned out to be
-  the wrong fix and was superseded; see the entry).
-* §3.5 — moot: the tag in question is eight releases behind.
+  the wrong fix and was superseded; see the entry). Tracked as issue #12; it is
+  now the only substantial item left here.
+* §3.5 — moot: the tag in question is many releases behind.
 
-Everything else is done.
+Everything else is done. One correction on 2026-08-28: §1.6's second half was
+still listed as open here, but it had shipped in 0.4.8 the same week; only that
+entry was re-checked against the tree, so the date above still marks the last
+full sweep.
 
 ---
 
@@ -168,7 +169,14 @@ same weakness — two networks would produce colliding entity unique_ids.
 Fix: fall back to `k3(net_key).hex()` — the Network ID, which is the network's
 real on-air identity and is already computed everywhere else.
 
-### 1.6 (P3) One malformed node aborts the whole import — **HALF DONE**
+### 1.6 (P3) One malformed node aborts the whole import — **FIXED**
+
+> Both halves shipped, the second in 0.4.8. `Network.from_connect` collects and
+> logs the unparseable nodes and hard-fails only when *none* survive; `_parse()`
+> in `config_flow.py` now returns an `(error_key, detail)` pair instead of a
+> bare `None`, so a paste that is not JSON at all (`invalid_json`) is told apart
+> from a well-formed document that is not an export (`invalid_connect`), and the
+> parser's own detail reaches the form through `description_placeholders`.
 
 `network_model.py:257-277` requires `unicastAddress`, `deviceKey` and `cid` on
 **every** node. A single odd entry (a provisioner record from another app
@@ -179,11 +187,6 @@ node is at fault.
 
 Fix: skip + `logger.warning` unparseable nodes (keep hard failures for the
 keys), and surface `str(exc)` through `description_placeholders` in the form.
-
-> The skip half is done (`Network.from_connect` collects and logs the
-> unparseable nodes, and still hard-fails when *none* survive). The form half
-> is not: `_parse()` in `config_flow.py` swallows the exception and returns
-> `None`, so every failure reads `invalid_connect` no matter the cause.
 
 ### 1.7 (P3) Corrupt entry data raises instead of failing cleanly — **FIXED**
 
