@@ -62,9 +62,9 @@ def _seed_inverted_ctl(
     entry: BluetoothMeshConfigEntry,
     coordinator: MeshCoordinator,
 ) -> None:
-    """Write the pre-0.5.0 vendor rule into the per-lamp option, once.
+    """Write the pre-0.5.1 vendor rule into the per-lamp option, once.
 
-    Until 0.5.0 the Light CTL temperature mirror was applied to every Häfele
+    Until 0.5.1 the Light CTL temperature mirror was applied to every Häfele
     lamp unconditionally. It is now a stored per-lamp option, because issue #7
     showed the quirk varies within a vendor. Letting that option default to
     empty would invert the colour temperature of every working install on

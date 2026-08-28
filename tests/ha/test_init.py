@@ -366,7 +366,7 @@ def _fixture_network():
 async def test_setup_seeds_the_inverted_ctl_option_from_the_hafele_lamps() -> None:
     """An entry that predates the option keeps the behaviour it shipped with.
 
-    Until 0.5.0 every Häfele lamp was mirrored unconditionally. Defaulting the
+    Until 0.5.1 every Häfele lamp was mirrored unconditionally. Defaulting the
     new per-lamp option to empty would invert the colour temperature of every
     working install on upgrade, unasked, so the first setup writes the old rule
     out once as data.

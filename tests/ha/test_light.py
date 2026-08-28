@@ -471,7 +471,7 @@ async def test_a_marked_lamp_is_mirrored(hass) -> None:
     assert ("set_ctl_temperature", 0x000D, 5200) in coordinator.calls
 
 
-# The two below invert the rule this integration used to apply. Until 0.5.0 the
+# The two below invert the rule this integration used to apply. Until 0.5.1 the
 # mirror was gated on the company identifier alone, and issue #7 produced the
 # lamp that disproves it: a Häfele node whose colour temperature came out
 # backwards *because we mirrored it*. The quirk varies within a vendor, by model
@@ -659,7 +659,7 @@ async def test_a_node_with_no_lighting_server_gets_no_entity(hass) -> None:
 async def test_setup_entry_marks_only_the_lamps_listed_in_the_option(hass) -> None:
     """The stored option, not the company identifier, decides who is mirrored.
 
-    The fixture node is Häfele, so under the pre-0.5.0 rule it would be
+    The fixture node is Häfele, so under the pre-0.5.1 rule it would be
     mirrored either way. Asserting it from the option means listing it and
     seeing the mirror, then not listing it and seeing the value pass through.
     """
