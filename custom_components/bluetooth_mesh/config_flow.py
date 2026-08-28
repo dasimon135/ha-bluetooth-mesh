@@ -42,21 +42,25 @@ from .const import (
 )
 
 
-def _parse(text: str) -> tuple[Network | None, str]:
+def _parse(text: str) -> tuple[Network | None, str, str]:
     """Parse a pasted ``.connect`` export.
 
-    Returns ``(network, "")`` on success and ``(None, reason)`` otherwise. The
-    reason is carried rather than swallowed: a truncated paste, a file that is
-    not an export at all, and an export whose every node is unparseable are
-    three different problems with three different fixes, and a bare
-    ``invalid_connect`` renders them identically.
+    Returns ``(network, "", "")`` on success and ``(None, error_key, detail)``
+    otherwise, where ``error_key`` selects the translated form error and
+    ``detail`` is interpolated into it.
+
+    The two failures are separated because their fixes differ: text that is
+    not JSON at all is usually a truncated or word-wrapped paste, whereas a
+    well-formed document that is not an export means the wrong file. Only the
+    sentence around the detail is translated — the detail itself stays in the
+    parser's words, since it names JSON fields that are English in the file.
     """
     try:
-        return Network.from_connect(json.loads(text)), ""
+        return Network.from_connect(json.loads(text)), "", ""
     except json.JSONDecodeError as exc:
-        return None, f"the text is not valid JSON ({exc})"
+        return None, "invalid_json", str(exc)
     except NetworkModelError as exc:
-        return None, str(exc)
+        return None, "invalid_connect", str(exc)
 
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
@@ -90,9 +94,9 @@ class BluetoothMeshConfigFlow(ConfigFlow, domain=DOMAIN):
         reason = ""
         if user_input is not None:
             text = user_input[CONF_CONNECT_JSON]
-            network, reason = _parse(text)
+            network, error_key, reason = _parse(text)
             if network is None:
-                errors["base"] = "invalid_connect"
+                errors["base"] = error_key
             else:
                 await self.async_set_unique_id(network.identifier)
                 self._abort_if_unique_id_configured()
@@ -122,9 +126,9 @@ class BluetoothMeshConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             text = user_input[CONF_CONNECT_JSON]
-            network, reason = _parse(text)
+            network, error_key, reason = _parse(text)
             if network is None:
-                errors["base"] = "invalid_connect"
+                errors["base"] = error_key
             else:
                 await self.async_set_unique_id(network.identifier)
                 # Pasting a *different* network here would silently repoint

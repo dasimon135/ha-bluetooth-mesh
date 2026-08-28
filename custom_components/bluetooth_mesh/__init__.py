@@ -10,6 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryError
 
 from .btmesh.network_model import NetworkModelError
+from .const import DOMAIN
 from .coordinator import MeshCoordinator
 
 PLATFORMS: list[Platform] = [Platform.LIGHT]
@@ -30,9 +31,14 @@ async def async_setup_entry(
         # used to blow up here as a raw traceback with nothing actionable in
         # it. Re-importing the export (the reconfigure flow) is the fix, and
         # that is what the user needs to be told.
+        #
+        # This renders on the integration card, so it is UI text: it goes
+        # through a translation key. Only the parser's own detail stays
+        # English — it names JSON fields that are English in the file itself.
         raise ConfigEntryError(
-            f"the stored .connect export could not be read ({exc}); "
-            "reconfigure the entry with a fresh export"
+            translation_domain=DOMAIN,
+            translation_key="corrupt_connect_export",
+            translation_placeholders={"error": str(exc)},
         ) from exc
     # Never hard-fails: async_start marks the coordinator unavailable and
     # retries in the background if no proxy is reachable yet.
