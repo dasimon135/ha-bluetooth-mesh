@@ -59,5 +59,12 @@
     "corrupt_connect_export": {
       "message": "L'export .connect enregistré n'a pas pu être lu ({error}). Reconfigurez l'entrée avec un nouvel export."
     }
+  },
+  "entity": {
+    "sensor": {
+      "proxy_address": {
+        "name": "Adresse du proxy"
+      }
+    }
   }
 }

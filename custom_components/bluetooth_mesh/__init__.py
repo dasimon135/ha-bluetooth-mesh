@@ -13,7 +13,7 @@ from .btmesh.network_model import NetworkModelError
 from .const import DOMAIN
 from .coordinator import MeshCoordinator
 
-PLATFORMS: list[Platform] = [Platform.LIGHT]
+PLATFORMS: list[Platform] = [Platform.LIGHT, Platform.SENSOR]
 
 # The runtime data is the mesh coordinator: it owns the proxy connection, the
 # controller, and the parsed network model the entities enumerate.
