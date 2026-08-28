@@ -170,6 +170,13 @@ class MeshCoordinator:
         # node's dedup window is seconds, far shorter than a restart.
         self._tid = 0
         self._available = False
+        # BLE address of the proxy node the held link runs through, or None
+        # while nothing is connected. Published by the sensor platform, which
+        # writes it onto the device as a `connections` entry: the GATT link
+        # occupies a connection slot on whichever ESPHome proxy routes it, and
+        # without an address on a device nothing outside this integration can
+        # tell that slot apart from a stuck one.
+        self._proxy_address: str | None = None
         # Last authenticated Secure Network Beacon seen, kept for diagnostics:
         # "does the subnet beacon, and do our keys verify it" answers most
         # support questions in one look.
@@ -322,6 +329,18 @@ class MeshCoordinator:
     def available(self) -> bool:
         """True while the most recent connect/command/probe succeeded."""
         return self._available
+
+    @property
+    def proxy_address(self) -> str | None:
+        """BLE address of the proxy node the link runs through, if connected.
+
+        Deliberately NOT cleared on teardown. The address is what the device's
+        `connections` entry is built from, and a device that drops its BLE
+        address whenever the link is idle would be unresolvable exactly when
+        somebody is asking who holds the slot. It is replaced when a connect
+        lands somewhere else, which is the only moment it becomes wrong.
+        """
+        return self._proxy_address
 
     @property
     def connected(self) -> bool:
@@ -493,6 +512,17 @@ class MeshCoordinator:
 
         self._client = client
         self._controller = controller
+        if address != self._proxy_address:
+            self._proxy_address = address
+            # `_set_available` below notifies on a transition, which already
+            # covers the first connect. Only an address that changes while we
+            # ALREADY believe we are available needs its own notification --
+            # without it the published address would keep naming a node we are
+            # no longer talking to. Kept conditional because a notification is
+            # not free: it makes every lamp re-read itself over the single
+            # proxy slot, which is what `_set_available` is careful to avoid.
+            if self._available:
+                self._notify_listeners()
         self._set_available()
         return controller
 

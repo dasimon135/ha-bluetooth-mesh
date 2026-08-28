@@ -137,6 +137,20 @@ def test_platforms_includes_light() -> None:
     assert Platform.LIGHT in module.PLATFORMS
 
 
+def test_platforms_includes_sensor() -> None:
+    """The proxy sensor is not cosmetic: it is what carries the link's BLE
+    address onto a device, so a platform left unregistered puts the address
+    nowhere and restores the blind spot it exists to close."""
+    pytest.importorskip("homeassistant")
+
+    import importlib
+
+    module = importlib.import_module("custom_components.bluetooth_mesh")
+    from homeassistant.const import Platform
+
+    assert Platform.SENSOR in module.PLATFORMS
+
+
 async def test_setup_and_unload_entry() -> None:
     """Full config-entry setup/unload round trip (skipped without HA).
 

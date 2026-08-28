@@ -59,5 +59,12 @@
     "corrupt_connect_export": {
       "message": "The stored .connect export could not be read ({error}). Reconfigure the entry with a fresh export."
     }
+  },
+  "entity": {
+    "sensor": {
+      "proxy_address": {
+        "name": "Proxy address"
+      }
+    }
   }
 }
