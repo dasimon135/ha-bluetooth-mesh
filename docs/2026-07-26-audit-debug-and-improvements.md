@@ -127,9 +127,16 @@ setting a `self._failed` flag; expose `failed` (or `pump.failure`) and make
 or let commands raise once failed so `_run_connected`'s existing `except`
 already tears down.
 
-### 1.3 (P2) Colour temperature is mirrored for *every* lamp — **DONE (v0.3.0)**
+### 1.3 (P2) Colour temperature is mirrored for *every* lamp — **DONE (v0.3.0, redone in v0.4.9)**
 
-> Gated on the Häfele company identifier (`_INVERTED_CTL_CIDS`).
+> First gated on the Häfele company identifier (`_INVERTED_CTL_CIDS`), then —
+> in 0.4.9 — moved to the per-lamp option this entry offered as its alternative.
+> Issue #7 produced a Häfele lamp that the CID gate was itself inverting, which
+> means the quirk varies *within* a vendor, by model or firmware, and no company
+> identifier can predict it. The suggestion below to default "to the quirk only
+> for known-affected CIDs" was therefore the wrong half of its own choice: the
+> CID now decides nothing, and existing entries were seeded once from the old
+> rule so nothing flipped on upgrade.
 
 `light.py:174-188`. `_mesh_kelvin()` unconditionally sends `min + max - K` to
 work around the Häfele/ThingOS inverted CTL mapping. The README advertises
