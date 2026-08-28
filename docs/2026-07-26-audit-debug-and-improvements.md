@@ -127,10 +127,10 @@ setting a `self._failed` flag; expose `failed` (or `pump.failure`) and make
 or let commands raise once failed so `_run_connected`'s existing `except`
 already tears down.
 
-### 1.3 (P2) Colour temperature is mirrored for *every* lamp — **DONE (v0.3.0, redone in v0.4.9)**
+### 1.3 (P2) Colour temperature is mirrored for *every* lamp — **DONE (v0.3.0, redone in v0.5.0)**
 
 > First gated on the Häfele company identifier (`_INVERTED_CTL_CIDS`), then —
-> in 0.4.9 — moved to the per-lamp option this entry offered as its alternative.
+> in 0.5.0 — moved to the per-lamp option this entry offered as its alternative.
 > Issue #7 produced a Häfele lamp that the CID gate was itself inverting, which
 > means the quirk varies *within* a vendor, by model or firmware, and no company
 > identifier can predict it. The suggestion below to default "to the quirk only

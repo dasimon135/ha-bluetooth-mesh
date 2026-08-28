@@ -46,6 +46,8 @@ from custom_components.bluetooth_mesh.coordinator import (
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "sample.connect.json"
 PROXY_ADDR = "AA:BB:CC:DD:EE:FF"
+# A second proxy for the tests that assert the held address can move.
+OTHER_PROXY_ADDR = "C3:EB:49:65:67:55"
 UNICAST = 0x000C
 
 
@@ -341,6 +343,69 @@ async def test_dead_transport_is_never_reused_by_the_next_command(hass) -> None:
         assert coord._controller is not held  # reconnected instead of reusing
         assert held.stopped is True
         assert coord._controller.calls[-1] == ("set_onoff", UNICAST, False)
+    await coord.async_stop()
+
+
+async def test_the_proxy_address_is_published_once_connected(hass) -> None:
+    """The address is what makes the held slot resolvable outside this
+    integration: the sensor platform writes it onto the device as a
+    `connections` entry. Before the first connect there is none to publish, and
+    inventing one would claim a slot nobody holds."""
+    entry = _make_entry(hass)
+
+    with _patch_transport(FakeController()):
+        coord = MeshCoordinator(hass, entry)
+        assert coord.proxy_address is None
+
+        await coord.async_start()
+        assert coord.proxy_address == PROXY_ADDR
+    await coord.async_stop()
+
+
+async def test_the_proxy_address_survives_a_teardown(hass) -> None:
+    """Dropping it whenever the link goes idle would make the device
+    unresolvable at exactly the moment somebody asks who holds the slot -- and
+    the link being idle is the normal state of an on-demand connection."""
+    entry = _make_entry(hass)
+
+    with _patch_transport(FakeController()):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await coord._teardown()
+
+        assert coord.proxy_address == PROXY_ADDR
+    await coord.async_stop()
+
+
+async def test_a_reconnect_to_another_proxy_republishes_the_address(hass) -> None:
+    """A mesh proxy address is *random static* and the mesh may be reached
+    through a different node entirely, so the published one can go stale while
+    we still believe we are available.
+
+    `_set_available` stays silent without a transition, so this change has to
+    announce itself -- otherwise the device would keep claiming a BLE
+    connection it no longer has, and a slot reader resolving that address would
+    name this device for somebody else's slot.
+    """
+    entry = _make_entry(hass)
+    events: list[str | None] = []
+
+    with _patch_transport(FakeController()):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        coord.async_add_listener(lambda: events.append(coord.proxy_address))
+
+        # Still available, so only the address change can speak here.
+        # Deliberately not PROXY_ADDR: the whole assertion is that a DIFFERENT
+        # address speaks for itself.
+        with patch.object(
+            coordinator_mod, "find_proxy_address", return_value=OTHER_PROXY_ADDR
+        ):
+            await coord._teardown()
+            await coord.async_set_onoff(UNICAST, True)
+
+        assert coord.proxy_address == OTHER_PROXY_ADDR
+        assert events == [OTHER_PROXY_ADDR]
     await coord.async_stop()
 
 

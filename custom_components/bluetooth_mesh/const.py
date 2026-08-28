@@ -38,7 +38,7 @@ DEFAULT_SRC_ADDR = 0
 # mirrored around the exposed range before being sent to those, and to those
 # only: mirroring a spec-conformant lamp inverts warm and cool end to end.
 #
-# Per lamp, not per vendor. It was gated on the company identifier until 0.4.9,
+# Per lamp, not per vendor. It was gated on the company identifier until 0.5.0,
 # when issue #7 produced a Häfele lamp the mirror was itself inverting — so the
 # quirk varies WITHIN a vendor, by model or firmware, and a CID cannot predict
 # it. Stored as a list of addresses rather than a dict of booleans because

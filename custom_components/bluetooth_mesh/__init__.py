@@ -14,7 +14,7 @@ from .btmesh.network_model import NetworkModelError
 from .const import CONF_INVERTED_CTL, DOMAIN, MODEL_LIGHT_CTL
 from .coordinator import MeshCoordinator
 
-PLATFORMS: list[Platform] = [Platform.LIGHT]
+PLATFORMS: list[Platform] = [Platform.LIGHT, Platform.SENSOR]
 
 # The runtime data is the mesh coordinator: it owns the proxy connection, the
 # controller, and the parsed network model the entities enumerate.
@@ -62,9 +62,9 @@ def _seed_inverted_ctl(
     entry: BluetoothMeshConfigEntry,
     coordinator: MeshCoordinator,
 ) -> None:
-    """Write the pre-0.4.9 vendor rule into the per-lamp option, once.
+    """Write the pre-0.5.0 vendor rule into the per-lamp option, once.
 
-    Until 0.4.9 the Light CTL temperature mirror was applied to every Häfele
+    Until 0.5.0 the Light CTL temperature mirror was applied to every Häfele
     lamp unconditionally. It is now a stored per-lamp option, because issue #7
     showed the quirk varies within a vendor. Letting that option default to
     empty would invert the colour temperature of every working install on

@@ -137,6 +137,20 @@ def test_platforms_includes_light() -> None:
     assert Platform.LIGHT in module.PLATFORMS
 
 
+def test_platforms_includes_sensor() -> None:
+    """The proxy sensor is not cosmetic: it is what carries the link's BLE
+    address onto a device, so a platform left unregistered puts the address
+    nowhere and restores the blind spot it exists to close."""
+    pytest.importorskip("homeassistant")
+
+    import importlib
+
+    module = importlib.import_module("custom_components.bluetooth_mesh")
+    from homeassistant.const import Platform
+
+    assert Platform.SENSOR in module.PLATFORMS
+
+
 async def test_setup_and_unload_entry() -> None:
     """Full config-entry setup/unload round trip (skipped without HA).
 
@@ -352,7 +366,7 @@ def _fixture_network():
 async def test_setup_seeds_the_inverted_ctl_option_from_the_hafele_lamps() -> None:
     """An entry that predates the option keeps the behaviour it shipped with.
 
-    Until 0.4.9 every Häfele lamp was mirrored unconditionally. Defaulting the
+    Until 0.5.0 every Häfele lamp was mirrored unconditionally. Defaulting the
     new per-lamp option to empty would invert the colour temperature of every
     working install on upgrade, unasked, so the first setup writes the old rule
     out once as data.

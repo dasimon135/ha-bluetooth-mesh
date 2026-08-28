@@ -300,7 +300,7 @@ class MeshLight(LightEntity):
         cool end to end.
 
         Which lamps are marked is a stored option, not a property of the vendor.
-        It was gated on the company identifier until 0.4.9, when issue #7 turned
+        It was gated on the company identifier until 0.5.0, when issue #7 turned
         up a Häfele lamp that the mirror was itself inverting: the quirk varies
         within a vendor, by model or firmware, so a CID cannot predict it.
         """

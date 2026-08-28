@@ -4,7 +4,44 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.9] — 2026-08-28
+## [0.5.0] — 2026-08-28
+
+### Added
+
+- **The proxy connection is now a device, and its BLE address is on it.** The
+  integration holds one GATT link, to whichever node advertises the network's
+  Network ID, and that link occupies a Bluetooth *connection slot* on the
+  ESPHome proxy routing it for as long as it is held. Nothing in Home Assistant
+  said which address that was: every mesh device is keyed on the network UUID
+  plus a unicast address and carries no `connections` at all.
+
+  A new diagnostic sensor, `Proxy address`, closes that. It lives on a device
+  keyed on the network — never on a lamp, since a mesh reaches many nodes
+  through one proxy and Home Assistant treats `connections` as identity — and
+  it writes the address it is actually connected through onto that device.
+
+  The entity tracks `coordinator.available` like every other entity here, and
+  that half is the point rather than a detail. Naming the address while never
+  reporting trouble would read as permanently healthy and would trade one wrong
+  alarm for a permanent blind spot; going unavailable exactly when the link does
+  gives a slot-accounting tool a real signal to judge the held slot by, instead
+  of guessing from how long the link has been quiet.
+
+  A mesh proxy link is legitimately quiet for hours — it carries traffic only
+  when something on the mesh changes — so that guess was wrong in practice: on
+  2026-08-28 an external slot monitor reported this network's proxy link as a
+  stuck slot while it had been healthy the whole time.
+
+  The address is written with `new_connections`, which **replaces** the set. A
+  mesh proxy advertises a *random static* address: stable while the node is
+  powered, free to change when it is not. Accumulating every address seen would
+  leave the device claiming BLE connections it no longer has, and a reader
+  resolving a stale one would name this device for somebody else's slot.
+
+- **Diagnostics names the mirrored lamps.** `state.inverted_ctl` lists the
+  addresses whose temperature is mirrored before sending. Without it a report of
+  a backwards lamp cannot say whether the inversion is the lamp's or ours — the
+  ambiguity that cost a round trip on #7.
 
 ### Changed
 
@@ -32,12 +69,6 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   manufacturer, which is the honest default now that the identifier is known not
   to predict the quirk.
 
-### Added
-
-- **Diagnostics names the mirrored lamps.** `state.inverted_ctl` lists the
-  addresses whose temperature is mirrored before sending. Without it a report of
-  a backwards lamp cannot say whether the inversion is the lamp's or ours — the
-  ambiguity that cost a round trip on #7.
 
 ## [0.4.8] — 2026-08-28
 
