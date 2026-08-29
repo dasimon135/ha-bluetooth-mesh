@@ -44,7 +44,7 @@
           "src_addr": "Adresse unicast d'émission"
         },
         "data_description": {
-          "inverted_ctl": "Cochez une lampe qui rend du blanc chaud quand Home Assistant affiche du froid, et du froid quand il affiche du chaud. Sa température demandée est alors inversée avant l'envoi. Laissez les autres décochées : inverser une lampe déjà correcte intervertit le chaud et le froid de bout en bout. Le réglage est par lampe car le défaut varie selon le modèle et le micrologiciel d'un même fabricant.",
+          "inverted_ctl": "Cochez une lampe qui rend du blanc chaud quand Home Assistant affiche du froid, et du froid quand il affiche du chaud. Sa température demandée est alors inversée avant l'envoi, à partir de la commande suivante : cocher la case ne recolore pas une lampe déjà allumée. Laissez les autres décochées : inverser une lampe déjà correcte intervertit le chaud et le froid de bout en bout. Le réglage est par lampe car le défaut varie selon le modèle et le micrologiciel d'un même fabricant.",
           "keepalive_seconds": "Durée de maintien de la connexion proxy après la dernière commande. 0 = toujours connecté (le plus réactif ; l'application Häfele ne peut pas utiliser la lampe). Une valeur positive rend la lampe à l'application après ce délai d'inactivité, au prix de quelques secondes de reconnexion à la commande suivante.",
           "src_addr": "L'adresse depuis laquelle Home Assistant émet. 0 la déduit automatiquement, ce qui convient presque toujours. Ne la fixez que si les commandes sont ignorées sans erreur : un export ne liste aucun provisionneur, donc si l'application du fabricant a pris la même adresse, chaque message est rejeté comme un rejeu sans que rien ne le signale."
         }

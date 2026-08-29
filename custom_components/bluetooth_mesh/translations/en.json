@@ -44,7 +44,7 @@
           "src_addr": "Transmit from unicast address"
         },
         "data_description": {
-          "inverted_ctl": "Tick a lamp that shows warm white when Home Assistant says cool, and cool when it says warm. Its requested temperature is then mirrored before being sent. Leave every other lamp unticked: mirroring a lamp that is already correct inverts warm and cool end to end. This is set per lamp because the quirk varies between models and firmware of the same manufacturer.",
+          "inverted_ctl": "Tick a lamp that shows warm white when Home Assistant says cool, and cool when it says warm. Its requested temperature is then mirrored before being sent, from the next command onwards — ticking the box does not re-colour a lamp that is already lit. Leave every other lamp unticked: mirroring a lamp that is already correct inverts warm and cool end to end. This is set per lamp because the quirk varies between models and firmware of the same manufacturer.",
           "keepalive_seconds": "How long to hold the proxy connection after the last command. 0 = always connected (most responsive; the Häfele app cannot use the lamp). A positive value hands the lamp back to the app after that idle time, at the cost of a few seconds to reconnect on the next command.",
           "src_addr": "The address Home Assistant sends from. 0 derives it automatically, which is almost always right. Set it only if commands are ignored with no error: an export lists no provisioner, so if the vendor app claimed the same address, every message is discarded as a replay and nothing anywhere says so."
         }
