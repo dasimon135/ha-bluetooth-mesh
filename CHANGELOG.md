@@ -4,6 +4,41 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] — 2026-08-28
+
+### Changed
+
+- **Which lamps get their colour temperature mirrored is now chosen per lamp,
+  not per manufacturer.** Issue #7 produced the lamp that disproves the old
+  rule: a Häfele node showing warm white when Home Assistant said cool — the
+  mirror this integration applies to every Häfele lamp was itself doing the
+  inverting. Either that lamp is spec-conformant and we were wrong about it, or
+  the vendor list was missing an entry, and no diagnostics dump can tell those
+  two apart. Both readings agree on the same conclusion: the quirk varies
+  *within* a manufacturer, by model or by firmware, so a company identifier
+  cannot predict it.
+
+  Settings → Devices & Services → *Bluetooth Mesh* → **Configure** now lists
+  every colour-temperature lamp under **Lamps with inverted colour
+  temperature**. Tick the ones that show warm when Home Assistant says cool;
+  leave the rest, because mirroring a lamp that is already correct inverts warm
+  and cool end to end. The same network can now hold both kinds, which the
+  vendor list could not express at all.
+
+  **Nothing changes on upgrade.** The first setup after updating writes the old
+  rule into the new option — every Häfele lamp with a CTL server starts ticked —
+  so an install that works today keeps working, and the setting is visible where
+  it can be unticked. A lamp imported later arrives unticked whatever its
+  manufacturer, which is the honest default now that the identifier is known not
+  to predict the quirk.
+
+### Added
+
+- **Diagnostics names the mirrored lamps.** `state.inverted_ctl` lists the
+  addresses whose temperature is mirrored before sending. Without it a report of
+  a backwards lamp cannot say whether the inversion is the lamp's or ours — the
+  ambiguity that cost a round trip on #7.
+
 ## [0.5.0] — 2026-08-28
 
 ### Added

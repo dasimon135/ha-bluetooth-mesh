@@ -18,7 +18,11 @@ pytest.importorskip("pytest_homeassistant_custom_component")
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.bluetooth_mesh.btmesh.network_model import Network
-from custom_components.bluetooth_mesh.const import CONF_CONNECT_JSON, DOMAIN
+from custom_components.bluetooth_mesh.const import (
+    CONF_CONNECT_JSON,
+    CONF_INVERTED_CTL,
+    DOMAIN,
+)
 from custom_components.bluetooth_mesh.diagnostics import (
     async_get_config_entry_diagnostics,
 )
@@ -52,10 +56,11 @@ class FakeCoordinator:
         return self.relays.get(unicast)
 
 
-def _entry(hass) -> MockConfigEntry:
+def _entry(hass, options: dict | None = None) -> MockConfigEntry:
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={CONF_CONNECT_JSON: FIXTURE.read_text(encoding="utf-8")},
+        options=options or {},
         unique_id="0F0E0D0C-0B0A-0908-0706-050403020100",
     )
     entry.add_to_hass(hass)
@@ -246,3 +251,26 @@ async def test_probe_is_skipped_while_disconnected(hass) -> None:
 
     assert dump["probe"]["ran"] is False
     assert entry.runtime_data.probed == []
+
+
+async def test_dump_names_the_lamps_whose_temperature_is_mirrored(hass) -> None:
+    """A dump has to be able to answer "is the inversion ours?".
+
+    Issue #7 cost a round trip on exactly that question: a lamp showed warm
+    when Home Assistant said cool, and nothing in the dump distinguished a
+    natively inverted lamp from one this integration was inverting itself.
+    """
+    entry = _entry(hass, {CONF_INVERTED_CTL: [UNICAST]})
+
+    dump = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert dump["state"]["inverted_ctl"] == ["0x000c"]
+
+
+async def test_dump_reports_no_mirrored_lamp_as_an_empty_list(hass) -> None:
+    """Empty is an answer, and a different one from the key being missing."""
+    entry = _entry(hass)
+
+    dump = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert dump["state"]["inverted_ctl"] == []

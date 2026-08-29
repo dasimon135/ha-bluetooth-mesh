@@ -50,6 +50,18 @@ The integration configures that filter, so:
 * colour temperature is not read back yet (there is no CTL Temperature getter
   in the library), so it still reflects the last command.
 
+Some lamps map colour temperature the wrong way round: they glow warm white when
+Home Assistant says cool. Tick those under **Lamps with inverted colour
+temperature** (Settings → Devices & Services → *Bluetooth Mesh* → **Configure**)
+and their requested temperature is mirrored before being sent. Leave the others
+alone — mirroring a lamp that is already correct inverts warm and cool end to
+end. It is a per-lamp setting rather than a per-manufacturer one because the
+quirk varies between models and firmware of the same brand.
+
+The mirror applies when a command is sent, so a change takes effect from the
+next one: ticking or unticking the box does not re-colour a lamp that is already
+lit.
+
 Adding a node, or refreshing a key, is a **Reconfigure** on the existing entry:
 paste the new export and keep every entity id and its history. If something is
 not working, **Download diagnostics** on the integration reports the Network ID

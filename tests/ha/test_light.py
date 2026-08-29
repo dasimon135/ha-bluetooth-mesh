@@ -29,6 +29,7 @@ from custom_components.bluetooth_mesh.btmesh.network_model import (
     Network,
     Node,
 )
+from custom_components.bluetooth_mesh.const import CONF_INVERTED_CTL
 from custom_components.bluetooth_mesh.light import MeshLight, async_setup_entry
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "sample.connect.json"
@@ -116,24 +117,34 @@ def _onoff_only_network() -> Network:
     return replace(base, nodes=(node,))
 
 
-def _light(network: Network | None = None, unicast: int = UNICAST) -> tuple[
-    MeshLight, FakeCoordinator
-]:
+def _light(
+    network: Network | None = None,
+    unicast: int = UNICAST,
+    *,
+    invert_ctl: bool = False,
+) -> tuple[MeshLight, FakeCoordinator]:
     """Build a MeshLight for the node at ``unicast`` and its fake coordinator."""
     net = network or _fixture_network()
     coordinator = FakeCoordinator(net)
     node = next(n for n in net.nodes if n.unicast == unicast)
-    light = MeshLight(coordinator, node)
+    light = MeshLight(coordinator, node, invert_ctl=invert_ctl)
     # Entities under test are not added to hass, so bypass the HA state-machine
     # write (we assert on the optimistic cache directly).
     light.async_write_ha_state = lambda: None  # type: ignore[method-assign]
     return light, coordinator
 
 
+def _entry(coordinator: FakeCoordinator, options: dict | None = None):
+    """A minimal config-entry stand-in: runtime data plus the stored options."""
+    return type(
+        "Entry", (), {"runtime_data": coordinator, "options": options or {}}
+    )()
+
+
 async def test_setup_entry_creates_entity_with_ctl(hass) -> None:
     """The CTL-capable node yields one COLOR_TEMP light with the right unique_id."""
     coordinator = FakeCoordinator(_fixture_network())
-    entry = type("Entry", (), {"runtime_data": coordinator})()
+    entry = _entry(coordinator)
 
     added: list = []
     await async_setup_entry(hass, entry, lambda ents: added.extend(ents))
@@ -169,14 +180,14 @@ async def test_turn_on_color_temp_while_off_also_turns_on(hass) -> None:
     element 1 (unicast 0x000D), so a temperature change is routed there and
     carries NO lightness — brightness is untouched. That message does not switch
     the light on, so a bare temperature turn-on of an off lamp also sends OnOff
-    ON. The lamp maps temperature inversely, so the wire value is mirrored
-    (2700+6500-4000 = 5200) while HA still shows 4000.
+    ON. The lamp is unmarked, so the Kelvin goes out as requested; the mirror
+    has its own tests.
     """
     light, coordinator = _light()  # a fresh entity is off
 
     await light.async_turn_on(color_temp_kelvin=4000)
 
-    assert ("set_ctl_temperature", 0x000D, 5200) in coordinator.calls
+    assert ("set_ctl_temperature", 0x000D, 4000) in coordinator.calls
     assert ("set_onoff", UNICAST, True) in coordinator.calls  # actually lit up
     assert light.color_temp_kelvin == 4000  # display keeps the requested value
     assert light.is_on is True
@@ -195,7 +206,7 @@ async def test_turn_on_color_temp_while_on_skips_redundant_onoff(hass) -> None:
 
     await light.async_turn_on(color_temp_kelvin=4000)
 
-    assert coordinator.calls == [("set_ctl_temperature", 0x000D, 5200)]
+    assert coordinator.calls == [("set_ctl_temperature", 0x000D, 4000)]
     assert light.color_temp_kelvin == 4000
     assert light.is_on is True
 
@@ -203,8 +214,8 @@ async def test_turn_on_color_temp_while_on_skips_redundant_onoff(hass) -> None:
 async def test_turn_on_color_temp_without_temp_element_uses_ctl_set(hass) -> None:
     """A CTL node WITHOUT a 0x1306 element falls back to Light CTL Set.
 
-    Then temperature must carry a lightness (full when none cached), mirrored on
-    the wire exactly as before.
+    Then temperature must carry a lightness (full when none cached). The lamp is
+    unmarked, so the Kelvin itself goes out as requested.
     """
     # element 0 has the CTL server (0x1303) but there is NO 0x1306 element.
     element0 = Element(
@@ -229,7 +240,7 @@ async def test_turn_on_color_temp_without_temp_element_uses_ctl_set(hass) -> Non
 
     await light.async_turn_on(color_temp_kelvin=4000)
 
-    assert coordinator.calls[-1] == ("set_ctl", 0x0030, 1.0, 5200)
+    assert coordinator.calls[-1] == ("set_ctl", 0x0030, 1.0, 4000)
     assert light.color_temp_kelvin == 4000
 
 
@@ -435,13 +446,13 @@ def _standard_ctl_network() -> Network:
     return replace(_fixture_network(), nodes=(node,))
 
 
-async def test_standard_vendor_temperature_is_not_mirrored(hass) -> None:
-    """The mirror is a Häfele quirk, not the spec.
+async def test_an_unmarked_lamp_is_not_mirrored(hass) -> None:
+    """The mirror is a per-lamp quirk, not the spec.
 
-    Häfele/ThingOS lamps map Light CTL temperature inversely, so the value is
-    mirrored around the exposed range before sending. Applying that to a
-    spec-conformant lamp inverts warm and cool end to end — and the README
-    advertises standard SIG mesh lights.
+    Some lamps map Light CTL temperature inversely, so the value is mirrored
+    around the exposed range before sending. Applying that to a spec-conformant
+    lamp inverts warm and cool end to end — and the README advertises standard
+    SIG mesh lights.
     """
     light, coordinator = _light(_standard_ctl_network(), unicast=0x0040)
 
@@ -451,13 +462,42 @@ async def test_standard_vendor_temperature_is_not_mirrored(hass) -> None:
     assert light.color_temp_kelvin == 4000
 
 
-async def test_hafele_temperature_is_still_mirrored(hass) -> None:
-    """The fixture node is Häfele (CID 0x07E9): 2700 + 6500 - 4000 = 5200."""
-    light, coordinator = _light()
+async def test_a_marked_lamp_is_mirrored(hass) -> None:
+    """Mirrored around the exposed range: 2700 + 6500 - 4000 = 5200."""
+    light, coordinator = _light(invert_ctl=True)
 
     await light.async_turn_on(color_temp_kelvin=4000)
 
     assert ("set_ctl_temperature", 0x000D, 5200) in coordinator.calls
+
+
+# The two below invert the rule this integration used to apply. Until 0.5.1 the
+# mirror was gated on the company identifier alone, and issue #7 produced the
+# lamp that disproves it: a Häfele node whose colour temperature came out
+# backwards *because we mirrored it*. The quirk varies within a vendor, by model
+# or firmware, so the CID must now decide nothing at all — asserted in both
+# directions, because a half-removed rule would still pass one of them.
+
+
+async def test_a_hafele_lamp_left_unmarked_is_not_mirrored(hass) -> None:
+    """The fixture node is Häfele (CID 0x07E9) and must still pass through."""
+    light, coordinator = _light()
+
+    await light.async_turn_on(color_temp_kelvin=4000)
+
+    assert ("set_ctl_temperature", 0x000D, 4000) in coordinator.calls
+
+
+async def test_a_non_hafele_lamp_marked_inverted_is_mirrored(hass) -> None:
+    """Node 0x0040 is Nordic (CID 0x0059), and marked, so it is mirrored."""
+    light, coordinator = _light(
+        _standard_ctl_network(), unicast=0x0040, invert_ctl=True
+    )
+
+    await light.async_turn_on(color_temp_kelvin=4000)
+
+    assert ("set_ctl", 0x0040, 1.0, 5200) in coordinator.calls
+    assert light.color_temp_kelvin == 4000
 
 
 # --------------------------------- addressing the element that hosts a model
@@ -580,7 +620,7 @@ async def test_setup_creates_a_light_for_lighting_on_a_secondary_element(
     inconsistency, not a policy.
     """
     coordinator = FakeCoordinator(_element0_has_no_lighting_network())
-    entry = type("Entry", (), {"runtime_data": coordinator})()
+    entry = _entry(coordinator)
 
     added: list = []
     await async_setup_entry(hass, entry, lambda ents: added.extend(ents))
@@ -608,9 +648,48 @@ async def test_a_node_with_no_lighting_server_gets_no_entity(hass) -> None:
         ),
     )
     coordinator = FakeCoordinator(replace(_fixture_network(), nodes=(node,)))
-    entry = type("Entry", (), {"runtime_data": coordinator})()
+    entry = _entry(coordinator)
 
     added: list = []
     await async_setup_entry(hass, entry, lambda ents: added.extend(ents))
 
     assert added == []
+
+
+async def test_setup_entry_marks_only_the_lamps_listed_in_the_option(hass) -> None:
+    """The stored option, not the company identifier, decides who is mirrored.
+
+    The fixture node is Häfele, so under the pre-0.5.1 rule it would be
+    mirrored either way. Asserting it from the option means listing it and
+    seeing the mirror, then not listing it and seeing the value pass through.
+    """
+    coordinator = FakeCoordinator(_fixture_network())
+    added: list = []
+    await async_setup_entry(
+        hass,
+        _entry(coordinator, {CONF_INVERTED_CTL: [UNICAST]}),
+        lambda ents: added.extend(ents),
+    )
+    light = added[0]
+    light.async_write_ha_state = lambda: None  # type: ignore[method-assign]
+
+    await light.async_turn_on(color_temp_kelvin=4000)
+
+    assert ("set_ctl_temperature", 0x000D, 5200) in coordinator.calls
+
+
+async def test_setup_entry_leaves_a_lamp_absent_from_the_option_alone(hass) -> None:
+    """Same node, same vendor, not listed: the Kelvin goes out untouched."""
+    coordinator = FakeCoordinator(_fixture_network())
+    added: list = []
+    await async_setup_entry(
+        hass,
+        _entry(coordinator, {CONF_INVERTED_CTL: []}),
+        lambda ents: added.extend(ents),
+    )
+    light = added[0]
+    light.async_write_ha_state = lambda: None  # type: ignore[method-assign]
+
+    await light.async_turn_on(color_temp_kelvin=4000)
+
+    assert ("set_ctl_temperature", 0x000D, 4000) in coordinator.calls

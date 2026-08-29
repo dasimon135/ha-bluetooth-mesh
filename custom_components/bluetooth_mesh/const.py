@@ -33,6 +33,24 @@ DEFAULT_KEEPALIVE = 0
 CONF_SRC_ADDR = "src_addr"
 DEFAULT_SRC_ADDR = 0
 
+# Options-flow key: the unicast addresses whose Light CTL server maps colour
+# temperature INVERSELY — asking for warm produces cool. The requested Kelvin is
+# mirrored around the exposed range before being sent to those, and to those
+# only: mirroring a spec-conformant lamp inverts warm and cool end to end.
+#
+# Per lamp, not per vendor. It was gated on the company identifier until 0.5.1,
+# when issue #7 produced a Häfele lamp the mirror was itself inverting — so the
+# quirk varies WITHIN a vendor, by model or firmware, and a CID cannot predict
+# it. Stored as a list of addresses rather than a dict of booleans because
+# options are serialised to JSON, which has no integer keys: a dict comes back
+# keyed by strings after a restart and every lookup silently misses.
+#
+# Absent and empty mean different things. Absent is an entry that predates the
+# option, and the first setup seeds it from the old vendor rule so no working
+# install flips on upgrade; empty is a user who unchecked every lamp, and must
+# be left alone.
+CONF_INVERTED_CTL = "inverted_ctl"
+
 # SIG model identifiers the integration drives (spec Mesh Model §6/§7). They
 # live here rather than in ``light.py`` because the coordinator needs them too:
 # the AppKey to encrypt with is the one THESE models are bound to.

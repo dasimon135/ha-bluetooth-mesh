@@ -321,3 +321,133 @@ def test_every_shipped_language_covers_every_string() -> None:
     for path in translations:
         keys = _paths(json.loads(path.read_text(encoding="utf-8")))
         assert keys == reference, f"{path.name} diverges from strings.json"
+
+
+# ------------------------------------------------ seeding the CTL inversion
+
+
+def _seeding_harness(options: dict, network):
+    """A mocked hass/entry pair whose ``async_update_entry`` really applies.
+
+    The seed is only correct if it can be observed as state, not just as a
+    call: the regression that matters is what a *second* setup does to an
+    option a first one already wrote.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    hass = MagicMock()
+    hass.config_entries.async_forward_entry_setups = AsyncMock(return_value=None)
+
+    entry = MagicMock()
+    entry.options = dict(options)
+
+    def _apply(target, **kwargs):
+        if "options" in kwargs:
+            target.options = kwargs["options"]
+
+    hass.config_entries.async_update_entry = MagicMock(side_effect=_apply)
+
+    coordinator = MagicMock()
+    coordinator.async_start = AsyncMock(return_value=None)
+    coordinator.network = network
+    return hass, entry, coordinator
+
+
+def _fixture_network():
+    """The fabricated sample network: node 0x000C is Häfele and hosts CTL."""
+    from custom_components.bluetooth_mesh.btmesh.network_model import Network
+
+    fixture = (
+        Path(__file__).resolve().parents[1] / "fixtures" / "sample.connect.json"
+    )
+    return Network.from_connect_file(str(fixture))
+
+
+async def test_setup_seeds_the_inverted_ctl_option_from_the_hafele_lamps() -> None:
+    """An entry that predates the option keeps the behaviour it shipped with.
+
+    Until 0.5.1 every Häfele lamp was mirrored unconditionally. Defaulting the
+    new per-lamp option to empty would invert the colour temperature of every
+    working install on upgrade, unasked, so the first setup writes the old rule
+    out once as data.
+    """
+    pytest.importorskip("pytest_homeassistant_custom_component")
+
+    import importlib
+    from unittest.mock import patch
+
+    from custom_components.bluetooth_mesh.const import CONF_INVERTED_CTL
+
+    module = importlib.import_module("custom_components.bluetooth_mesh")
+    hass, entry, coordinator = _seeding_harness({}, _fixture_network())
+
+    with patch.object(module, "MeshCoordinator", return_value=coordinator):
+        assert await module.async_setup_entry(hass, entry) is True
+
+    assert entry.options[CONF_INVERTED_CTL] == [0x000C]
+
+
+async def test_setup_seeds_only_nodes_that_host_a_ctl_server() -> None:
+    """A Häfele node with Generic OnOff alone has no temperature to invert."""
+    pytest.importorskip("pytest_homeassistant_custom_component")
+
+    import importlib
+    from dataclasses import replace
+    from unittest.mock import patch
+
+    from custom_components.bluetooth_mesh.btmesh.network_model import (
+        Element,
+        Model,
+        Node,
+    )
+    from custom_components.bluetooth_mesh.const import CONF_INVERTED_CTL
+
+    module = importlib.import_module("custom_components.bluetooth_mesh")
+    onoff_only = Node(
+        uuid="11112222-3333-4444-5555-666677778888",
+        unicast=0x0020,
+        device_key=bytes(16),
+        cid=0x07E9,
+        name="OnOff Only",
+        elements=(
+            Element(
+                index=0,
+                unicast=0x0020,
+                models=(Model(model_id=0x1000, bound_appkey_indexes=(0,)),),
+            ),
+        ),
+    )
+    network = replace(_fixture_network(), nodes=(onoff_only,))
+    hass, entry, coordinator = _seeding_harness({}, network)
+
+    with patch.object(module, "MeshCoordinator", return_value=coordinator):
+        assert await module.async_setup_entry(hass, entry) is True
+
+    assert entry.options[CONF_INVERTED_CTL] == []
+
+
+async def test_setup_leaves_an_emptied_inverted_ctl_option_alone() -> None:
+    """Unchecking every lamp must survive a restart.
+
+    The seed keys off the option being ABSENT, not off it being falsy. Testing
+    the value for truth instead would re-seed a user who deliberately emptied
+    the list — silently putting back the mirror they just removed, on every
+    restart, with nothing anywhere to say so.
+    """
+    pytest.importorskip("pytest_homeassistant_custom_component")
+
+    import importlib
+    from unittest.mock import patch
+
+    from custom_components.bluetooth_mesh.const import CONF_INVERTED_CTL
+
+    module = importlib.import_module("custom_components.bluetooth_mesh")
+    hass, entry, coordinator = _seeding_harness(
+        {CONF_INVERTED_CTL: []}, _fixture_network()
+    )
+
+    with patch.object(module, "MeshCoordinator", return_value=coordinator):
+        assert await module.async_setup_entry(hass, entry) is True
+
+    assert entry.options[CONF_INVERTED_CTL] == []
+    hass.config_entries.async_update_entry.assert_not_called()

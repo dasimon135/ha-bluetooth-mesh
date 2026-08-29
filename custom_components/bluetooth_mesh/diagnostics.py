@@ -20,7 +20,7 @@ from homeassistant.core import HomeAssistant
 
 from . import BluetoothMeshConfigEntry
 from .btmesh.crypto import k3
-from .const import CONTROLLED_MODEL_IDS
+from .const import CONF_INVERTED_CTL, CONTROLLED_MODEL_IDS
 from .mesh_transport import discovered_proxies
 
 # How many nodes the composition probe interrogates. Each one is a mesh round
@@ -155,6 +155,14 @@ async def async_get_config_entry_diagnostics(
             # peers, which discard it without a trace.
             "src_addr": f"{coordinator.src_addr:#06x}",
             "keepalive_seconds": coordinator.keepalive_seconds,
+            # The lamps whose colour temperature we mirror before sending. A
+            # lamp reported as showing warm when Home Assistant says cool is
+            # either natively inverted or being inverted BY US, and without
+            # this line a dump cannot tell the two apart (issue #7).
+            "inverted_ctl": [
+                f"{unicast:#06x}"
+                for unicast in entry.options.get(CONF_INVERTED_CTL, ())
+            ],
         },
         # What each node says it IS, asked under its device key. The section
         # above is the vendor app's account of the network; this is the
