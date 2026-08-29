@@ -188,6 +188,10 @@ class MeshLight(LightEntity):
         self._is_on: bool | None = None
         self._brightness: int | None = None
         self._color_temp_kelvin: int | None = None
+        # The exposed range starts as the conventional default and is replaced
+        # by the lamp's own the first time it answers. Asked once: it is a
+        # property of the device, not a state.
+        self._range_read = False
 
     # -------------------------------------------------------------- lifecycle
 
@@ -243,7 +247,41 @@ class MeshLight(LightEntity):
             level = await self._coordinator.async_get_lightness(self._lightness_unicast)
             if level is not None:
                 self._brightness = self._level_to_brightness(level)
+        if self._attr_color_mode is ColorMode.COLOR_TEMP:
+            await self._refresh_ctl()
         self.async_write_ha_state()
+
+    async def _refresh_ctl(self) -> None:
+        """Read the lamp's colour temperature, and once, the range it works in.
+
+        No on/off gate, unlike brightness: that one is skipped on an off lamp
+        because an off lamp reports lightness 0, which is not a brightness worth
+        showing. A temperature is held across off/on and has no such problem.
+
+        The range is asked for once. It changes the exposed limits — and with
+        them the mirror's pivot — so a lamp whose real range is not the assumed
+        2700..6500 stops being quietly mis-mirrored. A silent or invalid answer
+        leaves the default standing rather than collapsing the range to nothing.
+        """
+        if not self._range_read:
+            self._range_read = True
+            ctl_range = await self._coordinator.async_get_ctl_temperature_range(
+                self._ctl_unicast
+            )
+            if ctl_range is not None:
+                self._attr_min_color_temp_kelvin = ctl_range[0]
+                self._attr_max_color_temp_kelvin = ctl_range[1]
+
+        # The Temperature server lives on its own element; a node without one
+        # answers Light CTL instead, mirroring the fallback the send path takes.
+        if self._ctl_temp_unicast is not None:
+            kelvin = await self._coordinator.async_get_ctl_temperature(
+                self._ctl_temp_unicast
+            )
+        else:
+            kelvin = await self._coordinator.async_get_ctl(self._ctl_unicast)
+        if kelvin is not None:
+            self._color_temp_kelvin = self._ha_kelvin(kelvin)
 
     # ------------------------------------------------------------- properties
 
@@ -304,8 +342,30 @@ class MeshLight(LightEntity):
         up a Häfele lamp that the mirror was itself inverting: the quirk varies
         within a vendor, by model or firmware, so a CID cannot predict it.
         """
-        if not self._invert_ctl:
-            return kelvin
+        return self._mirror(kelvin) if self._invert_ctl else kelvin
+
+    def _ha_kelvin(self, kelvin: int) -> int:
+        """The value this lamp's CTL server reported → what to display.
+
+        A marked lamp reports the temperature it was *sent*, which is the
+        mirrored one: ask for 2700 K, we send 6500 K, and the lamp answers
+        6500 K. Showing that raw would put a wrong number in front of exactly
+        the users the option exists for.
+
+        Same reflection as outbound, because it is its own inverse. Two names
+        rather than one so the direction is legible where it is called — a
+        single ``_ctl_kelvin`` used both ways reads as a bug.
+        """
+        return self._mirror(kelvin) if self._invert_ctl else kelvin
+
+    def _mirror(self, kelvin: int) -> int:
+        """Reflect a Kelvin value around the midpoint of the EXPOSED range.
+
+        The range matters: a lamp maps its temperature inversely within its own
+        limits, so reflecting around an assumed 2700..6500 is off-centre by
+        twice the difference of the midpoints on any lamp that is not one.
+        Since the range is read from the lamp, this follows it for free.
+        """
         return (
             self._attr_min_color_temp_kelvin
             + self._attr_max_color_temp_kelvin

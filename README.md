@@ -47,8 +47,9 @@ The integration configures that filter, so:
 * a light whose state has not been read yet reports `unknown` rather than
   guessing `off` — an invented state is one another integration can act on and
   make true;
-* colour temperature is not read back yet (there is no CTL Temperature getter
-  in the library), so it still reflects the last command.
+* colour temperature is read back too, and the lamp is asked once for the
+  Kelvin range it actually tracks — so the slider offers that lamp's real
+  extremes instead of a conventional 2700–6500 guess.
 
 Some lamps map colour temperature the wrong way round: they glow warm white when
 Home Assistant says cool. Tick those under **Lamps with inverted colour
@@ -60,7 +61,9 @@ quirk varies between models and firmware of the same brand.
 
 The mirror applies when a command is sent, so a change takes effect from the
 next one: ticking or unticking the box does not re-colour a lamp that is already
-lit.
+lit. It reflects around the range the lamp reports, so a lamp whose limits are
+not the conventional 2700–6500 is mirrored around its own midpoint rather than
+an assumed one.
 
 Adding a node, or refreshing a key, is a **Reconfigure** on the existing entry:
 paste the new export and keep every entity id and its history. If something is

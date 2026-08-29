@@ -45,6 +45,8 @@ class FakeCoordinator:
         # What each node answers to the device-keyed probe (None = silence).
         self.compositions: dict[int, object] = {}
         self.relays: dict[int, object] = {}
+        # What each CTL node answers to the range request (absent = silence).
+        self.ctl_ranges: dict[int, tuple[int, int]] = {}
         self.probed: list[int] = []
 
     async def async_get_composition(self, unicast: int):
@@ -54,6 +56,10 @@ class FakeCoordinator:
     async def async_get_relay(self, unicast: int):
         self.probed.append(unicast)
         return self.relays.get(unicast)
+
+    async def async_get_ctl_temperature_range(self, unicast: int):
+        self.probed.append(unicast)
+        return self.ctl_ranges.get(unicast)
 
 
 def _entry(hass, options: dict | None = None) -> MockConfigEntry:
@@ -274,3 +280,27 @@ async def test_dump_reports_no_mirrored_lamp_as_an_empty_list(hass) -> None:
     dump = await async_get_config_entry_diagnostics(hass, entry)
 
     assert dump["state"]["inverted_ctl"] == []
+
+
+async def test_probe_reports_the_kelvin_range_a_ctl_node_claims(hass) -> None:
+    """The mirror pivots on this range, so a dump that omits it cannot explain
+    a lamp whose inversion lands off-centre — the same blind spot that cost a
+    round trip on #7, one layer down.
+    """
+    entry = _entry(hass)
+    entry.runtime_data.relays = {UNICAST: _relay()}
+    entry.runtime_data.ctl_ranges = {UNICAST: (2000, 7000)}
+
+    dump = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert dump["probe"]["nodes"][0]["ctl_range"] == ["2000", "7000"]
+
+
+async def test_probe_reports_a_silent_range_as_null(hass) -> None:
+    """Absent is an answer: it says the default is what the entity is using."""
+    entry = _entry(hass)
+    entry.runtime_data.relays = {UNICAST: _relay()}
+
+    dump = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert dump["probe"]["nodes"][0]["ctl_range"] is None

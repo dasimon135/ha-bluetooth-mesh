@@ -680,6 +680,26 @@ class MeshCoordinator:
             lambda c: c.get_lightness(unicast, timeout=STATUS_TIMEOUT)
         )
 
+    async def async_get_ctl_temperature(self, unicast: int) -> int | None:
+        """Read the settled Light CTL temperature (Kelvin) from ``unicast``."""
+        return await self._run_connected(
+            lambda c: c.get_ctl_temperature(unicast, timeout=STATUS_TIMEOUT)
+        )
+
+    async def async_get_ctl(self, unicast: int) -> int | None:
+        """Read temperature via Light CTL, for a node with no 0x1306 element."""
+        return await self._run_connected(
+            lambda c: c.get_ctl(unicast, timeout=STATUS_TIMEOUT)
+        )
+
+    async def async_get_ctl_temperature_range(
+        self, unicast: int
+    ) -> tuple[int, int] | None:
+        """Read the lamp's own Kelvin limits; None if it reports none."""
+        return await self._run_connected(
+            lambda c: c.get_ctl_temperature_range(unicast, timeout=STATUS_TIMEOUT)
+        )
+
     async def async_set_lightness(
         self, unicast: int, level_0_1: float
     ) -> int | None:

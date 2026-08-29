@@ -47,6 +47,8 @@ class FakeCoordinator:
         available: bool = True,
         onoff: bool | None = True,
         lightness: int | None = 0x8000,
+        ctl_temperature: int | None = 4000,
+        ctl_range: tuple[int, int] | None = None,
     ) -> None:
         self.network = network
         self.available = available
@@ -54,6 +56,10 @@ class FakeCoordinator:
         # What the lamp reports when asked (None = it stayed silent).
         self.onoff = onoff
         self.lightness = lightness
+        # What the lamp reports for temperature, and the range it claims
+        # (None = it stayed silent / has none to give).
+        self.ctl_temperature = ctl_temperature
+        self.ctl_range = ctl_range
         self.listeners: list = []
 
     def async_add_listener(self, callback_):
@@ -91,6 +97,20 @@ class FakeCoordinator:
     async def async_set_ctl_temperature(self, unicast: int, kelvin: int) -> int:
         self.calls.append(("set_ctl_temperature", unicast, kelvin))
         return kelvin
+
+    async def async_get_ctl_temperature(self, unicast: int) -> int | None:
+        self.calls.append(("get_ctl_temperature", unicast))
+        return self.ctl_temperature
+
+    async def async_get_ctl(self, unicast: int) -> int | None:
+        self.calls.append(("get_ctl", unicast))
+        return self.ctl_temperature
+
+    async def async_get_ctl_temperature_range(
+        self, unicast: int
+    ) -> tuple[int, int] | None:
+        self.calls.append(("get_ctl_temperature_range", unicast))
+        return self.ctl_range
 
 
 def _fixture_network() -> Network:
@@ -693,3 +713,148 @@ async def test_setup_entry_leaves_a_lamp_absent_from_the_option_alone(hass) -> N
     await light.async_turn_on(color_temp_kelvin=4000)
 
     assert ("set_ctl_temperature", 0x000D, 4000) in coordinator.calls
+
+
+# ------------------------------ reading the temperature, and the lamp's range
+
+
+async def test_refresh_reads_the_colour_temperature(hass) -> None:
+    """The last attribute that only ever reflected the last command.
+
+    On/off and brightness have been read from the lamp since 0.2/0.3; colour
+    temperature was still whatever Home Assistant last sent, so a change made
+    from the vendor app or a wall remote never showed up.
+    """
+    light, coordinator = _light()
+    coordinator.ctl_temperature = 3200
+
+    await light.async_refresh_state()
+
+    assert ("get_ctl_temperature", 0x000D) in coordinator.calls
+    assert light.color_temp_kelvin == 3200
+
+
+async def test_a_read_temperature_is_un_mirrored_for_display(hass) -> None:
+    """A marked lamp reports the value it was SENT, which is the mirrored one.
+
+    Showing it raw would display a wrong Kelvin on exactly the lamps the option
+    exists for: ask for 2700, we send 6500, the lamp says 6500, and the UI would
+    jump to 6500. The mirror is its own inverse, so the same reflection undoes it.
+    """
+    light, coordinator = _light(invert_ctl=True)
+    coordinator.ctl_temperature = 6500  # what the lamp holds after a 2700 request
+
+    await light.async_refresh_state()
+
+    assert light.color_temp_kelvin == 2700
+
+
+async def test_refresh_reads_the_range_and_exposes_it(hass) -> None:
+    """The exposed limits stop being a guess once the lamp has answered."""
+    light, coordinator = _light()
+    coordinator.ctl_range = (2000, 7000)
+
+    await light.async_refresh_state()
+
+    assert ("get_ctl_temperature_range", UNICAST) in coordinator.calls
+    assert light.min_color_temp_kelvin == 2000
+    assert light.max_color_temp_kelvin == 7000
+
+
+async def test_the_range_is_read_once_not_on_every_refresh(hass) -> None:
+    """It is a property of the device, not a state.
+
+    Asking again on every refresh would spend a mesh round trip per reconnect
+    for an answer that cannot have changed.
+    """
+    light, coordinator = _light()
+    coordinator.ctl_range = (2000, 7000)
+
+    await light.async_refresh_state()
+    await light.async_refresh_state()
+
+    assert [c[0] for c in coordinator.calls].count("get_ctl_temperature_range") == 1
+
+
+async def test_a_silent_range_leaves_the_default_standing(hass) -> None:
+    """No answer must not collapse the exposed range to nothing."""
+    light, coordinator = _light()
+    coordinator.ctl_range = None
+
+    await light.async_refresh_state()
+
+    assert light.min_color_temp_kelvin == 2700
+    assert light.max_color_temp_kelvin == 6500
+
+
+async def test_the_mirror_pivots_on_the_range_that_was_read(hass) -> None:
+    """The inversion is around the lamp's OWN midpoint, not an assumed one.
+
+    2000 + 7000 - 3000 = 6000. Under the hard-coded 2700..6500 it would have
+    been 6200 — the error the constants were quietly introducing on any lamp
+    whose real range is not the typical tunable-white band.
+    """
+    light, coordinator = _light(invert_ctl=True)
+    coordinator.ctl_range = (2000, 7000)
+    await light.async_refresh_state()
+    coordinator.calls.clear()
+
+    await light.async_turn_on(color_temp_kelvin=3000)
+
+    assert ("set_ctl_temperature", 0x000D, 6000) in coordinator.calls
+
+
+async def test_a_lamp_whose_real_range_is_the_default_sends_what_it_always_sent(
+    hass,
+) -> None:
+    """The "nothing changes on upgrade" guarantee, asserted rather than hoped.
+
+    Reading the range only moves the mirror for lamps the constants were wrong
+    about. A lamp that really is 2700..6500 — the typical tunable white — must
+    put exactly the same bytes on the wire as it did in 0.5.1.
+    """
+    light, coordinator = _light(invert_ctl=True)
+    coordinator.ctl_range = (2700, 6500)
+    await light.async_refresh_state()
+    coordinator.calls.clear()
+
+    await light.async_turn_on(color_temp_kelvin=4000)
+
+    assert ("set_ctl_temperature", 0x000D, 5200) in coordinator.calls
+
+
+async def test_a_node_without_a_temperature_element_reads_through_light_ctl(
+    hass,
+) -> None:
+    """Sending already falls back to Light CTL Set; reading has to match.
+
+    Otherwise such a node would be written and never read — an asymmetry with
+    no defensible explanation.
+    """
+    element0 = Element(
+        index=0,
+        unicast=0x0030,
+        models=(
+            Model(model_id=0x1000, bound_appkey_indexes=(0,)),
+            Model(model_id=0x1300, bound_appkey_indexes=(0,)),
+            Model(model_id=0x1303, bound_appkey_indexes=(0,)),
+        ),
+    )
+    node = Node(
+        uuid="99998888-7777-6666-5555-444433332222",
+        unicast=0x0030,
+        device_key=bytes(16),
+        cid=0x07E9,
+        name="CTL no temp element",
+        elements=(element0,),
+    )
+    light, coordinator = _light(
+        replace(_fixture_network(), nodes=(node,)), unicast=0x0030
+    )
+    coordinator.ctl_temperature = 3200
+
+    await light.async_refresh_state()
+
+    assert ("get_ctl", 0x0030) in coordinator.calls
+    assert not any(c[0] == "get_ctl_temperature" for c in coordinator.calls)
+    assert light.color_temp_kelvin == 3200

@@ -20,6 +20,7 @@ from .access import (
     OP_CONFIG_RELAY_STATUS,
     OP_GENERIC_ONOFF_STATUS,
     OP_LIGHT_CTL_STATUS,
+    OP_LIGHT_CTL_TEMPERATURE_RANGE_STATUS,
     OP_LIGHT_CTL_TEMPERATURE_STATUS,
     OP_LIGHT_LIGHTNESS_STATUS,
     AccessError,
@@ -30,7 +31,10 @@ from .access import (
     encode_opcode,
     generic_onoff_get,
     generic_onoff_set,
+    light_ctl_get,
     light_ctl_set,
+    light_ctl_temperature_get,
+    light_ctl_temperature_range_get,
     light_ctl_temperature_set,
     light_lightness_get,
     light_lightness_set,
@@ -38,6 +42,7 @@ from .access import (
     parse_config_relay_status,
     parse_generic_onoff_status,
     parse_light_ctl_status,
+    parse_light_ctl_temperature_range_status,
     parse_light_ctl_temperature_status,
     parse_light_lightness_status,
 )
@@ -463,6 +468,74 @@ class MeshController:
             return None
         status = parse_light_ctl_status(_full_payload(resp))
         return _settled(status.present_temperature, status.target_temperature)
+
+    async def get_ctl_temperature(
+        self, unicast: int, *, timeout: float = 5.0
+    ) -> int | None:
+        """Read Light CTL Temperature; settled Kelvin or None.
+
+        Addressed to the Light CTL Temperature Server, which sits on its own
+        element. ``_settled`` resolves a mid-transition report the same way
+        every ``set_*`` does: a lamp still ramping names both where it is and
+        where it is going, and where it is going is the answer.
+        """
+        try:
+            resp = await self._node.request(
+                unicast, light_ctl_temperature_get(),
+                OP_LIGHT_CTL_TEMPERATURE_STATUS, timeout=timeout,
+            )
+        except TimeoutError:
+            logger.debug("get_ctl_temperature(%#06x) timed out", unicast)
+            return None
+        status = parse_light_ctl_temperature_status(_full_payload(resp))
+        return _settled(status.present_temperature, status.target_temperature)
+
+    async def get_ctl(
+        self, unicast: int, *, timeout: float = 5.0
+    ) -> int | None:
+        """Read Light CTL; settled temperature in Kelvin or None.
+
+        The fallback for a node that exposes no Light CTL Temperature Server
+        element: its Light CTL Status carries temperature next to lightness.
+        Sending already falls back to Light CTL Set on such a node, so reading
+        has to as well, or it would be written and never read.
+        """
+        try:
+            resp = await self._node.request(
+                unicast, light_ctl_get(), OP_LIGHT_CTL_STATUS, timeout=timeout
+            )
+        except TimeoutError:
+            logger.debug("get_ctl(%#06x) timed out", unicast)
+            return None
+        status = parse_light_ctl_status(_full_payload(resp))
+        return _settled(status.present_temperature, status.target_temperature)
+
+    async def get_ctl_temperature_range(
+        self, unicast: int, *, timeout: float = 5.0
+    ) -> tuple[int, int] | None:
+        """Read the lamp's own Kelvin limits, or None if it has none to give.
+
+        A non-zero status code is a well-formed answer meaning *I have no valid
+        range*, and the min/max beside it carry nothing. The caller falls back
+        to a default, so believing those bytes would replace a reasonable range
+        with junk — it must read as silence.
+        """
+        try:
+            resp = await self._node.request(
+                unicast, light_ctl_temperature_range_get(),
+                OP_LIGHT_CTL_TEMPERATURE_RANGE_STATUS, timeout=timeout,
+            )
+        except TimeoutError:
+            logger.debug("get_ctl_temperature_range(%#06x) timed out", unicast)
+            return None
+        status = parse_light_ctl_temperature_range_status(_full_payload(resp))
+        if status.status_code != 0x00:
+            logger.debug(
+                "get_ctl_temperature_range(%#06x): status %#04x, no range",
+                unicast, status.status_code,
+            )
+            return None
+        return status.range_min, status.range_max
 
     async def set_ctl_temperature(
         self, unicast: int, kelvin: int, *, timeout: float = 5.0

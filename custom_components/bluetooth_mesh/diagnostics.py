@@ -20,7 +20,7 @@ from homeassistant.core import HomeAssistant
 
 from . import BluetoothMeshConfigEntry
 from .btmesh.crypto import k3
-from .const import CONF_INVERTED_CTL, CONTROLLED_MODEL_IDS
+from .const import CONF_INVERTED_CTL, CONTROLLED_MODEL_IDS, MODEL_LIGHT_CTL
 from .mesh_transport import discovered_proxies
 
 # How many nodes the composition probe interrogates. Each one is a mesh round
@@ -61,9 +61,25 @@ async def _probe(coordinator) -> dict[str, Any]:
     for node in nodes:
         relay = await coordinator.async_get_relay(node.unicast)
         composition = await coordinator.async_get_composition(node.unicast)
+        # Only for lamps that have a temperature to bound. The inversion
+        # workaround mirrors around this range, so without it a dump cannot
+        # explain a lamp whose warm and cool land off-centre.
+        ctl_range = (
+            await coordinator.async_get_ctl_temperature_range(node.unicast)
+            if node.has_model(MODEL_LIGHT_CTL)
+            else None
+        )
         results.append(
             {
                 "unicast": f"{node.unicast:#06x}",
+                # Null means the node gave none and the entity is using the
+                # conventional default, which is a different situation from a
+                # node that named its own limits.
+                "ctl_range": (
+                    [str(ctl_range[0]), str(ctl_range[1])]
+                    if ctl_range is not None
+                    else None
+                ),
                 "answered": relay is not None,
                 "relay": (
                     {
