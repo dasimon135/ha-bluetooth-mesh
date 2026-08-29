@@ -4,6 +4,44 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-08-29
+
+### Added
+
+- **Colour temperature is read from the lamp.** It was the last attribute that
+  only ever reflected the last command — on/off and brightness have been read
+  since 0.2/0.3 — so a temperature changed from the vendor app or a wall remote
+  never reached Home Assistant. The library gained the Get it was missing; its
+  Status was already decoded.
+
+  A lamp still ramping reports where it is *and* where it is going, and the
+  answer is where it is going. That resolution already existed for every `set_*`
+  and the getters inherit it rather than deciding again.
+
+- **The lamp is asked for the Kelvin range it actually tracks.** The exposed
+  range was a pair of constants, 2700–6500, chosen as a safe default. That put a
+  lamp's real extremes out of reach, and it did something quieter as well: the
+  inversion workaround mirrors around the **exposed** range, so on a lamp whose
+  real limits are not 2700–6500 the mirror shipped in 0.5.1 was off-centre by
+  twice the difference of the midpoints.
+
+  The range is now read once — it is a property of the device, not a state — and
+  both the slider and the mirror follow it. A lamp that really is 2700–6500, the
+  typical tunable white, puts exactly the same bytes on the wire as before; a
+  test asserts that rather than leaving it to chance. A lamp that reports no
+  valid range keeps the default.
+
+- **Diagnostics reports the range each CTL node claims.** `probe.nodes[].ctl_range`,
+  null when the node gave none. Without it a lamp whose warm and cool land
+  off-centre cannot be explained from a dump — the blind spot that cost a round
+  trip on #7, one layer down.
+
+### Changed
+
+- A read temperature is **un-mirrored before display**. A marked lamp reports the
+  value it was sent, so showing it raw would have put a wrong number in front of
+  exactly the users the option exists for.
+
 ## [0.5.1] — 2026-08-28
 
 ### Changed

@@ -20,8 +20,12 @@ from btmesh.access import (
     OP_GENERIC_ONOFF_GET,
     OP_GENERIC_ONOFF_SET,
     OP_GENERIC_ONOFF_STATUS,
+    OP_LIGHT_CTL_GET,
     OP_LIGHT_CTL_SET,
     OP_LIGHT_CTL_STATUS,
+    OP_LIGHT_CTL_TEMPERATURE_GET,
+    OP_LIGHT_CTL_TEMPERATURE_RANGE_GET,
+    OP_LIGHT_CTL_TEMPERATURE_RANGE_STATUS,
     OP_LIGHT_CTL_TEMPERATURE_SET,
     OP_LIGHT_CTL_TEMPERATURE_STATUS,
     OP_LIGHT_LIGHTNESS_GET,
@@ -108,7 +112,7 @@ class FakeBearer:
         self.on_message(msg_type, pdu)
 
 
-def make_setup(tid: int = 0, fade: bool = False):
+def make_setup(tid: int = 0, fade: bool = False, range_status: int = 0x00):
     """Build a started controller wired to a device node through a FakeBearer.
 
     Returns ``(controller, bearer, captured)`` where ``captured`` is the list of
@@ -188,6 +192,41 @@ def make_setup(tid: int = 0, fade: bool = False):
                     + temperature
                     + delta_uv,  # present delta UV
                 )
+        elif msg.opcode == OP_LIGHT_CTL_TEMPERATURE_GET:
+            delta_uv = (0).to_bytes(2, "little", signed=True)
+            if fade:
+                # Ramping towards 4000 K: present is 500 K short of it.
+                device.send_access(
+                    msg.src,
+                    encode_opcode(OP_LIGHT_CTL_TEMPERATURE_STATUS)
+                    + (3500).to_bytes(2, "little")
+                    + delta_uv
+                    + (4000).to_bytes(2, "little")
+                    + delta_uv
+                    + bytes([0x0A]),  # remaining time
+                )
+            else:
+                device.send_access(
+                    msg.src,
+                    encode_opcode(OP_LIGHT_CTL_TEMPERATURE_STATUS)
+                    + (4000).to_bytes(2, "little")
+                    + delta_uv,
+                )
+        elif msg.opcode == OP_LIGHT_CTL_TEMPERATURE_RANGE_GET:
+            device.send_access(
+                msg.src,
+                encode_opcode(OP_LIGHT_CTL_TEMPERATURE_RANGE_STATUS)
+                + bytes([range_status])
+                + (2000).to_bytes(2, "little")
+                + (7000).to_bytes(2, "little"),
+            )
+        elif msg.opcode == OP_LIGHT_CTL_GET:
+            device.send_access(
+                msg.src,
+                encode_opcode(OP_LIGHT_CTL_STATUS)
+                + (0x4000).to_bytes(2, "little")
+                + (4000).to_bytes(2, "little"),
+            )
         elif msg.opcode == OP_LIGHT_CTL_SET:
             # Light CTL Set params: lightness(2) + temperature(2) + delta_uv(2) + tid.
             lightness = msg.params[0:2]
@@ -849,3 +888,78 @@ async def _drain(rounds: int = 5) -> None:
     """Let the TX pump move queued PDUs onto the fake bearer."""
     for _ in range(rounds):
         await asyncio.sleep(0)
+
+
+# ------------------------------------ reading colour temperature and its range
+
+
+async def test_get_ctl_temperature_emits_get_and_returns_present():
+    controller, _, captured = make_setup()
+    await controller.start()
+    try:
+        result = await controller.get_ctl_temperature(UNICAST)
+    finally:
+        await controller.stop()
+    assert result == 4000
+    assert captured[-1].opcode == OP_LIGHT_CTL_TEMPERATURE_GET
+    assert captured[-1].params == b""  # Get carries no parameters
+
+
+async def test_get_ctl_temperature_mid_fade_returns_the_target():
+    """A lamp still ramping reports a present value on its way somewhere.
+
+    Returning it would hand the caller a colour the lamp is passing through, not
+    the one it was told to hold — and a refresh that lands mid-transition would
+    then cache a value nobody chose. ``_settled`` already resolves this for every
+    ``set_*``; the getters inherit it rather than deciding again.
+    """
+    controller, _, _ = make_setup(fade=True)
+    await controller.start()
+    try:
+        result = await controller.get_ctl_temperature(UNICAST)
+    finally:
+        await controller.stop()
+    assert result == 4000  # target, not the 3500 K it is passing through
+
+
+async def test_get_ctl_temperature_range_returns_the_lamps_own_limits():
+    controller, _, captured = make_setup()
+    await controller.start()
+    try:
+        result = await controller.get_ctl_temperature_range(UNICAST)
+    finally:
+        await controller.stop()
+    assert result == (2000, 7000)
+    assert captured[-1].opcode == OP_LIGHT_CTL_TEMPERATURE_RANGE_GET
+
+
+async def test_a_failed_range_status_reads_as_no_answer():
+    """A non-zero status code means the node has no range to give.
+
+    Its min/max bytes carry nothing, and the caller's fallback is a sensible
+    default — so believing them would replace a reasonable range with junk. It
+    has to be indistinguishable from silence at this boundary.
+    """
+    controller, _, _ = make_setup(range_status=0x01)
+    await controller.start()
+    try:
+        result = await controller.get_ctl_temperature_range(UNICAST)
+    finally:
+        await controller.stop()
+    assert result is None
+
+
+async def test_get_ctl_returns_the_temperature_for_a_node_without_a_temp_element():
+    """The fallback: Light CTL Status carries temperature alongside lightness.
+
+    Sending already falls back to Light CTL Set on such a node, so reading has
+    to fall back too — otherwise it would be written and never read.
+    """
+    controller, _, captured = make_setup()
+    await controller.start()
+    try:
+        result = await controller.get_ctl(UNICAST)
+    finally:
+        await controller.stop()
+    assert result == 4000
+    assert captured[-1].opcode == OP_LIGHT_CTL_GET

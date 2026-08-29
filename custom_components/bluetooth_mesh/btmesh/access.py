@@ -28,9 +28,13 @@ __all__ = [
     "OP_LIGHT_LIGHTNESS_GET",
     "OP_LIGHT_LIGHTNESS_SET",
     "OP_LIGHT_LIGHTNESS_STATUS",
+    "OP_LIGHT_CTL_GET",
     "OP_LIGHT_CTL_SET",
     "OP_LIGHT_CTL_SET_UNACK",
     "OP_LIGHT_CTL_STATUS",
+    "OP_LIGHT_CTL_TEMPERATURE_GET",
+    "OP_LIGHT_CTL_TEMPERATURE_RANGE_GET",
+    "OP_LIGHT_CTL_TEMPERATURE_RANGE_STATUS",
     "OP_LIGHT_CTL_TEMPERATURE_SET",
     "OP_LIGHT_CTL_TEMPERATURE_SET_UNACK",
     "OP_LIGHT_CTL_TEMPERATURE_STATUS",
@@ -60,6 +64,7 @@ __all__ = [
     "LightLightnessStatus",
     "LightCtlStatus",
     "LightCtlTemperatureStatus",
+    "LightCtlTemperatureRangeStatus",
     "CompositionElement",
     "CompositionData",
     # Codec
@@ -79,7 +84,10 @@ __all__ = [
     "generic_onoff_set",
     "light_lightness_get",
     "light_lightness_set",
+    "light_ctl_get",
     "light_ctl_set",
+    "light_ctl_temperature_get",
+    "light_ctl_temperature_range_get",
     "light_ctl_temperature_set",
     # Decoders
     "parse_config_appkey_status",
@@ -88,6 +96,7 @@ __all__ = [
     "parse_light_lightness_status",
     "parse_light_ctl_status",
     "parse_light_ctl_temperature_status",
+    "parse_light_ctl_temperature_range_status",
     "parse_composition_data_status",
     "RelayStatus",
     "config_relay_get",
@@ -115,9 +124,13 @@ OP_LIGHT_LIGHTNESS_STATUS = 0x824E
 # against the Nordic nRF5-SDK-for-Mesh header
 # ``models/model_spec/light_ctl/include/light_ctl_messages.h``
 # (LIGHT_CTL_OPCODE_*): all six values below matched the spec exactly.
+OP_LIGHT_CTL_GET = 0x825D
 OP_LIGHT_CTL_SET = 0x825E
 OP_LIGHT_CTL_SET_UNACK = 0x825F
 OP_LIGHT_CTL_STATUS = 0x8260
+OP_LIGHT_CTL_TEMPERATURE_GET = 0x8261
+OP_LIGHT_CTL_TEMPERATURE_RANGE_GET = 0x8262
+OP_LIGHT_CTL_TEMPERATURE_RANGE_STATUS = 0x8263
 OP_LIGHT_CTL_TEMPERATURE_SET = 0x8264
 OP_LIGHT_CTL_TEMPERATURE_SET_UNACK = 0x8265
 OP_LIGHT_CTL_TEMPERATURE_STATUS = 0x8266
@@ -237,6 +250,19 @@ class LightCtlTemperatureStatus(NamedTuple):
     target_temperature: int | None
     target_delta_uv: int | None
     remaining_time: int | None
+
+
+class LightCtlTemperatureRangeStatus(NamedTuple):
+    """Light CTL Temperature Range Status (opcode 0x8263, Model spec §6.3.3.4).
+
+    ``status_code`` is 0x00 on success. Anything else means the node has no
+    valid range to report, and the accompanying min/max carry nothing — a
+    caller must fall back rather than believe them.
+    """
+
+    status_code: int
+    range_min: int
+    range_max: int
 
 
 class RelayStatus(NamedTuple):
@@ -535,6 +561,34 @@ def _check_delta_uv(delta_uv: int) -> None:
         raise AccessError(f"CTL delta UV out of int16 range: {delta_uv}")
 
 
+def light_ctl_get() -> bytes:
+    """Light CTL Get (opcode 0x825D, no params) — app-keyed (Model spec §6.3.3.1).
+
+    Answered by the Light CTL Server on the node's main element. Its Status
+    carries lightness *and* temperature, which makes it the fallback for a node
+    that exposes no separate Light CTL Temperature Server element.
+    """
+    return encode_opcode(OP_LIGHT_CTL_GET)
+
+
+def light_ctl_temperature_get() -> bytes:
+    """Light CTL Temperature Get (opcode 0x8261, no params) — Model spec §6.3.3.5.
+
+    Answered by the Light CTL Temperature Server, which lives on its own
+    (secondary) element.
+    """
+    return encode_opcode(OP_LIGHT_CTL_TEMPERATURE_GET)
+
+
+def light_ctl_temperature_range_get() -> bytes:
+    """Light CTL Temperature Range Get (opcode 0x8262, no params) — §6.3.3.3.
+
+    The range the lamp actually tracks, as opposed to the full 800..20000 K the
+    model allows. Addressed to the Light CTL Server on the main element.
+    """
+    return encode_opcode(OP_LIGHT_CTL_TEMPERATURE_RANGE_GET)
+
+
 def light_ctl_set(
     lightness: int, temperature: int, delta_uv: int, tid: int, *, ack: bool = True
 ) -> bytes:
@@ -673,6 +727,24 @@ def parse_light_ctl_status(payload: bytes) -> LightCtlStatus:
         target_lightness=int.from_bytes(params[4:6], "little"),
         target_temperature=int.from_bytes(params[6:8], "little"),
         remaining_time=params[8],
+    )
+
+
+def parse_light_ctl_temperature_range_status(
+    payload: bytes,
+) -> LightCtlTemperatureRangeStatus:
+    """Parse a Light CTL Temperature Range Status (Model spec §6.3.3.4).
+
+    Five bytes exactly: a status code then the minimum and maximum in Kelvin.
+    A non-zero status code is still a well-formed answer — it means the node
+    has no valid range — so it is parsed and handed back rather than raised on,
+    and the caller decides to fall back.
+    """
+    params = _expect_params(payload, OP_LIGHT_CTL_TEMPERATURE_RANGE_STATUS, (5,))
+    return LightCtlTemperatureRangeStatus(
+        status_code=params[0],
+        range_min=int.from_bytes(params[1:3], "little"),
+        range_max=int.from_bytes(params[3:5], "little"),
     )
 
 

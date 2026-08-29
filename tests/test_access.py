@@ -453,3 +453,61 @@ def test_parse_config_relay_status_rejects_a_wrong_length():
 
     with pytest.raises(AccessError):
         parse_config_relay_status(bytes.fromhex("8028" "01"))
+
+
+# --------------------------------------- reading colour temperature and range
+
+
+def test_light_ctl_get_encoders_carry_no_parameters():
+    """Three Gets, three bare opcodes.
+
+    Their values are the holes in the Light CTL block already present here —
+    0x825E/0x825F/0x8260 and 0x8264..0x8266 were transcribed from the spec, and
+    0x825D, 0x8261 and 0x8262 are what sit between them. Asserting the bytes
+    catches a digit slipped while reading the table.
+    """
+    from btmesh.access import (
+        light_ctl_get,
+        light_ctl_temperature_get,
+        light_ctl_temperature_range_get,
+    )
+
+    assert light_ctl_get() == bytes.fromhex("825d")
+    assert light_ctl_temperature_get() == bytes.fromhex("8261")
+    assert light_ctl_temperature_range_get() == bytes.fromhex("8262")
+
+
+def test_parse_light_ctl_temperature_range_status():
+    """Status code, then min and max in Kelvin (Model spec §6.3.3.4)."""
+    from btmesh.access import parse_light_ctl_temperature_range_status
+
+    s = parse_light_ctl_temperature_range_status(
+        bytes.fromhex("8263" "00" "2003" "204e")
+    )
+    assert s.status_code == 0x00
+    assert s.range_min == 0x0320  # 800 K
+    assert s.range_max == 0x4E20  # 20000 K
+
+
+def test_a_range_status_can_report_that_there_is_no_range():
+    """A non-zero status code is an answer that means "I have none".
+
+    It has to stay distinguishable from Success, because the caller's fallback
+    is a sensible default: overwriting 2700-6500 with whatever bytes accompany
+    a failure code would be worse than never having asked.
+    """
+    from btmesh.access import parse_light_ctl_temperature_range_status
+
+    s = parse_light_ctl_temperature_range_status(
+        bytes.fromhex("8263" "01" "0000" "0000")
+    )
+    assert s.status_code == 0x01
+    assert s.range_min == 0
+    assert s.range_max == 0
+
+
+def test_parse_light_ctl_temperature_range_status_rejects_a_wrong_length():
+    from btmesh.access import parse_light_ctl_temperature_range_status
+
+    with pytest.raises(AccessError):
+        parse_light_ctl_temperature_range_status(bytes.fromhex("8263" "00" "2003"))
