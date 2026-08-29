@@ -39,10 +39,18 @@ remote moved.
 Put the reference in the body as plain text (`See #7`) and close the issue by
 hand once the reporter has confirmed.
 
-> The squash-merge body for #15 opened with `Closes #7.` GitHub acted on it and
-> closed the reporter's issue minutes after a comment on that same issue had
-> said it would stay open until they confirmed the fix on *their* lamp. The
-> timeline contradicted the comment, and reopening added a third notification.
+> The squash-merge body for #15 opened with the closing keyword and that issue's
+> number. GitHub acted on it and closed the reporter's issue minutes after a
+> comment on that same issue had said it would stay open until they confirmed the
+> fix on *their* lamp. The timeline contradicted the comment, and reopening added
+> a third notification.
+>
+> It then happened a second time, in the commit that first wrote this rule down:
+> the PR body quoted the offending phrase inside backticks to explain it. **A
+> commit message is plain text — backticks protect nothing**, and the parser
+> closed the issue again. So do not reproduce a live keyword-and-number pair
+> anywhere in a commit or PR body, not even as an example. Name the keyword and
+> the number separately, as this paragraph does.
 
 A fix verified on the maintainer's hardware is not verified on the reporter's.
 Their lamp is the one the bug was reported against.
