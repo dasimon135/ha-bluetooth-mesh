@@ -173,7 +173,13 @@ ruff check .
 ```
 
 Run `pytest` with no path argument: `testpaths` in `pyproject.toml` covers the
-library tests, `tests/ha/`, and the `phase0/` harness suite. The `tests/ha/`
+library tests, `tests/ha/`, and the `phase0/` harness suite. Running a single
+file from `tests/ha/` is not a shortcut — `test_init.py` and `test_diagnostics.py`
+import `custom_components` and reach for the Bluetooth manager lazily, inside the
+test bodies, and rely on an earlier file in the session having done so at module
+scope. On their own they fail with `ModuleNotFoundError` or `RuntimeError:
+BluetoothManager has not been set`, which looks like a broken checkout. Re-run
+the whole suite before believing a single file's red. The `tests/ha/`
 tree is guarded with `pytest.importorskip`, so it stays skipped when Home
 Assistant is not installed and runs for real when it is. CI installs Home
 Assistant and runs the combined suite on Linux; see
@@ -184,6 +190,14 @@ Assistant and runs the combined suite on Linux; see
 > event loop's self-pipe needs a socket there. A test that reaches the network
 > — one that triggers a real config-entry reload, say — will therefore pass
 > locally and fail on Linux CI. That is CI doing its job, not a flake.
+
+### Releasing
+
+`docs/release-flow.md` describes how a change reaches a published release:
+branch, PR, both CI workflows, a hardware-validated release candidate, then the
+tag. It also carries the rules that came out of getting it wrong — re-reading
+the remote before tagging, and keeping `Closes #N` out of merge bodies when the
+issue is waiting on a reporter's confirmation.
 
 ### Vendored library
 
