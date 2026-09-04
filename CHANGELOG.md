@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A Data Out subscribe that fails late no longer passes for a working link.**
+  `GattBearer.start` waits one second for `start_notify` to confirm, then
+  proceeds — some proxied backends deliver notifications without ever resolving
+  the await, and blocking on them would hang every command. That grace period
+  assumed the only late outcome was *slow*. On 2026-09-04 the proxy node
+  answered the CCCD write with `Insufficient authorization (8)` **seven
+  seconds after** the bearer had moved on, and the pending task swallowed it:
+  the controller came up, the coordinator marked itself available, the light
+  went optimistic, and every Set went into a connection the proxy had already
+  dropped. Nothing in Home Assistant said so; the only trace was an
+  `Error doing job: BleakError exception in shielded future` in the core log.
+
+  The late result is now recorded in `GattBearer.failure`, and
+  `MeshController.failed` mirrors it exactly as it mirrors a dead TX pump — so
+  the coordinator's existing check tears the link down and the next command
+  reconnects instead of reusing a handle that can neither send nor hear a
+  Status. Why the node demanded authorization that night is a separate
+  question this does not answer.
+
 ## [0.6.0] — 2026-08-29
 
 ### Added
