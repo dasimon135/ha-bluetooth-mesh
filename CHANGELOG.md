@@ -6,6 +6,26 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Keep-alive `0` now means *always connected*, not *held until it happens to
+  drop*.** Two gaps made the shipped default slower than it claimed. The
+  startup probe connected, recorded availability, then released the link
+  regardless of the option — so the first click after every restart paid a
+  full connect on top of a probe that had just succeeded. And a link that
+  dropped on its own was only noticed at the next command: on 2026-09-04 the
+  morning's first command paid 11 s, through the proxy habluetooth happened to
+  prefer that minute (atomesalon at -94 dBm, the closer one still penalised
+  for the night's failures).
+
+  With keep-alive `0` the probe now keeps the link it brought up, and a drop
+  reported by bleak's disconnected callback re-establishes it in the
+  background. A *timed* keep-alive is untouched on both counts: that option
+  exists to hand the lamp's single slot back to the vendor app, so a drop is
+  welcome there and the probe still releases what it opened. The callback
+  fires on the integration's own disconnects too; those are told apart by
+  identity, since teardown clears the held client before disconnecting it.
+
 ### Fixed
 
 - **A Data Out subscribe that fails late no longer passes for a working link.**
