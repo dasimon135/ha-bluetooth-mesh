@@ -26,6 +26,22 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fires on the integration's own disconnects too; those are told apart by
   identity, since teardown clears the held client before disconnecting it.
 
+  The first cut of that watchdog then lost a whole day on the author's
+  network: the link dropped at 09:50, the one reconnect attempt found no
+  0x1828 advert yet — the node had only just stopped being connected — and
+  that single miss did not flip availability (three in a row are required, a
+  hysteresis built for probes against a lamp that is often busy for a moment).
+  Both recovery paths, the periodic probe and push discovery, act only while
+  unavailable, so nobody reconnected until the evening's click paid the
+  connect. A missing permanent link is now its own reason to recover: the
+  probe runs on the fast interval and the next advert triggers a connect,
+  whatever the availability flag says. Push discovery also no longer queues a
+  probe behind a connect already in flight.
+
+  Shutdown is left alone: Home Assistant closes the ESPHome links in its CLOSE
+  stage, when the core is already `not_running`, and the watchdog checks that
+  before chasing a link nobody wants back.
+
 ### Fixed
 
 - **A Data Out subscribe that fails late no longer passes for a working link.**

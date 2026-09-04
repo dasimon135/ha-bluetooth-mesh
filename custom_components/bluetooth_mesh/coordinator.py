@@ -410,13 +410,32 @@ class MeshCoordinator:
         self._available = False
         self._clear_issue()
 
+    def _wants_link(self) -> bool:
+        """True when keep-alive 0 promised a held link and there is none.
+
+        Availability is deliberately sticky — a miss only flips it after
+        ``UNREACHABLE_THRESHOLD`` in a row, because a single-slot lamp is often
+        busy for a moment. That hysteresis was built for probes, and it defeated
+        recovery on 2026-09-04: the held link dropped at 09:50, the watchdog's
+        one reconnect found no advert yet, the miss left ``_available`` True,
+        and both recovery paths (periodic probe, push discovery) only act while
+        unavailable. Nobody reconnected for ten hours. A missing permanent link
+        is its own reason to recover, whatever the availability flag says.
+        """
+        return (
+            not self._stopped
+            and self._idle_timeout <= 0
+            and self._controller is None
+        )
+
     def _schedule_probe(self) -> None:
         """Arm the next probe: fast while unavailable, slow while reachable."""
         if self._stopped or self._probe_unsub is not None:
             return
         delay = (
-            PROBE_INTERVAL_AVAILABLE if self._available
-            else PROBE_INTERVAL_UNAVAILABLE
+            PROBE_INTERVAL_UNAVAILABLE
+            if not self._available or self._wants_link()
+            else PROBE_INTERVAL_AVAILABLE
         )
         self._probe_unsub = async_call_later(
             self.hass, delay.total_seconds(), self._probe_callback
@@ -435,8 +454,10 @@ class MeshCoordinator:
         and probing on each one would take the lamp's single proxy slot for
         nothing.
         """
-        if self._stopped or self._available:
+        if self._stopped or (self._available and not self._wants_link()):
             return
+        if self._lock.locked():
+            return  # a connect is already in flight; adverts arrive constantly
         logger.debug("mesh proxy %s advertised; probing now", address)
         self.hass.async_create_background_task(
             self._async_probe(), f"{DOMAIN} discovery probe"
@@ -447,7 +468,7 @@ class MeshCoordinator:
         # Only probe to RECOVER when we believe we are unavailable; while
         # available we rely on real commands + the held connection, so we never
         # churn the lamp's slot behind the user's back.
-        if not self._available:
+        if not self._available or self._wants_link():
             await self._async_probe()
         self._schedule_probe()
 

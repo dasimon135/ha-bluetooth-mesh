@@ -1079,3 +1079,88 @@ async def test_a_drop_during_shutdown_is_not_reconnected(hass, state) -> None:
 
         assert coordinator_mod.async_connect_bearer.await_count == connects_before
         await coord.async_stop()
+
+
+# ---------------------------------------------------------------------------
+# A permanent link that is lost must be re-established even when the first
+# attempt misses — availability hysteresis is for probes, not for recovery.
+#
+# 2026-09-04 09:50:20, David's network: the held link (atomesalon, -94 dBm)
+# dropped, the watchdog fired, and its one reconnect attempt found no 0x1828
+# advert yet ("adverts HA sees: none") — the node had just stopped being
+# connected and its cached advert had expired hours ago. One miss does not
+# flip _available (threshold 3), and both recovery paths — the periodic probe
+# and push discovery — only act while unavailable. Nobody reconnected for ten
+# hours; the 19:43 click paid the connect the option exists to avoid.
+
+
+async def _drop_and_miss_once(hass, coord, client):
+    """Lose the held link with the reconnect attempt finding no proxy."""
+    on_drop = client.set_disconnected_callback.call_args.args[0]
+    with patch.object(coordinator_mod, "find_proxy_address", return_value=None):
+        client.is_connected = False
+        on_drop(client)
+        await _wait_for(lambda: coord._controller is None)
+        await asyncio.sleep(0.05)
+        await hass.async_block_till_done()
+    # The trap this reproduces: one miss, still "available", no held link.
+    assert coord._controller is None
+    assert coord.available is True
+
+
+async def test_a_lost_permanent_link_is_retried_on_the_next_advert(hass) -> None:
+    entry = _make_entry(hass)
+    fake = FakeController()
+    callbacks: list = []
+
+    def register(hass_, net_key, on_found):
+        callbacks.append(on_found)
+        return lambda: None
+
+    with (
+        _patch_transport(fake) as client,
+        patch.object(
+            coordinator_mod, "async_register_proxy_callback", side_effect=register
+        ),
+    ):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await coord.async_set_onoff(UNICAST, True)
+        await _drop_and_miss_once(hass, coord, client)
+        connects_before = coordinator_mod.async_connect_bearer.await_count
+
+        callbacks[0](PROXY_ADDR)  # the node advertises again
+
+        await _wait_for(lambda: coord._controller is not None)
+        assert coord._controller is not None
+        assert coordinator_mod.async_connect_bearer.await_count == connects_before + 1
+    await coord.async_stop()
+
+
+async def test_a_lost_permanent_link_is_retried_by_the_periodic_probe(hass) -> None:
+    from datetime import timedelta
+
+    from homeassistant.util import dt as dt_util
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with _patch_transport(fake) as client:
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await coord.async_set_onoff(UNICAST, True)
+        await _drop_and_miss_once(hass, coord, client)
+        connects_before = coordinator_mod.async_connect_bearer.await_count
+
+        # The probe armed while "available" fires on the slow interval; it must
+        # act on the missing link rather than trust the availability flag.
+        async_fire_time_changed(
+            hass, dt_util.utcnow() + coordinator_mod.PROBE_INTERVAL_AVAILABLE
+            + timedelta(seconds=1)
+        )
+        await hass.async_block_till_done()
+
+        await _wait_for(lambda: coord._controller is not None)
+        assert coord._controller is not None
+        assert coordinator_mod.async_connect_bearer.await_count == connects_before + 1
+    await coord.async_stop()
