@@ -1043,13 +1043,19 @@ async def test_the_startup_probe_releases_the_link_when_keepalive_is_timed(hass)
         await coord.async_stop()
 
 
-async def test_a_drop_during_shutdown_is_not_reconnected(hass) -> None:
-    """Home Assistant stops Bluetooth before unloading this entry.
+@pytest.mark.parametrize("state", ["stopping", "not_running"])
+async def test_a_drop_during_shutdown_is_not_reconnected(hass, state) -> None:
+    """Home Assistant tears the BLE links down before unloading this entry.
 
     Seen live on 2026-09-04 07:53: the link dropped as the proxies went away,
     the watchdog fired before async_stop had set _stopped, and four connect
     attempts failed with "Bluetooth is already shutdown". Harmless, but it is
     work and log noise on every shutdown for a link nobody wants back.
+
+    Both states matter. The first guard tested ``hass.is_stopping`` and passed
+    here, then fired again live at 08:43: the ESPHome API links are closed in
+    the CLOSE stage, after the final writes, when the core state is already
+    ``not_running`` — which ``is_stopping`` does not cover.
     """
     from homeassistant.core import CoreState
 
@@ -1062,7 +1068,7 @@ async def test_a_drop_during_shutdown_is_not_reconnected(hass) -> None:
         on_drop = client.set_disconnected_callback.call_args.args[0]
         connects_before = coordinator_mod.async_connect_bearer.await_count
 
-        hass.set_state(CoreState.stopping)
+        hass.set_state(getattr(CoreState, state))
         try:
             client.is_connected = False
             on_drop(client)
