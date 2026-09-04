@@ -1041,3 +1041,35 @@ async def test_the_startup_probe_releases_the_link_when_keepalive_is_timed(hass)
         await _wait_for(lambda: client.disconnect.await_count >= 1)
         assert coord._controller is None
         await coord.async_stop()
+
+
+async def test_a_drop_during_shutdown_is_not_reconnected(hass) -> None:
+    """Home Assistant stops Bluetooth before unloading this entry.
+
+    Seen live on 2026-09-04 07:53: the link dropped as the proxies went away,
+    the watchdog fired before async_stop had set _stopped, and four connect
+    attempts failed with "Bluetooth is already shutdown". Harmless, but it is
+    work and log noise on every shutdown for a link nobody wants back.
+    """
+    from homeassistant.core import CoreState
+
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with _patch_transport(fake) as client:
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await coord.async_set_onoff(UNICAST, True)
+        on_drop = client.set_disconnected_callback.call_args.args[0]
+        connects_before = coordinator_mod.async_connect_bearer.await_count
+
+        hass.set_state(CoreState.stopping)
+        try:
+            client.is_connected = False
+            on_drop(client)
+            await asyncio.sleep(0.05)
+            await hass.async_block_till_done()
+        finally:
+            hass.set_state(CoreState.running)
+
+        assert coordinator_mod.async_connect_bearer.await_count == connects_before
+        await coord.async_stop()

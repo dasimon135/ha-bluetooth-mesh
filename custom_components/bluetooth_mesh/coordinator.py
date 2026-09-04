@@ -603,6 +603,12 @@ class MeshCoordinator:
         """
         if self._stopped or client is not self._client:
             return  # our own teardown, or a client we already replaced
+        if self.hass.is_stopping:
+            # Home Assistant shuts Bluetooth down before it unloads this entry,
+            # so the link drops while _stopped is still False. Seen live on
+            # 2026-09-04: four connect attempts ending in "Bluetooth is already
+            # shutdown", for a link nobody wants back.
+            return
         logger.debug("mesh proxy link dropped")
         if self._idle_timeout > 0:
             return
