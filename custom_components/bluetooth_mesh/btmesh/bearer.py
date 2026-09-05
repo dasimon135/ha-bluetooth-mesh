@@ -85,6 +85,14 @@ DEFAULT_MAX_FRAME = 20
 # before the await would resolve), so this is kept short: it is pure per-command
 # latency on those backends, and a command's own request/response round-trip
 # happens after it, by which point notifications are already arriving.
+#
+# Proceeding is a bet that the subscribe is merely slow to CONFIRM, not that it
+# will succeed. When it later fails outright the bearer records it in
+# :attr:`GattBearer.failure` (see :meth:`GattBearer.start`) — on 2026-09-04 the
+# proxy node rejected the Data Out CCCD write with ``Insufficient authorization
+# (8)`` seven seconds after start() had returned, and with the error swallowed
+# the controller came up, the coordinator marked itself available, and every
+# Set went into a link that was already dropping.
 START_NOTIFY_TIMEOUT = 1.0
 
 # Mesh Proxy Service advertising identification types (spec §7.2.2.2).
@@ -118,6 +126,11 @@ class GattBearer:
         # stop() can cancel it rather than leave it running against a client
         # the caller is about to disconnect.
         self._subscribe_task: "asyncio.Task | None" = None
+        # The error a still-pending subscribe eventually failed with, if any.
+        # Mirrors ``BearerPump.failure``: the subscribe cannot report a late
+        # failure by raising (start() has already returned), so the controller
+        # polls this the way it polls the pump to decide the link is dead.
+        self.failure: BaseException | None = None
 
     @property
     def max_frame(self) -> int:
@@ -144,6 +157,10 @@ class GattBearer:
         (frames flow) and the proxy link is usable for writes regardless, so if
         the await does not confirm in time we log and proceed rather than block.
         A genuine subscribe *error* still raises :class:`BearerError`.
+
+        A subscribe that fails only *after* the grace period cannot raise here
+        any more; it lands in :attr:`failure` instead, so a caller that kept
+        the bearer learns the link is unusable rather than writing into it.
         """
         self._on_message = on_message
         task = asyncio.ensure_future(
@@ -153,9 +170,10 @@ class GattBearer:
             await asyncio.wait_for(asyncio.shield(task), START_NOTIFY_TIMEOUT)
         except asyncio.TimeoutError:
             # Leave the still-pending subscribe running (notifications already
-            # flow) and swallow any late result so it is not reported as an
-            # unretrieved task exception.
-            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            # flow). Its late result is retrieved in _on_late_subscribe — a
+            # failure is recorded, not swallowed — which also keeps it from
+            # being reported as an unretrieved task exception.
+            task.add_done_callback(self._on_late_subscribe)
             self._subscribe_task = task
             logger.warning(
                 "start_notify(%s) unconfirmed after %ss; proceeding "
@@ -170,6 +188,20 @@ class GattBearer:
                 f"could not subscribe to {self._data_out}: {exc}"
             ) from exc
         logger.debug("subscribed to %s", self._data_out)
+
+    def _on_late_subscribe(self, task: "asyncio.Task") -> None:
+        """Record how a subscribe that outlived its grace period ended."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            logger.debug("subscribed to %s (late)", self._data_out)
+            return
+        self.failure = exc
+        logger.warning(
+            "start_notify(%s) failed after proceeding without it; the link "
+            "is unusable: %s", self._data_out, exc,
+        )
 
     async def stop(self) -> None:
         """Unsubscribe from Data Out; safe to call on a dead connection."""

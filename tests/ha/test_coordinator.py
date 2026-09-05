@@ -638,7 +638,11 @@ async def test_a_matching_proxy_advert_triggers_a_reconnect(hass) -> None:
         await hass.async_block_till_done()
         assert callbacks, "no push-discovery callback registered"
 
-        # Go unavailable, then have the proxy re-appear.
+        # Lose the link and know it, then have the proxy re-appear. Both halves
+        # matter: with keep-alive 0 the startup probe now HOLDS the link, and a
+        # held link is itself proof of reachability the probe will not repeat.
+        async with coord._lock:
+            await coord._teardown()
         coord._available = False
         callbacks[0](PROXY_ADDR)
         await hass.async_block_till_done()
@@ -918,3 +922,245 @@ async def test_no_configured_address_keeps_the_derived_default(hass) -> None:
         coord = MeshCoordinator(hass, entry)
 
     assert coord.src_addr == 0x7FFF
+
+
+# ---------------------------------------------------------------------------
+# keep-alive 0 means "always connected", not "held until it happens to drop"
+#
+# 2026-09-04, David's network: with the link released, the morning's first
+# command paid an 11 s connect through the proxy habluetooth preferred that
+# minute (atomesalon at -94 dBm). Holding the link only helps if something
+# re-establishes it when it drops, and if the startup probe keeps it.
+
+
+async def _wait_for(predicate, *, tries: int = 200) -> None:
+    """Background tasks are NOT awaited by async_block_till_done; poll instead."""
+    for _ in range(tries):
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+
+
+async def test_an_unexpected_drop_reconnects_when_keepalive_is_permanent(hass) -> None:
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with _patch_transport(fake) as client:
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await coord.async_set_onoff(UNICAST, True)
+        connects_before = coordinator_mod.async_connect_bearer.await_count
+        assert coord._controller is fake
+
+        # The proxy drops the link under us: bleak fires the callback we gave it.
+        client.set_disconnected_callback.assert_called()
+        on_drop = client.set_disconnected_callback.call_args.args[0]
+        client.is_connected = False
+        on_drop(client)
+
+        await _wait_for(
+            lambda: coordinator_mod.async_connect_bearer.await_count > connects_before
+        )
+        await _wait_for(lambda: coord._controller is not None)
+        assert coord._controller is not None  # re-established and HELD
+    await coord.async_stop()
+
+
+async def test_an_unexpected_drop_is_left_alone_when_keepalive_is_timed(hass) -> None:
+    """A timed keep-alive exists to hand the slot back: never reconnect unasked."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CONNECT_JSON: FIXTURE.read_text(encoding="utf-8")},
+        options={CONF_KEEPALIVE: 30},
+        unique_id="0F0E0D0C-0B0A-0908-0706-050403020100",
+    )
+    entry.add_to_hass(hass)
+    fake = FakeController()
+    with _patch_transport(fake) as client:
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await coord.async_set_onoff(UNICAST, True)
+        connects_before = coordinator_mod.async_connect_bearer.await_count
+
+        on_drop = client.set_disconnected_callback.call_args.args[0]
+        client.is_connected = False
+        on_drop(client)
+        await asyncio.sleep(0.05)
+        await hass.async_block_till_done()
+
+        assert coordinator_mod.async_connect_bearer.await_count == connects_before
+    await coord.async_stop()
+
+
+async def test_our_own_teardown_never_triggers_a_reconnect(hass) -> None:
+    """bleak fires the callback on OUR disconnect too; that is not a drop."""
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with _patch_transport(fake) as client:
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await coord.async_set_onoff(UNICAST, True)
+        on_drop = client.set_disconnected_callback.call_args.args[0]
+        await coord.async_stop()
+        connects_before = coordinator_mod.async_connect_bearer.await_count
+
+        client.is_connected = False
+        on_drop(client)
+        await asyncio.sleep(0.05)
+        await hass.async_block_till_done()
+
+        assert coordinator_mod.async_connect_bearer.await_count == connects_before
+        assert coord._controller is None
+
+
+async def test_the_startup_probe_holds_the_link_when_keepalive_is_permanent(hass) -> None:
+    """Always-connected starts at startup, not at the first click."""
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with _patch_transport(fake) as client:
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await _wait_for(lambda: coord.available)
+        assert coord._controller is fake
+        client.disconnect.assert_not_awaited()
+        await coord.async_stop()
+
+
+async def test_the_startup_probe_releases_the_link_when_keepalive_is_timed(hass) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CONNECT_JSON: FIXTURE.read_text(encoding="utf-8")},
+        options={CONF_KEEPALIVE: 30},
+        unique_id="0F0E0D0C-0B0A-0908-0706-050403020100",
+    )
+    entry.add_to_hass(hass)
+    fake = FakeController()
+    with _patch_transport(fake) as client:
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await _wait_for(lambda: coord.available)
+        await _wait_for(lambda: client.disconnect.await_count >= 1)
+        assert coord._controller is None
+        await coord.async_stop()
+
+
+@pytest.mark.parametrize("state", ["stopping", "not_running"])
+async def test_a_drop_during_shutdown_is_not_reconnected(hass, state) -> None:
+    """Home Assistant tears the BLE links down before unloading this entry.
+
+    Seen live on 2026-09-04 07:53: the link dropped as the proxies went away,
+    the watchdog fired before async_stop had set _stopped, and four connect
+    attempts failed with "Bluetooth is already shutdown". Harmless, but it is
+    work and log noise on every shutdown for a link nobody wants back.
+
+    Both states matter. The first guard tested ``hass.is_stopping`` and passed
+    here, then fired again live at 08:43: the ESPHome API links are closed in
+    the CLOSE stage, after the final writes, when the core state is already
+    ``not_running`` — which ``is_stopping`` does not cover.
+    """
+    from homeassistant.core import CoreState
+
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with _patch_transport(fake) as client:
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await coord.async_set_onoff(UNICAST, True)
+        on_drop = client.set_disconnected_callback.call_args.args[0]
+        connects_before = coordinator_mod.async_connect_bearer.await_count
+
+        hass.set_state(getattr(CoreState, state))
+        try:
+            client.is_connected = False
+            on_drop(client)
+            await asyncio.sleep(0.05)
+            await hass.async_block_till_done()
+        finally:
+            hass.set_state(CoreState.running)
+
+        assert coordinator_mod.async_connect_bearer.await_count == connects_before
+        await coord.async_stop()
+
+
+# ---------------------------------------------------------------------------
+# A permanent link that is lost must be re-established even when the first
+# attempt misses — availability hysteresis is for probes, not for recovery.
+#
+# 2026-09-04 09:50:20, David's network: the held link (atomesalon, -94 dBm)
+# dropped, the watchdog fired, and its one reconnect attempt found no 0x1828
+# advert yet ("adverts HA sees: none") — the node had just stopped being
+# connected and its cached advert had expired hours ago. One miss does not
+# flip _available (threshold 3), and both recovery paths — the periodic probe
+# and push discovery — only act while unavailable. Nobody reconnected for ten
+# hours; the 19:43 click paid the connect the option exists to avoid.
+
+
+async def _drop_and_miss_once(hass, coord, client):
+    """Lose the held link with the reconnect attempt finding no proxy."""
+    on_drop = client.set_disconnected_callback.call_args.args[0]
+    with patch.object(coordinator_mod, "find_proxy_address", return_value=None):
+        client.is_connected = False
+        on_drop(client)
+        await _wait_for(lambda: coord._controller is None)
+        await asyncio.sleep(0.05)
+        await hass.async_block_till_done()
+    # The trap this reproduces: one miss, still "available", no held link.
+    assert coord._controller is None
+    assert coord.available is True
+
+
+async def test_a_lost_permanent_link_is_retried_on_the_next_advert(hass) -> None:
+    entry = _make_entry(hass)
+    fake = FakeController()
+    callbacks: list = []
+
+    def register(hass_, net_key, on_found):
+        callbacks.append(on_found)
+        return lambda: None
+
+    with (
+        _patch_transport(fake) as client,
+        patch.object(
+            coordinator_mod, "async_register_proxy_callback", side_effect=register
+        ),
+    ):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await coord.async_set_onoff(UNICAST, True)
+        await _drop_and_miss_once(hass, coord, client)
+        connects_before = coordinator_mod.async_connect_bearer.await_count
+
+        callbacks[0](PROXY_ADDR)  # the node advertises again
+
+        await _wait_for(lambda: coord._controller is not None)
+        assert coord._controller is not None
+        assert coordinator_mod.async_connect_bearer.await_count == connects_before + 1
+    await coord.async_stop()
+
+
+async def test_a_lost_permanent_link_is_retried_by_the_periodic_probe(hass) -> None:
+    from datetime import timedelta
+
+    from homeassistant.util import dt as dt_util
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with _patch_transport(fake) as client:
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await coord.async_set_onoff(UNICAST, True)
+        await _drop_and_miss_once(hass, coord, client)
+        connects_before = coordinator_mod.async_connect_bearer.await_count
+
+        # The probe armed while "available" fires on the slow interval; it must
+        # act on the missing link rather than trust the availability flag.
+        async_fire_time_changed(
+            hass, dt_util.utcnow() + coordinator_mod.PROBE_INTERVAL_AVAILABLE
+            + timedelta(seconds=1)
+        )
+        await hass.async_block_till_done()
+
+        await _wait_for(lambda: coord._controller is not None)
+        assert coord._controller is not None
+        assert coordinator_mod.async_connect_bearer.await_count == connects_before + 1
+    await coord.async_stop()

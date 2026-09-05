@@ -4,6 +4,67 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims
 to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.7.0] — 2026-09-05
+
+### Changed
+
+- **Keep-alive `0` now means *always connected*, not *held until it happens to
+  drop*.** Two gaps made the shipped default slower than it claimed. The
+  startup probe connected, recorded availability, then released the link
+  regardless of the option — so the first click after every restart paid a
+  full connect on top of a probe that had just succeeded. And a link that
+  dropped on its own was only noticed at the next command: on 2026-09-04 the
+  morning's first command paid 11 s, through the proxy habluetooth happened to
+  prefer that minute (atomesalon at -94 dBm, the closer one still penalised
+  for the night's failures).
+
+  With keep-alive `0` the probe now keeps the link it brought up, and a drop
+  reported by bleak's disconnected callback re-establishes it in the
+  background. A *timed* keep-alive is untouched on both counts: that option
+  exists to hand the lamp's single slot back to the vendor app, so a drop is
+  welcome there and the probe still releases what it opened. The callback
+  fires on the integration's own disconnects too; those are told apart by
+  identity, since teardown clears the held client before disconnecting it.
+
+  The first cut of that watchdog then lost a whole day on the author's
+  network: the link dropped at 09:50, the one reconnect attempt found no
+  0x1828 advert yet — the node had only just stopped being connected — and
+  that single miss did not flip availability (three in a row are required, a
+  hysteresis built for probes against a lamp that is often busy for a moment).
+  Both recovery paths, the periodic probe and push discovery, act only while
+  unavailable, so nobody reconnected until the evening's click paid the
+  connect. A missing permanent link is now its own reason to recover: the
+  probe runs on the fast interval and the next advert triggers a connect,
+  whatever the availability flag says. Push discovery also no longer queues a
+  probe behind a connect already in flight.
+
+  Shutdown is left alone: Home Assistant closes the ESPHome links in its CLOSE
+  stage, when the core is already `not_running`, and the watchdog checks that
+  before chasing a link nobody wants back.
+
+### Fixed
+
+- **A Data Out subscribe that fails late no longer passes for a working link.**
+  `GattBearer.start` waits one second for `start_notify` to confirm, then
+  proceeds — some proxied backends deliver notifications without ever resolving
+  the await, and blocking on them would hang every command. That grace period
+  assumed the only late outcome was *slow*. On 2026-09-04 the proxy node
+  answered the CCCD write with `Insufficient authorization (8)` **seven
+  seconds after** the bearer had moved on, and the pending task swallowed it:
+  the controller came up, the coordinator marked itself available, the light
+  went optimistic, and every Set went into a connection the proxy had already
+  dropped. Nothing in Home Assistant said so; the only trace was an
+  `Error doing job: BleakError exception in shielded future` in the core log.
+
+  The late result is now recorded in `GattBearer.failure`, and
+  `MeshController.failed` mirrors it exactly as it mirrors a dead TX pump — so
+  the coordinator's existing check tears the link down and the next command
+  reconnects instead of reusing a handle that can neither send nor hear a
+  Status. Why the node demanded authorization that night is a separate
+  question this does not answer.
+
 ## [0.6.0] — 2026-08-29
 
 ### Added

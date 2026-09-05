@@ -410,13 +410,32 @@ class MeshCoordinator:
         self._available = False
         self._clear_issue()
 
+    def _wants_link(self) -> bool:
+        """True when keep-alive 0 promised a held link and there is none.
+
+        Availability is deliberately sticky — a miss only flips it after
+        ``UNREACHABLE_THRESHOLD`` in a row, because a single-slot lamp is often
+        busy for a moment. That hysteresis was built for probes, and it defeated
+        recovery on 2026-09-04: the held link dropped at 09:50, the watchdog's
+        one reconnect found no advert yet, the miss left ``_available`` True,
+        and both recovery paths (periodic probe, push discovery) only act while
+        unavailable. Nobody reconnected for ten hours. A missing permanent link
+        is its own reason to recover, whatever the availability flag says.
+        """
+        return (
+            not self._stopped
+            and self._idle_timeout <= 0
+            and self._controller is None
+        )
+
     def _schedule_probe(self) -> None:
         """Arm the next probe: fast while unavailable, slow while reachable."""
         if self._stopped or self._probe_unsub is not None:
             return
         delay = (
-            PROBE_INTERVAL_AVAILABLE if self._available
-            else PROBE_INTERVAL_UNAVAILABLE
+            PROBE_INTERVAL_UNAVAILABLE
+            if not self._available or self._wants_link()
+            else PROBE_INTERVAL_AVAILABLE
         )
         self._probe_unsub = async_call_later(
             self.hass, delay.total_seconds(), self._probe_callback
@@ -435,8 +454,10 @@ class MeshCoordinator:
         and probing on each one would take the lamp's single proxy slot for
         nothing.
         """
-        if self._stopped or self._available:
+        if self._stopped or (self._available and not self._wants_link()):
             return
+        if self._lock.locked():
+            return  # a connect is already in flight; adverts arrive constantly
         logger.debug("mesh proxy %s advertised; probing now", address)
         self.hass.async_create_background_task(
             self._async_probe(), f"{DOMAIN} discovery probe"
@@ -447,7 +468,7 @@ class MeshCoordinator:
         # Only probe to RECOVER when we believe we are unavailable; while
         # available we rely on real commands + the held connection, so we never
         # churn the lamp's slot behind the user's back.
-        if not self._available:
+        if not self._available or self._wants_link():
             await self._async_probe()
         self._schedule_probe()
 
@@ -512,6 +533,10 @@ class MeshCoordinator:
 
         self._client = client
         self._controller = controller
+        # Learn about a drop when it happens, not at the next click. bleak
+        # fires this on OUR disconnects too; the handler tells them apart by
+        # identity, since _teardown clears self._client before disconnecting.
+        client.set_disconnected_callback(self._on_client_disconnected)
         if address != self._proxy_address:
             self._proxy_address = address
             # `_set_available` below notifies on a transition, which already
@@ -584,6 +609,43 @@ class MeshCoordinator:
             if self._controller is not None:
                 self._arm_idle()
             return result
+
+    @callback
+    def _on_client_disconnected(self, client) -> None:
+        """The held proxy link dropped under us.
+
+        With a timed keep-alive the drop is welcome — the option exists to hand
+        the slot back — and the next command's ``is_connected`` check already
+        copes. With keep-alive 0 the user asked for *always connected*, and
+        until 2026-09-04 that only meant "held until it happened to drop": the
+        first command after a silent overnight drop then paid the whole connect
+        (11 s that morning, through the proxy habluetooth preferred at -94 dBm).
+        Re-establish the link in the background instead.
+        """
+        if self._stopped or client is not self._client:
+            return  # our own teardown, or a client we already replaced
+        if not self.hass.is_running:
+            # Home Assistant closes the ESPHome API links in its CLOSE stage —
+            # after the final writes, before this entry is unloaded — so the
+            # drop lands while _stopped is still False and the core state is
+            # already not_running. Seen live on 2026-09-04: four connect
+            # attempts ending in "Bluetooth is already shutdown", for a link
+            # nobody wants back. Not `is_stopping`: that covers only the two
+            # earlier stages and let the 08:43 shutdown through.
+            return
+        logger.debug("mesh proxy link dropped")
+        if self._idle_timeout > 0:
+            return
+        self.hass.async_create_background_task(
+            self._async_reconnect(client), f"{DOMAIN} reconnect after drop"
+        )
+
+    async def _async_reconnect(self, client) -> None:
+        async with self._lock:
+            if self._stopped or client is not self._client:
+                return  # a command got there first and already reconnected
+            await self._teardown()
+            await self._ensure_connected()
 
     # ------------------------------------------------------- connection teardown
 
@@ -735,11 +797,14 @@ class MeshCoordinator:
 
         Availability comes purely from whether the proxy link can be established
         (no GET — bringing the link up already proves the node is reachable, and
-        a GET would cost a round trip for nothing). Unlike a real command
-        this does NOT hold the connection: if we were not already connected it
-        connects, records availability, and disconnects immediately so a
-        background recovery check never keeps the lamp's slot. If a command
-        connection is already held we are plainly available and do nothing.
+        a GET would cost a round trip for nothing). With a timed keep-alive this
+        does NOT hold the connection: it connects, records availability, and
+        disconnects immediately so a background recovery check never keeps the
+        lamp's slot. With keep-alive 0 the link is kept: "always connected"
+        starts at startup, not at the first click — otherwise that click paid
+        the whole connect on top of a probe that had just succeeded. If a
+        command connection is already held we are plainly available and do
+        nothing.
         """
         if self._stopped:
             return
@@ -747,7 +812,7 @@ class MeshCoordinator:
             if self._controller is not None:
                 return  # a held command connection already proves reachability
             controller = await self._ensure_connected()
-            if controller is not None:
+            if controller is not None and self._idle_timeout > 0:
                 # Probe only — hand the slot straight back to the vendor app.
                 await self._teardown()
 
