@@ -6,6 +6,8 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-09-05
+
 ### Changed
 
 - **Keep-alive `0` now means *always connected*, not *held until it happens to
