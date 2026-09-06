@@ -1,4 +1,10 @@
-# Bluetooth Mesh for Home Assistant
+# Bluetooth Mesh — Home Assistant integration and Python stack
+
+[![Release](https://img.shields.io/github/v/release/dasimon135/ha-bluetooth-mesh)](https://github.com/dasimon135/ha-bluetooth-mesh/releases)
+[![Tests](https://github.com/dasimon135/ha-bluetooth-mesh/actions/workflows/tests.yml/badge.svg)](https://github.com/dasimon135/ha-bluetooth-mesh/actions/workflows/tests.yml)
+[![Validate](https://github.com/dasimon135/ha-bluetooth-mesh/actions/workflows/validate.yml/badge.svg)](https://github.com/dasimon135/ha-bluetooth-mesh/actions/workflows/validate.yml)
+[![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
+[![License](https://img.shields.io/github/license/dasimon135/ha-bluetooth-mesh)](LICENSE)
 
 A pure-Python **Bluetooth SIG Mesh** stack and a **Home Assistant** integration
 that lets HA control Bluetooth Mesh lighting — Häfele Connect Mesh (Loox),
