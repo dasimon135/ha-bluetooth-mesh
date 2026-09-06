@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Credit and honesty - read this first
+    url: https://github.com/dasimon135/ha-bluetooth-mesh#credit-and-honesty
+    about: This is a reverse-engineered stack. That section says plainly what is validated against the specification and what was found empirically.
+  - name: General discussion (English)
+    url: https://community.home-assistant.io/t/1018107
+    about: User-to-user help. Not tracked - open an issue for anything that needs a fix.
+  - name: Discussion generale (francais)
+    url: https://forum.hacf.fr/t/82123
+    about: Entraide entre utilisateurs. Non suivi - ouvrez une issue pour tout correctif attendu.

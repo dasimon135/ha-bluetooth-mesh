@@ -1,4 +1,10 @@
-# Bluetooth Mesh for Home Assistant
+# Bluetooth Mesh — Home Assistant integration and Python stack
+
+[![Release](https://img.shields.io/github/v/release/dasimon135/ha-bluetooth-mesh)](https://github.com/dasimon135/ha-bluetooth-mesh/releases)
+[![Tests](https://github.com/dasimon135/ha-bluetooth-mesh/actions/workflows/tests.yml/badge.svg)](https://github.com/dasimon135/ha-bluetooth-mesh/actions/workflows/tests.yml)
+[![Validate](https://github.com/dasimon135/ha-bluetooth-mesh/actions/workflows/validate.yml/badge.svg)](https://github.com/dasimon135/ha-bluetooth-mesh/actions/workflows/validate.yml)
+[![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
+[![License](https://img.shields.io/github/license/dasimon135/ha-bluetooth-mesh)](LICENSE)
 
 A pure-Python **Bluetooth SIG Mesh** stack and a **Home Assistant** integration
 that lets HA control Bluetooth Mesh lighting — Häfele Connect Mesh (Loox),
@@ -242,6 +248,34 @@ against the specification's official sample vectors; the coexistence approach
 was discovered empirically against real hardware. It is an independent,
 unofficial project and is not affiliated with or endorsed by Häfele, ThingOS,
 or the Bluetooth SIG.
+
+## Support
+
+Open an issue here for anything about this integration — a bug, a question, or a
+feature request. Forum threads are for general discussion and user-to-user help;
+nothing raised there is tracked, and it can be lost. An issue cannot.
+
+Before you open one, read [Credit and honesty](#credit-and-honesty): this is a
+reverse-engineered stack, and it says plainly what is validated against the
+specification and what was found empirically against real hardware.
+
+To get a useful answer on the first exchange, include:
+
+- your Home Assistant version and the version of this integration;
+- the nodes involved — brand, model, and whether they were ever provisioned by a
+  vendor app — and the ESPHome proxies used, with board and ESPHome version;
+- the diagnostics download (Settings → Devices & services → Bluetooth Mesh →
+  **⋮** → *Download diagnostics*);
+- a debug log, plus what you did, what you expected, and what happened instead.
+
+### Staying informed
+
+New versions are announced here and nowhere else. To hear about one:
+
+- **HACS already offers you the update**, release notes included — nothing to do;
+- subscribe to `https://github.com/dasimon135/ha-bluetooth-mesh/releases.atom` in
+  any RSS reader, or inside Home Assistant through the `feedreader` integration;
+- or use **Watch → Custom → Releases** on this repository.
 
 ## License
 

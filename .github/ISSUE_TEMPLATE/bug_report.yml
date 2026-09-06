@@ -1,0 +1,64 @@
+name: Bug report
+description: Report a problem with the Bluetooth Mesh integration
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. Please fill in as much of the form as
+        possible - it is what makes an issue diagnosable without a round trip.
+
+        Before you continue, check [Credit and honesty](https://github.com/dasimon135/ha-bluetooth-mesh#credit-and-honesty).
+        This is a reverse-engineered stack. That section says plainly what is validated against the specification and what was found empirically.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the problem, what you expected instead, and how to reproduce it.
+    validations:
+      required: true
+  - type: input
+    id: ha-version
+    attributes:
+      label: Home Assistant version
+      description: Settings -> About (e.g. 2026.8.2)
+      placeholder: "2026.8.2"
+    validations:
+      required: true
+  - type: input
+    id: integration-version
+    attributes:
+      label: Bluetooth Mesh version
+      description: HACS -> Bluetooth Mesh (e.g. 0.6.0)
+      placeholder: "0.6.0"
+    validations:
+      required: true
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Nodes and proxies
+      description: |
+        Node brand and model, whether they were ever provisioned by a vendor app, and the ESPHome proxies used with their board and ESPHome version.
+      placeholder: |
+        Hafele Connect Mesh LED strips, previously provisioned by the vendor app
+        2 x ESP32 proxy on ESPHome 2026.8.2
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: |
+        Settings -> Devices & services -> Bluetooth Mesh -> entry menu (...) -> Download diagnostics.
+        Attach the file or paste its content here.
+      placeholder: Drag and drop the diagnostics JSON file here.
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Home Assistant logs related to the issue (Settings -> System -> Logs, filter on "bluetooth_mesh").
+      render: text
+    validations:
+      required: false
