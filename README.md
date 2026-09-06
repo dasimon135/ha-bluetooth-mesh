@@ -6,23 +6,38 @@
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![License](https://img.shields.io/github/license/dasimon135/ha-bluetooth-mesh)](LICENSE)
 
-A pure-Python **Bluetooth SIG Mesh** stack and a **Home Assistant** integration
-that lets HA control Bluetooth Mesh lighting — Häfele Connect Mesh (Loox),
-other ThingOS-based luminaires, and standard SIG-Mesh lights — **with no extra
-hardware** beyond what most installs already have: an ESPHome Bluetooth proxy or
-a local Bluetooth adapter.
+Control **Bluetooth Mesh lighting** from Home Assistant — Häfele Connect Mesh
+(Loox), other ThingOS luminaires, and standard SIG-Mesh lights — using the
+Bluetooth you already have. No vendor gateway, no extra box.
 
-Home Assistant has no native Bluetooth Mesh support, which orphans entire
-product families of "app-only" mesh lights. Existing workarounds need either a
-discontinued vendor gateway or an experimental BlueZ `bluetooth-meshd` setup
-that cannot run on Home Assistant OS. This project removes both requirements.
+These are the lights that came with an app and nothing else. Home Assistant has
+no Bluetooth Mesh support of its own, so until now the choices were a vendor
+gateway (Häfele's has been discontinued) or an experimental BlueZ setup that
+will not run on Home Assistant OS. This removes both.
 
-> **Status:** working, validated on real hardware. A Häfele Connect Mesh
-> tunable-white lamp is controlled end-to-end from Home Assistant through an
-> ESPHome Bluetooth proxy — on/off, brightness, and colour temperature — with a
-> kept-alive proxy connection that makes commands feel instant, and lamp state
-> **read back from the mesh** rather than assumed. See
-> [What it controls](#what-it-controls) for the current capability surface.
+## Will this work for me?
+
+**Your lights.** Bluetooth Mesh luminaires: Häfele Connect Mesh and Loox,
+ThingOS-based lights sold under other names, and standard SIG-Mesh nodes. If
+the lamp was set up from a phone app over Bluetooth and there is no hub in the
+box, it is likely one of these.
+
+**What you need.** An ESPHome Bluetooth proxy within range of the lights, or a
+Bluetooth adapter on the Home Assistant machine — whichever you already have.
+Nothing else to buy.
+
+**Colour is not supported yet.** On/off, brightness and warm-to-cool white all
+work. Full-colour RGB lamps do not: the author's own lights are tunable-white,
+and rather than ship colour untested, it is left out. If you have colour
+hardware and want to help, that is exactly what is missing.
+
+**You can keep using the vendor app.** The integration joins your existing mesh
+rather than replacing it, so the app and Home Assistant coexist — see
+[Coexistence with the vendor app](#coexistence-with-the-vendor-app-shared-keys).
+
+**What Home Assistant shows is what the lamp says.** Brightness and colour
+temperature are read back from the light itself, not assumed from the last
+command — so changing a lamp from the app is reflected here.
 
 ## What it controls
 
