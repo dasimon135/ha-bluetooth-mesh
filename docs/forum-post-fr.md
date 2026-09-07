@@ -1,11 +1,25 @@
 <!--
-Brouillon pour le forum HACF (forum.hacf.fr) → catégorie « Vos projets / Partage ».
-Non publié automatiquement. À copier/coller et ajuster (captures, liens) avant publication.
-Titre suggéré : [Intégration custom] Éclairage Bluetooth Mesh (Häfele Connect
-Mesh / ThingOS) — sans passerelle, via vos proxies ESPHome
+Texte final pour forum.hacf.fr t/82123, post #1.
+
+Fusionne la bannière d'entonnoir GitHub déjà en ligne (ajoutée le 2026-09-06)
+avec un corps corrigé. Deux affirmations du post en ligne sont périmées :
+
+* « État optimiste : les changements faits en parallèle depuis l'appli ne sont
+  pas relus » est faux depuis la v0.2.0 (2026-07-26) — l'état EST relu, et le
+  manifeste déclare `iot_class: local_polling` ;
+* la température de couleur est lue depuis la lampe, avec sa vraie plage de
+  Kelvin, depuis la v0.6.0 (2026-08-29).
+
+C'est David qui édite le post ; rien ici n'est publié automatiquement.
 -->
 
-## Éclairage Bluetooth Mesh dans Home Assistant — sans passerelle vendeur
+> ### 📍 Nouveautés et support : sur GitHub
+>
+> Je maintiens cette intégration seul et bénévolement, alors tout est suivi au même endroit : **[signaler un bug ou poser une question](https://github.com/dasimon135/ha-bluetooth-mesh/issues/new/choose)**.
+>
+> Les nouvelles versions n'ont plus besoin d'être annoncées ici : **HACS vous les propose**, notes de version comprises. Sinon, flux RSS `https://github.com/dasimon135/ha-bluetooth-mesh/releases.atom`, ou **Watch → Releases** sur le dépôt.
+>
+> Ce fil reste ouvert pour l'entraide. Le [README](https://github.com/dasimon135/ha-bluetooth-mesh#readme) fait foi et reste à jour — ce message, non.
 
 Home Assistant ne gère pas nativement le **Bluetooth SIG Mesh**, ce qui laisse
 sur le carreau des familles entières de lampes mesh « pilotables seulement par
@@ -38,6 +52,16 @@ les commandes quasi instantanées.
 
 - Marche/arrêt, **luminosité** et **température de couleur** (blanc variable),
   une entité `light` HA par nœud.
+- **L'état est lu depuis la lampe, pas supposé.** Un proxy mesh ne transmet rien
+  vers le client tant que celui-ci n'a pas configuré son filtre d'adresses ;
+  l'intégration le configure, donc marche/arrêt, luminosité et température de
+  couleur sont relus dès que le mesh redevient joignable et après chaque
+  reconnexion — **y compris les changements faits depuis l'appli du fabricant
+  pendant que Home Assistant était absent**. Une lampe dont l'état n'a pas encore
+  été lu affiche `unknown` plutôt que de deviner `off`.
+- La lampe est interrogée une fois sur la **plage de Kelvin qu'elle suit
+  réellement**, pour que le curseur propose ses vraies extrémités au lieu d'un
+  2700–6500 conventionnel.
 - Réponse instantanée (connexion proxy maintenue ; délai configurable si vous
   voulez aussi continuer à utiliser l'appli du fabricant — un nœud mesh n'a
   qu'un seul emplacement proxy).
@@ -48,10 +72,9 @@ les commandes quasi instantanées.
   uniquement, donc j'ai préféré ne pas livrer de la couleur non testée. **Si
   vous avez une lampe mesh couleur et voulez aider à valider, faites signe** —
   c'est un ajout propre.
-- La température de couleur n'est pas encore relue depuis la lampe : elle
-  reflète la dernière commande. En revanche l'état allumé/éteint et la
-  luminosité *sont* lus depuis le mesh — y compris les changements faits depuis
-  l'appli pendant que HA était absent.
+- **L'appairage se fait toujours dans l'appli du fabricant.** L'intégration
+  rejoint un réseau existant à partir de son export `.connect` ; ajouter une
+  lampe neuve au mesh depuis Home Assistant n'est pas encore possible.
 
 ### Installation
 
