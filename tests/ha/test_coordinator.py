@@ -1164,3 +1164,38 @@ async def test_a_lost_permanent_link_is_retried_by_the_periodic_probe(hass) -> N
         assert coord._controller is not None
         assert coordinator_mod.async_connect_bearer.await_count == connects_before + 1
     await coord.async_stop()
+
+
+async def test_a_connect_failure_names_its_type_and_warns_once(hass, caplog) -> None:
+    """An empty exception message must not produce an empty reason in the log.
+
+    ``asyncio.timeout`` raises a ``TimeoutError`` whose ``str()`` is the empty
+    string, so logging the message alone printed ``mesh connect failed:`` and
+    stopped there — the one line meant to explain why the integration went
+    unavailable said nothing at all, which is exactly what an unexplained
+    2026-09-05 stall left behind. The type is now part of the reason.
+
+    Level matters too: a miss is routine on a single-slot lamp, so the ones
+    below ``UNREACHABLE_THRESHOLD`` stay at debug, while the miss that actually
+    costs availability warns — once. Probing carries on for as long as we are
+    down, and a warning per retry would bury the first one.
+    """
+    entry = _make_entry(hass)
+    # Raised from inside the guarded block, like a real connect/GATT failure.
+    with _patch_transport(FakeController(), ctor_side_effect=TimeoutError()):
+        coord = MeshCoordinator(hass, entry)
+        with caplog.at_level("DEBUG"):
+            for _ in range(UNREACHABLE_THRESHOLD + 2):
+                assert await coord.async_set_onoff(UNICAST, True) is None
+        await coord.async_stop()
+
+    assert coord.available is False
+    logged = [
+        r for r in caplog.records if r.getMessage().startswith("mesh connect failed:")
+    ]
+    assert logged, "the failure was not logged at all"
+    # No record may stop at the colon: that is the bug this test exists for.
+    assert all(r.getMessage() == "mesh connect failed: TimeoutError" for r in logged)
+
+    warned = [r for r in logged if r.levelname == "WARNING"]
+    assert len(warned) == 1

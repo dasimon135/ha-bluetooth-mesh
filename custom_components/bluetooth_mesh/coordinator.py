@@ -525,10 +525,27 @@ class MeshCoordinator:
                 )
                 await controller.start()
         except Exception as exc:  # noqa: BLE001 - transport/GATT/connect
-            logger.debug("mesh connect failed: %s", exc)
             await self._disconnect(client)
             await self._teardown()
             self._set_unavailable()
+            # `asyncio.timeout` above raises a TimeoutError whose str() is the
+            # empty string, so logging the message alone printed "mesh connect
+            # failed:" and nothing after it -- blanking out the one failure this
+            # line exists to diagnose. The type always names something; the
+            # message is appended only when it says something too.
+            detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+            # A miss is routine on a single-slot lamp (the vendor app, or the
+            # node's own housekeeping, holds the slot for a moment), which is why
+            # `_set_unavailable` waits for UNREACHABLE_THRESHOLD of them. The one
+            # that crosses it is not debug material: it takes the integration
+            # unavailable, like the "no connectable proxy" miss above. Only a
+            # successful connect clears `_fail_count`, so this is true exactly
+            # once per outage -- probing carries on while we are down, and a
+            # warning per retry would bury the first one.
+            if self._fail_count == UNREACHABLE_THRESHOLD:
+                logger.warning("mesh connect failed: %s", detail)
+            else:
+                logger.debug("mesh connect failed: %s", detail)
             return None
 
         self._client = client

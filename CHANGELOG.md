@@ -46,6 +46,22 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A failed connect now says what failed, and says it out loud once.** The
+  handler logged `logger.debug("mesh connect failed: %s", exc)`, and the
+  `asyncio.timeout` guarding the connect raises a `TimeoutError` whose `str()`
+  is the empty string — so the line printed `mesh connect failed:` and nothing
+  after it. The one message that could have explained the 2026-09-05 stall,
+  which only a Home Assistant restart cleared, carried no reason at all. The
+  exception type is now part of the reason, and the message is appended only
+  when it says something too.
+
+  It was also the wrong level: a connect that fails takes the integration
+  unavailable, exactly like the "no connectable proxy" miss logged beside it at
+  warning. Only the miss that crosses `UNREACHABLE_THRESHOLD` warns — the ones
+  below it are routine on a lamp with a single proxy slot, and since probing
+  carries on for as long as the link is down, warning on every retry would bury
+  the first one.
+
 - **A Data Out subscribe that fails late no longer passes for a working link.**
   `GattBearer.start` waits one second for `start_notify` to confirm, then
   proceeds — some proxied backends deliver notifications without ever resolving
