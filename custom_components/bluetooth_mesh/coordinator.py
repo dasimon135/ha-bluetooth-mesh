@@ -895,6 +895,13 @@ class MeshCoordinator:
         async with self._lock:
             if self._controller is not None:
                 return  # a held command connection already proves reachability
+            if not self._may_attempt():
+                # Checked again under the lock, not only at the gate: on
+                # 2026-09-12 the probe tick passed the gate while the drop
+                # watchdog's reconnect was still in flight, queued here, and
+                # connected the second that reconnect failed -- one attempt
+                # inside the wait the failure had just imposed.
+                return
             controller = await self._ensure_connected()
             if controller is not None and self._idle_timeout > 0:
                 # Probe only — hand the slot straight back to the vendor app.

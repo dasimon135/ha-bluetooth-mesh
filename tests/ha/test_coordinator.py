@@ -1300,6 +1300,7 @@ async def test_the_periodic_probe_waits_out_the_backoff(hass) -> None:
         coord = MeshCoordinator(hass, entry)
         connects = coordinator_mod.async_connect_bearer
         for _ in range(3):
+            clock["now"] += 600  # each wait spent, so each probe attempts
             await coord._async_probe()
         assert connects.await_count == 3
 
@@ -1384,4 +1385,45 @@ async def test_a_successful_connect_resets_the_backoff_and_the_attempts(hass) ->
 
         attempts = [c.kwargs.get("max_attempts") for c in connects.await_args_list]
         assert attempts == [4, 1, 1, 4]
+    await coord.async_stop()
+
+
+async def test_a_probe_queued_behind_a_failing_connect_waits_its_turn(hass) -> None:
+    """The gate must be checked once the lock is held, not only before.
+
+    Seen live on 2026-09-12 at 07:03:15, the first run of the backoff on
+    hardware: the lamp was unplugged, the drop watchdog's reconnect was still
+    in flight, and the probe tick fired. It passed the gate — no failure had
+    been recorded yet — then queued on the lock, and connected the second the
+    failing reconnect released it: one attempt inside the wait that failure
+    had just imposed, exactly what the gate exists to prevent.
+    """
+    entry = _make_entry(hass)
+    release = asyncio.Event()
+    connects = 0
+
+    async def slow_failing_connect(hass_, address, **kwargs):
+        nonlocal connects
+        connects += 1
+        await release.wait()
+        raise TimeoutError()
+
+    with (
+        _patch_transport(FakeController()),
+        patch.object(coordinator_mod, "async_connect_bearer", new=slow_failing_connect),
+        _fake_clock(),
+    ):
+        coord = MeshCoordinator(hass, entry)
+        first = hass.async_create_task(coord._async_probe())
+        await asyncio.sleep(0)
+        assert coord._lock.locked()
+
+        # The tick fires while the first attempt is still in flight.
+        queued = hass.async_create_task(coord._probe_callback(None))
+        await asyncio.sleep(0)
+
+        release.set()
+        await first
+        await queued
+        assert connects == 1
     await coord.async_stop()
