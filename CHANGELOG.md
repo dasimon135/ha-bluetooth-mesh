@@ -6,7 +6,7 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.7.0] — 2026-09-05
+## [0.7.0] — 2026-09-12
 
 ### Changed
 
@@ -70,6 +70,13 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no pressure on the node, and the advert that ends it is the one to act on at
   once, as before. A successful connect clears the wait. One info line per step
   (`mesh proxy backoff: next connect attempt in N s`) tells the climb in the log.
+
+  Validated on the author's lamp on 2026-09-12 (`v0.7.0-rc3` and `-rc4`): with
+  the node unplugged, the wait climbed 15 → 30 → 60 → 120 → 240 → 300 s with
+  exactly one attempt per window, and the first advert after plugging it back
+  in reconnected at once. The rc3 run also caught a probe that had queued on
+  the connect lock before the first failure and fired one second after it;
+  the gate is now checked again once the lock is held.
 
 - **A failed connect now says what failed, and says it out loud once.** The
   handler logged `logger.debug("mesh connect failed: %s", exc)`, and the
