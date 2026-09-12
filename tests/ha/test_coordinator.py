@@ -1199,3 +1199,231 @@ async def test_a_connect_failure_names_its_type_and_warns_once(hass, caplog) -> 
 
     warned = [r for r in logged if r.levelname == "WARNING"]
     assert len(warned) == 1
+
+
+# ---------------------------------------------------------------------------
+# A node that is hammered never recovers.
+#
+# 2026-09-10 20:48, David's network: a reload of the entry dropped the held
+# link, and every path that reconnects — push discovery on each 0x1828 advert,
+# the 15 s probe, the drop watchdog — fired the moment the lock was free, each
+# one four GATT connects under bleak-retry-connector. Forty minutes and 61
+# failed connects later (BlueSight: ``kind: storm``) the node still refused
+# everyone, the vendor app included. Disabling the integration for 130 s and
+# enabling it again connected in 8 s. The node was never wedged: it never had a
+# quiet moment. The BRC1H pairing storm in daikin_madoka is the same mechanism,
+# and the cure is the same: back off, exponentially, on consecutive failures.
+
+
+async def _advertise(coord, callbacks) -> None:
+    """Fire one 0x1828 advert and let whatever probe it starts run to the end."""
+    callbacks[0](PROXY_ADDR)
+    await asyncio.sleep(0)
+    await _wait_for(lambda: not coord._lock.locked())
+    await asyncio.sleep(0.01)
+
+
+@contextlib.contextmanager
+def _fake_clock(start: float = 1000.0):
+    """Drive the coordinator's monotonic clock by hand."""
+    clock = {"now": start}
+    with patch.object(
+        coordinator_mod, "monotonic", side_effect=lambda: clock["now"]
+    ):
+        yield clock
+
+
+def _register_into(callbacks: list):
+    def register(hass_, net_key, on_found):
+        callbacks.append(on_found)
+        return lambda: None
+
+    return register
+
+
+async def test_adverts_do_not_reconnect_faster_than_the_backoff(hass) -> None:
+    """Adverts arrive several times a second; the backoff must gate them all."""
+    entry = _make_entry(hass)
+    callbacks: list = []
+    base = coordinator_mod.CONNECT_BACKOFF_BASE.total_seconds()
+    with (
+        _patch_transport(FakeController(), ctor_side_effect=TimeoutError()),
+        patch.object(
+            coordinator_mod,
+            "async_register_proxy_callback",
+            side_effect=_register_into(callbacks),
+        ),
+        _fake_clock() as clock,
+    ):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        connects = coordinator_mod.async_connect_bearer
+        await _wait_for(lambda: connects.await_count == 1)
+        await _wait_for(lambda: not coord._lock.locked())
+
+        # The startup probe failed once. Not one advert may start a connect
+        # inside the first window (the old fixed retry interval).
+        for _ in range(10):
+            await _advertise(coord, callbacks)
+        assert connects.await_count == 1
+
+        clock["now"] += base
+        await _advertise(coord, callbacks)
+        assert connects.await_count == 2
+
+        # That one failed too, so the window doubled: the same delay again
+        # buys nothing, twice the delay buys one attempt.
+        clock["now"] += base
+        await _advertise(coord, callbacks)
+        assert connects.await_count == 2
+        clock["now"] += base
+        await _advertise(coord, callbacks)
+        assert connects.await_count == 3
+    await coord.async_stop()
+
+
+async def test_the_periodic_probe_waits_out_the_backoff(hass) -> None:
+    """The 15 s retry tick must not undercut a backoff that has outgrown it."""
+    entry = _make_entry(hass)
+    delays: list[float] = []
+    real_call_later = coordinator_mod.async_call_later
+
+    def call_later(hass_, delay, action):
+        delays.append(delay)
+        return real_call_later(hass_, delay, action)
+
+    with (
+        _patch_transport(FakeController(), ctor_side_effect=TimeoutError()),
+        patch.object(coordinator_mod, "async_call_later", side_effect=call_later),
+        _fake_clock() as clock,
+    ):
+        coord = MeshCoordinator(hass, entry)
+        connects = coordinator_mod.async_connect_bearer
+        for _ in range(3):
+            clock["now"] += 600  # each wait spent, so each probe attempts
+            await coord._async_probe()
+        assert connects.await_count == 3
+
+        coord._schedule_probe()
+        assert delays[-1] == 60.0  # 15 -> 30 -> 60 after three failures
+        coord._cancel_probe()
+
+        # A tick that lands inside the window (armed before the last failure
+        # widened it) attempts nothing and re-arms for the remainder.
+        clock["now"] += 40
+        await coord._probe_callback(None)
+        assert connects.await_count == 3
+        assert delays[-1] == 20.0
+        coord._cancel_probe()
+
+        # Past the window the tick attempts again.
+        clock["now"] += 20
+        await coord._probe_callback(None)
+        assert connects.await_count == 4
+    await coord.async_stop()
+
+
+async def test_the_backoff_is_capped_and_each_step_is_logged(hass, caplog) -> None:
+    """The log must tell the climb, and the climb must stop at the cap."""
+    entry = _make_entry(hass)
+    with (
+        _patch_transport(FakeController(), ctor_side_effect=TimeoutError()),
+        _fake_clock() as clock,
+        caplog.at_level("DEBUG"),
+    ):
+        coord = MeshCoordinator(hass, entry)
+        for _ in range(7):
+            await coord._async_probe()
+            clock["now"] += 600  # past any window, so every probe attempts
+        await coord.async_stop()
+
+    steps = [
+        r for r in caplog.records if r.getMessage().startswith("mesh proxy backoff")
+    ]
+    assert [r.levelname for r in steps] == ["INFO"] * 6 + ["DEBUG"]
+    assert [r.args[0] for r in steps] == [15, 30, 60, 120, 240, 300, 300]
+
+
+async def test_a_successful_connect_resets_the_backoff_and_the_attempts(hass) -> None:
+    """Pressure is per attempt: one GATT try while backing off, four otherwise."""
+    entry = _make_entry(hass)
+    callbacks: list = []
+    fake = FakeController()
+    base = coordinator_mod.CONNECT_BACKOFF_BASE.total_seconds()
+    with (
+        _patch_transport(
+            fake, ctor_side_effect=[TimeoutError(), TimeoutError(), fake, fake]
+        ),
+        patch.object(
+            coordinator_mod,
+            "async_register_proxy_callback",
+            side_effect=_register_into(callbacks),
+        ),
+        _fake_clock() as clock,
+    ):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        connects = coordinator_mod.async_connect_bearer
+        await _wait_for(lambda: connects.await_count == 1)
+        await _wait_for(lambda: not coord._lock.locked())
+
+        clock["now"] += base
+        await _advertise(coord, callbacks)
+        clock["now"] += 2 * base
+        await _advertise(coord, callbacks)
+        assert coord._controller is fake
+        assert coord.available is True
+
+        # The link is lost again; no failure has happened since the success,
+        # so the very next advert reconnects at once, with the full retry
+        # budget.
+        async with coord._lock:
+            await coord._teardown()
+        await _advertise(coord, callbacks)
+        assert connects.await_count == 4
+        assert coord._controller is fake
+
+        attempts = [c.kwargs.get("max_attempts") for c in connects.await_args_list]
+        assert attempts == [4, 1, 1, 4]
+    await coord.async_stop()
+
+
+async def test_a_probe_queued_behind_a_failing_connect_waits_its_turn(hass) -> None:
+    """The gate must be checked once the lock is held, not only before.
+
+    Seen live on 2026-09-12 at 07:03:15, the first run of the backoff on
+    hardware: the lamp was unplugged, the drop watchdog's reconnect was still
+    in flight, and the probe tick fired. It passed the gate — no failure had
+    been recorded yet — then queued on the lock, and connected the second the
+    failing reconnect released it: one attempt inside the wait that failure
+    had just imposed, exactly what the gate exists to prevent.
+    """
+    entry = _make_entry(hass)
+    release = asyncio.Event()
+    connects = 0
+
+    async def slow_failing_connect(hass_, address, **kwargs):
+        nonlocal connects
+        connects += 1
+        await release.wait()
+        raise TimeoutError()
+
+    with (
+        _patch_transport(FakeController()),
+        patch.object(coordinator_mod, "async_connect_bearer", new=slow_failing_connect),
+        _fake_clock(),
+    ):
+        coord = MeshCoordinator(hass, entry)
+        first = hass.async_create_task(coord._async_probe())
+        await asyncio.sleep(0)
+        assert coord._lock.locked()
+
+        # The tick fires while the first attempt is still in flight.
+        queued = hass.async_create_task(coord._probe_callback(None))
+        await asyncio.sleep(0)
+
+        release.set()
+        await first
+        await queued
+        assert connects == 1
+    await coord.async_stop()

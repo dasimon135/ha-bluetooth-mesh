@@ -36,6 +36,7 @@ import asyncio
 import json
 import logging
 from datetime import timedelta
+from time import monotonic
 
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
@@ -99,6 +100,30 @@ SEQ_SAVE_DELAY = 10.0
 # daikin_madoka integration's short retry).
 PROBE_INTERVAL_AVAILABLE = timedelta(minutes=2)
 PROBE_INTERVAL_UNAVAILABLE = timedelta(seconds=15)
+
+# A node that is hammered never recovers. 2026-09-10, David's network: a reload
+# of the entry dropped the held link, and every reconnect path -- push discovery
+# on each 0x1828 advert, the 15 s probe, the drop watchdog -- fired the moment
+# the lock was free, each one four GATT connects. Forty minutes and 61 failed
+# connects later (BlueSight: `kind: storm`) the node still refused everyone, the
+# vendor app included; 130 s of radio silence, and the next connect took 8 s.
+# The node was never wedged, it never had a quiet moment -- the BRC1H pairing
+# storm in daikin_madoka is the same mechanism. So consecutive GATT failures
+# widen the wait before the next attempt, doubling from the retry interval up
+# to the cap, and every path honours that wait. A miss that never reached the
+# radio (no connectable proxy advertised) does not count: it put no pressure on
+# the node, and the advert that ends it is the one to act on at once. While
+# backing off each attempt is a single GATT try: bleak-retry-connector's four
+# are four times the pressure, on a node that needs less. Two paths are not
+# gated on purpose: the drop watchdog, because a drop follows a success, which
+# cleared the wait (if its reconnect fails, the wait is back); and a command
+# from the user, which is a deliberate act -- it gets one try, and a failure
+# widens the wait like any other.
+CONNECT_BACKOFF_BASE = PROBE_INTERVAL_UNAVAILABLE
+CONNECT_BACKOFF_CAP = timedelta(minutes=5)
+# bleak-retry-connector's own default, spelled out because the coordinator
+# passes one or the other explicitly.
+CONNECT_ATTEMPTS = 4
 
 # Hard ceiling on establishing the proxy connection so a hung connect can never
 # wedge the lock forever.
@@ -186,6 +211,10 @@ class MeshCoordinator:
         self._beacon_warned = False
         self._stopped = False
         self._fail_count = 0
+        # Current wait after consecutive GATT failures (0 = none) and the
+        # monotonic instant before which no automatic connect may start.
+        self._backoff = 0.0
+        self._next_attempt = 0.0
         self._issue_active = False
         self._probe_unsub: CALLBACK_TYPE | None = None
         self._discovery_unsub: CALLBACK_TYPE | None = None
@@ -428,17 +457,46 @@ class MeshCoordinator:
             and self._controller is None
         )
 
+    def _may_attempt(self) -> bool:
+        """True once the wait imposed by the last GATT failure has passed."""
+        return monotonic() >= self._next_attempt
+
+    def _back_off(self) -> None:
+        """Widen the wait after a GATT failure: base, then doubling, to the cap.
+
+        One line per step at info, so the log tells the climb; at the cap the
+        wait no longer changes and the line drops to debug.
+        """
+        previous = self._backoff
+        base = CONNECT_BACKOFF_BASE.total_seconds()
+        cap = CONNECT_BACKOFF_CAP.total_seconds()
+        self._backoff = base if previous == 0 else min(previous * 2, cap)
+        self._next_attempt = monotonic() + self._backoff
+        logger.log(
+            logging.INFO if self._backoff > previous else logging.DEBUG,
+            "mesh proxy backoff: next connect attempt in %d s "
+            "(%d consecutive failures)",
+            int(self._backoff),
+            self._fail_count,
+        )
+
     def _schedule_probe(self) -> None:
-        """Arm the next probe: fast while unavailable, slow while reachable."""
+        """Arm the next probe: fast while unavailable, slow while reachable.
+
+        Fast, but never inside the backoff: a retry tick that undercut the wait
+        would be the storm again, on a timer instead of on adverts.
+        """
         if self._stopped or self._probe_unsub is not None:
             return
-        delay = (
-            PROBE_INTERVAL_UNAVAILABLE
-            if not self._available or self._wants_link()
-            else PROBE_INTERVAL_AVAILABLE
-        )
+        if not self._available or self._wants_link():
+            delay = max(
+                PROBE_INTERVAL_UNAVAILABLE.total_seconds(),
+                self._next_attempt - monotonic(),
+            )
+        else:
+            delay = PROBE_INTERVAL_AVAILABLE.total_seconds()
         self._probe_unsub = async_call_later(
-            self.hass, delay.total_seconds(), self._probe_callback
+            self.hass, delay, self._probe_callback
         )
 
     def _cancel_probe(self) -> None:
@@ -450,14 +508,18 @@ class MeshCoordinator:
     def _on_proxy_seen(self, address: str) -> None:
         """A proxy for our network just advertised — try again straight away.
 
-        Only while we believe we are unreachable: adverts arrive constantly,
-        and probing on each one would take the lamp's single proxy slot for
-        nothing.
+        Only while we believe we are unreachable, and never inside the
+        backoff: adverts arrive several times a second, and until 2026-09-10
+        each one started a connect the moment the lock was free -- this was
+        the dominant path of the storm, the one that made the fixed probe
+        interval irrelevant.
         """
         if self._stopped or (self._available and not self._wants_link()):
             return
         if self._lock.locked():
             return  # a connect is already in flight; adverts arrive constantly
+        if not self._may_attempt():
+            return  # the node is being left alone on purpose
         logger.debug("mesh proxy %s advertised; probing now", address)
         self.hass.async_create_background_task(
             self._async_probe(), f"{DOMAIN} discovery probe"
@@ -468,7 +530,7 @@ class MeshCoordinator:
         # Only probe to RECOVER when we believe we are unavailable; while
         # available we rely on real commands + the held connection, so we never
         # churn the lamp's slot behind the user's back.
-        if not self._available or self._wants_link():
+        if (not self._available or self._wants_link()) and self._may_attempt():
             await self._async_probe()
         self._schedule_probe()
 
@@ -517,7 +579,11 @@ class MeshCoordinator:
         client = None
         try:
             async with asyncio.timeout(CONNECT_TIMEOUT):
-                client, bearer = await async_connect_bearer(self.hass, address)
+                client, bearer = await async_connect_bearer(
+                    self.hass,
+                    address,
+                    max_attempts=1 if self._backoff else CONNECT_ATTEMPTS,
+                )
                 controller = MeshController(
                     self._network, bearer, src_addr=self._src_addr,
                     seq=self._seq, tid=self._tid, iv_index=self._iv_index,
@@ -528,6 +594,7 @@ class MeshCoordinator:
             await self._disconnect(client)
             await self._teardown()
             self._set_unavailable()
+            self._back_off()
             # `asyncio.timeout` above raises a TimeoutError whose str() is the
             # empty string, so logging the message alone printed "mesh connect
             # failed:" and nothing after it -- blanking out the one failure this
@@ -828,6 +895,13 @@ class MeshCoordinator:
         async with self._lock:
             if self._controller is not None:
                 return  # a held command connection already proves reachability
+            if not self._may_attempt():
+                # Checked again under the lock, not only at the gate: on
+                # 2026-09-12 the probe tick passed the gate while the drop
+                # watchdog's reconnect was still in flight, queued here, and
+                # connected the second that reconnect failed -- one attempt
+                # inside the wait the failure had just imposed.
+                return
             controller = await self._ensure_connected()
             if controller is not None and self._idle_timeout > 0:
                 # Probe only — hand the slot straight back to the vendor app.
@@ -908,6 +982,8 @@ class MeshCoordinator:
         was_available = self._available
         self._available = True
         self._fail_count = 0
+        self._backoff = 0.0
+        self._next_attempt = 0.0
         self._clear_issue()
         if not was_available:
             self._notify_listeners()

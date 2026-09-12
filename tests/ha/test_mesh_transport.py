@@ -198,3 +198,25 @@ def test_async_register_proxy_callback_forwards_only_matches(hass) -> None:
     callback(foreign_info, None)
 
     assert found == ["AA:BB:CC:DD:EE:FF"]
+
+
+async def test_async_connect_bearer_forwards_the_attempt_budget(hass) -> None:
+    """Four bleak-retry-connector tries are four times the pressure on a node
+    that is backing off; the coordinator must be able to ask for one."""
+    ble_device = SimpleNamespace(address="AA:BB:CC:DD:EE:FF")
+    with (
+        patch.object(
+            mesh_transport.bluetooth,
+            "async_ble_device_from_address",
+            return_value=ble_device,
+        ),
+        patch.object(
+            mesh_transport,
+            "establish_connection",
+            new=AsyncMock(return_value=MagicMock(name="BleakClient")),
+        ) as est,
+    ):
+        await async_connect_bearer(hass, "AA:BB:CC:DD:EE:FF")
+        assert est.await_args.kwargs["max_attempts"] == 4
+        await async_connect_bearer(hass, "AA:BB:CC:DD:EE:FF", max_attempts=1)
+        assert est.await_args.kwargs["max_attempts"] == 1
