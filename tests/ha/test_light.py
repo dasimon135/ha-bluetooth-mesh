@@ -30,7 +30,7 @@ from custom_components.bluetooth_mesh.btmesh.network_model import (
     Network,
     Node,
 )
-from custom_components.bluetooth_mesh.const import CONF_INVERTED_CTL
+from custom_components.bluetooth_mesh.const import CONF_INVERTED_CTL, DOMAIN
 from custom_components.bluetooth_mesh.light import MeshLight, async_setup_entry
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "sample.connect.json"
@@ -991,3 +991,127 @@ async def test_no_warning_while_the_mesh_is_unreachable(hass, caplog) -> None:
 
     assert light.is_on is False
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+# ---------------------------------------------------------------------------
+# One entity per node capped a multi-channel controller at its first output.
+#
+# ha-bluetooth-mesh#30, 2026-09-12: a Häfele 24 V box drives two LED strips,
+# top and bottom of a mirror. Its export is ONE node with ten elements, two of
+# which host a full lighting stack — the strips are its element 0 and element
+# 1, addressed at the node's unicast and unicast+1. Only the first ever
+# appeared in Home Assistant: nothing asked for the second.
+#
+# The rule is not "one entity per element": a single lamp is free to spread
+# its models over several elements (see _split_element_network above, whose
+# OnOff sits on element 0 and whose Lightness sits on element 1), and that is
+# one light. What marks a separate output is its OWN Light Lightness server.
+
+
+def _two_output_network(*, names=("Top", "Bottom")) -> Network:
+    """One node, two outputs, each with its own full lighting stack."""
+    node = Node(
+        uuid="aaaabbbb-cccc-dddd-eeee-ffff00001111",
+        unicast=0x0045,
+        device_key=b"\x00" * 16,
+        cid=0x07E9,
+        name="Two Strip Box",
+        elements=(
+            Element(
+                index=0,
+                unicast=0x0045,
+                name=names[0],
+                models=(
+                    Model(model_id=0x1000, bound_appkey_indexes=(0,)),
+                    Model(model_id=0x1300, bound_appkey_indexes=(0,)),
+                ),
+            ),
+            Element(
+                index=1,
+                unicast=0x0046,
+                name=names[1],
+                models=(
+                    Model(model_id=0x1000, bound_appkey_indexes=(0,)),
+                    Model(model_id=0x1300, bound_appkey_indexes=(0,)),
+                ),
+            ),
+        ),
+    )
+    return replace(_fixture_network(), nodes=(node,))
+
+
+async def _setup(hass, network):
+    coordinator = FakeCoordinator(network)
+    added: list = []
+    await async_setup_entry(hass, _entry(coordinator), lambda e: added.extend(e))
+    for light in added:
+        light.async_write_ha_state = lambda: None  # type: ignore[method-assign]
+    return added, coordinator
+
+
+async def test_a_two_output_controller_gets_one_light_per_output(hass) -> None:
+    added, _ = await _setup(hass, _two_output_network())
+
+    assert [light.unique_id for light in added] == [
+        f"{MESH_UUID}_0045",
+        f"{MESH_UUID}_0046",
+    ]
+
+
+async def test_the_first_output_keeps_the_identity_it_already_had(hass) -> None:
+    """Element 0's address IS the node's, so nobody's entity is renamed."""
+    added, _ = await _setup(hass, _two_output_network())
+
+    assert added[0].unique_id == f"{MESH_UUID}_0045"
+
+
+async def test_each_output_is_commanded_at_its_own_element(hass) -> None:
+    added, coordinator = await _setup(hass, _two_output_network())
+
+    await added[1].async_turn_on(brightness=128)
+
+    assert [c for c in coordinator.calls if c[0] == "set_lightness"] == [
+        ("set_lightness", 0x0046, pytest.approx(128 / 255, abs=1e-6))
+    ]
+
+
+async def test_the_outputs_of_one_controller_share_its_device(hass) -> None:
+    """Two strips in one box are two entities on one device, not two boxes."""
+    added, _ = await _setup(hass, _two_output_network())
+
+    first, second = (light.device_info["identifiers"] for light in added)
+    assert first == second == {(DOMAIN, f"{MESH_UUID}_0045")}
+
+
+async def test_each_output_carries_the_name_it_was_given(hass) -> None:
+    added, _ = await _setup(hass, _two_output_network())
+
+    assert [light.name for light in added] == ["Top", "Bottom"]
+
+
+async def test_an_unnamed_output_is_told_apart_by_its_address(hass) -> None:
+    added, _ = await _setup(hass, _two_output_network(names=("", "")))
+
+    assert [light.name for light in added] == ["Output 0045", "Output 0046"]
+
+
+async def test_a_lamp_spread_over_several_elements_is_still_one_light(hass) -> None:
+    """The regression this rule has to avoid.
+
+    Element 0 hosts Generic OnOff, element 1 Light Lightness and Light CTL:
+    one lamp, laid out across elements. Counting every element that answers an
+    on/off opcode would split it into two half-lights, one of which could not
+    dim and the other could not be switched on.
+    """
+    added, coordinator = await _setup(hass, _split_element_network())
+
+    assert len(added) == 1
+    await added[0].async_turn_off()
+    assert ("set_onoff", 0x0030, False) in coordinator.calls
+
+
+async def test_a_single_output_node_is_named_by_its_device_as_before(hass) -> None:
+    """One lighting element: the entity takes the device's name, as it did."""
+    added, _ = await _setup(hass, _fixture_network())
+
+    assert added[0].name is None

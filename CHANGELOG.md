@@ -6,6 +6,41 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-09-12
+
+### Fixed
+
+- **A controller driving several lights now gives you all of them, not just
+  the first.** Entities were created one per mesh *node*, and a multi-channel
+  controller is a single node whose channels are its elements. Reported in
+  [#30](https://github.com/dasimon135/ha-bluetooth-mesh/issues/30): a Häfele
+  24 V box drives the two LED strips of a mirror from element 0 and element 1
+  of one node, and only the top strip ever appeared. The bottom one was not
+  misparsed and the radio was never at fault — nothing asked for it.
+
+  Each element carrying its own Light Lightness server is now its own entity.
+  That test matters: one lamp is free to lay its models out across several
+  elements (Generic OnOff on one, Light Lightness and Light CTL on the next),
+  and counting every element that answers an on/off opcode would have cut such
+  a lamp in two, one half unable to dim and the other unable to switch on. A
+  node that dims nothing falls back to its on/off servers, so a multi-channel
+  relay gets one entity per channel too.
+
+  **Nothing you already have is renamed.** A node with one lighting output —
+  every lamp this project has been tested on — yields exactly the entity it
+  did before, with the same unique id, addressed the same way across the whole
+  node. The extra outputs of a multi-channel node arrive beside the first,
+  sharing its device, each named after the output as the vendor app names it
+  (the export ties each name to the element it drives) and falling back to
+  `Output <address>` when the export says nothing. The controller's own entry
+  no longer names the first output, which is how a two-strip box ended up with
+  a strip called *MyHomeIsCool*.
+
+  Validated on the reporter's export end to end, and on the author's
+  single-output lamp for the absence of change. Neither the author nor the
+  library has a multi-channel controller to command, so the reporter's
+  hardware is what confirms the second half.
+
 ## [0.7.1] — 2026-09-12
 
 ### Fixed

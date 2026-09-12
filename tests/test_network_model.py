@@ -359,3 +359,77 @@ def test_free_unicast_rejects_an_address_outside_the_unicast_range():
 
     with pytest.raises(NetworkModelError):
         network.free_unicast(0xC000)  # a group address, not a unicast
+
+
+# ---------------------------------------------------------------------------
+# A controller with several outputs drives one element per output, and the
+# export names them: each `tos_devices` entry that owns physical ports carries
+# the `meshAddress` of the element it drives and the name the user gave it.
+# Reported 2026-09-12 (ha-bluetooth-mesh#30): a box driving two LED strips.
+
+
+def _doc_with_devices(tos_devices, extra_element_models=("1300", "1000")):
+    """The fixture, with a second lighting element and the given tos_devices."""
+    with open(FIXTURE, encoding="utf-8") as handle:
+        doc = json.load(handle)
+    node = doc["nodes"][0]
+    node["tos_devices"] = tos_devices
+    node["elements"].insert(
+        1,
+        {
+            "index": 1,
+            "models": [
+                {"modelId": mid, "bind": [0]} for mid in extra_element_models
+            ],
+        },
+    )
+    for index, element in enumerate(node["elements"]):
+        element["index"] = index
+    return doc
+
+
+def test_an_element_is_named_after_the_output_that_drives_it():
+    doc = _doc_with_devices(
+        [
+            {"name": "Controller", "meshAddress": 12, "boxConfigurationSettings": []},
+            {"name": "Top", "meshAddress": 12, "ports": [0]},
+            {"name": "Bottom", "meshAddress": 13, "ports": [1]},
+        ]
+    )
+    node = Network.from_connect(doc).nodes[0]
+
+    assert node.elements[0].name == "Top"
+    assert node.elements[1].name == "Bottom"
+
+
+def test_the_controller_entry_does_not_name_an_element():
+    """It shares element 0's address but drives no port of its own.
+
+    Matching on ``meshAddress`` alone would let the box's own entry name the
+    first output, which is how a two-strip box ends up called MyHomeIsCool.
+    """
+    doc = _doc_with_devices(
+        [
+            {"name": "Controller", "meshAddress": 12, "boxConfigurationSettings": []},
+            {"name": "Bottom", "meshAddress": 13, "ports": [1]},
+        ]
+    )
+    node = Network.from_connect(doc).nodes[0]
+
+    assert node.elements[0].name == ""
+    assert node.elements[1].name == "Bottom"
+
+
+def test_an_element_nobody_claims_has_no_name():
+    node = Network.from_connect_file(FIXTURE).nodes[0]
+
+    assert [element.name for element in node.elements] == ["", "", ""]
+
+
+def test_elements_for_model_returns_every_host_in_order():
+    doc = _doc_with_devices([])
+    node = Network.from_connect(doc).nodes[0]
+
+    assert [e.unicast for e in node.elements_for_model(0x1300)] == [0x000C, 0x000D]
+    assert [e.unicast for e in node.elements_for_model(0x1306)] == [0x000E]
+    assert node.elements_for_model(0x1234) == ()

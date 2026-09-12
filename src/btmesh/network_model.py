@@ -92,11 +92,17 @@ class Element:
 
     ``unicast`` is the node's base unicast plus ``index`` (§3.4.2): element 0 is
     the node's primary address, element 1 is base+1, and so on.
+
+    ``name`` is what the vendor app calls the physical output this element
+    drives, when the export says (see :func:`_output_names`); "" otherwise. A
+    multi-channel controller is one node whose elements are its channels, and
+    the composition alone cannot tell you which socket on the wall each one is.
     """
 
     index: int
     unicast: int
     models: tuple[Model, ...]
+    name: str = ""
 
     def has_model(self, model_id: int) -> bool:
         """Whether this element hosts the model ``model_id``."""
@@ -128,6 +134,16 @@ class Node:
             if element.has_model(model_id):
                 return element
         return None
+
+    def elements_for_model(self, model_id: int) -> tuple["Element", ...]:
+        """Every element hosting ``model_id``, in index order.
+
+        The plural of :meth:`element_for_model`, and the difference matters on
+        a multi-channel controller: each channel is an element carrying its own
+        copy of the server, and asking for only the first one is how a box
+        driving two LED strips appears as one.
+        """
+        return tuple(e for e in self.elements if e.has_model(model_id))
 
 
 @dataclass(frozen=True)
@@ -388,6 +404,31 @@ def _node_name(node: dict) -> str:
     return ""
 
 
+def _output_names(node: dict) -> dict[int, str]:
+    """Map element unicast -> the name of the output it drives.
+
+    A ``tos_devices`` entry describes either the controller itself or one of
+    its physical outputs; only an output owns ``ports``, and its
+    ``meshAddress`` is the element that drives it. The distinction is not
+    cosmetic: on a two-strip box the controller's own entry carries element
+    0's address too, so matching on ``meshAddress`` alone names the first
+    strip after the box (reported as ha-bluetooth-mesh#30, where that name
+    was "MyHomeIsCool").
+    """
+    names: dict[int, str] = {}
+    devices = node.get("tos_devices")
+    if not isinstance(devices, list):
+        return names
+    for device in devices:
+        if not isinstance(device, dict) or "ports" not in device:
+            continue
+        address = device.get("meshAddress")
+        name = device.get("name")
+        if isinstance(address, int) and isinstance(name, str) and name:
+            names.setdefault(address, name)
+    return names
+
+
 def _parse_model(raw: dict) -> Model:
     """Parse one ``models[]`` entry.
 
@@ -404,7 +445,9 @@ def _parse_model(raw: dict) -> Model:
     return Model(model_id=model_id, bound_appkey_indexes=indexes)
 
 
-def _parse_element(base_unicast: int, raw: dict) -> Element:
+def _parse_element(
+    base_unicast: int, raw: dict, names: dict[int, str] | None = None
+) -> Element:
     """Parse one ``elements[]`` entry; unicast = base + element index (§3.4.2)."""
     if not isinstance(raw, dict):
         raise NetworkModelError("element entry is not an object")
@@ -412,10 +455,12 @@ def _parse_element(base_unicast: int, raw: dict) -> Element:
     models = raw.get("models", [])
     if not isinstance(models, list):
         raise NetworkModelError(f"element 'models' must be a list, got {models!r}")
+    unicast = base_unicast + index
     return Element(
         index=index,
-        unicast=base_unicast + index,
+        unicast=unicast,
         models=tuple(_parse_model(m) for m in models),
+        name=(names or {}).get(unicast, ""),
     )
 
 
@@ -431,7 +476,8 @@ def _parse_node(raw: dict) -> Node:
         raise NetworkModelError(
             f"node 'elements' must be a list, got {raw_elements!r}"
         )
-    elements = tuple(_parse_element(base_unicast, e) for e in raw_elements)
+    names = _output_names(raw)
+    elements = tuple(_parse_element(base_unicast, e, names) for e in raw_elements)
     return Node(
         uuid=str(raw.get("UUID", "")),
         unicast=base_unicast,
