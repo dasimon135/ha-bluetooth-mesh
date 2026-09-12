@@ -6,6 +6,8 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-09-12
+
 ### Fixed
 
 - **A command the lamp did not acknowledge is no longer shown as its state.**
