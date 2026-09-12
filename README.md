@@ -41,7 +41,7 @@ command — so changing a lamp from the app is reflected here.
 
 ## What it controls
 
-Each provisioned lighting node becomes one Home Assistant `light` entity, with
+Each lighting output becomes one Home Assistant `light` entity, with
 capabilities read from its mesh composition:
 
 | Node model | HA capability |
@@ -49,6 +49,12 @@ capabilities read from its mesh composition:
 | Generic OnOff (`0x1000`) | on / off |
 | Light Lightness (`0x1300`) | + brightness |
 | Light CTL (`0x1303` / `0x1306`) | + colour temperature (tunable white) |
+
+A lamp is one output, so it is one entity. A **multi-channel controller** is
+one mesh node whose channels are its elements, each carrying its own dimmer,
+and each of those becomes its own entity, named after the output as the vendor
+app names it, all grouped under the one device. A lamp that merely spreads its
+models over several elements stays one entity.
 
 **Not yet supported:** RGB / full-colour lamps (Light HSL / xyL). The author's
 hardware is tunable-white only, so colour is left unimplemented rather than

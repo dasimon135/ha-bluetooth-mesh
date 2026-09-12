@@ -68,6 +68,25 @@ def _manufacturer(cid: int) -> str:
     return _KNOWN_CIDS.get(cid, f"CID {cid:#06x}")
 
 
+def _temp_element_for(node, element):
+    """The CTL Temperature element belonging to ``element``, on a multi-output node.
+
+    A composition lists an output's temperature element right after it, before
+    the next output. Taking the node's first one instead would hand every
+    channel the temperature server of channel one.
+    """
+    following = [e for e in node.elements if e.index > element.index]
+    next_output = next(
+        (e.index for e in _outputs(node) if e.index > element.index), None
+    )
+    for candidate in following:
+        if next_output is not None and candidate.index >= next_output:
+            break
+        if candidate.has_model(MODEL_LIGHT_CTL_TEMP):
+            return candidate
+    return None
+
+
 def _model_unicast(node, model_id: int, *fallback_model_ids: int) -> int:
     """Address of the element hosting ``model_id`` on ``node``.
 
@@ -84,20 +103,43 @@ def _model_unicast(node, model_id: int, *fallback_model_ids: int) -> int:
     return node.unicast
 
 
+def _outputs(node) -> tuple:
+    """The elements of ``node`` that are each a light in their own right.
+
+    A multi-channel controller is ONE node whose channels are its elements,
+    each carrying a full lighting stack: the Häfele 24 V box of
+    ha-bluetooth-mesh#30 drives two LED strips from elements 0 and 1, and only
+    the first ever reached Home Assistant.
+
+    The test is the Light Lightness server, not "answers an on/off opcode".
+    One lamp is free to spread its models over several elements — Generic
+    OnOff on element 0, Light Lightness and Light CTL on element 1 — and
+    counting every element that answers on/off would cut that lamp in two, one
+    half unable to dim and the other unable to switch on. An element that
+    carries its own dimmer is an output; anything else belongs to one.
+
+    Falls back to the on/off servers for a node that dims nothing, so a
+    two-channel relay still gets one entity per channel.
+
+    Server models only (0x1000 / 0x1300): the client counterparts (0x1001, …)
+    are what a remote hosts, and a remote is not a light.
+    """
+    return node.elements_for_model(MODEL_LIGHT_LIGHTNESS) or node.elements_for_model(
+        MODEL_GENERIC_ONOFF
+    )
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: BluetoothMeshConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Create one light per node hosting a lightness or on/off SERVER.
+    """Create one light per lighting element (see :func:`_outputs`).
 
-    Any element counts, not just element 0. A composition is free to put the
-    lighting servers on a secondary element, and capability detection below
-    already scans the whole node — gating creation on element 0 hid such a node
-    entirely rather than exposing it with fewer features.
-
-    Server models only (0x1000 / 0x1300): the client counterparts (0x1001, …)
-    are what a remote hosts, and a remote is not a light.
+    A node with a single lighting element — every lamp tested here — yields
+    exactly the entity it did before, addressed across the whole node, so no
+    existing entity is renamed or re-addressed. A node with several yields one
+    per element, addressed at that element, sharing one device.
     """
     coordinator = entry.runtime_data
     # Read once here rather than per command in the entity: the options flow is
@@ -105,12 +147,23 @@ async def async_setup_entry(
     inverted = set(entry.options.get(CONF_INVERTED_CTL, ()))
     entities: list[MeshLight] = []
     for node in coordinator.network.nodes:
-        if node.has_model(MODEL_LIGHT_LIGHTNESS) or node.has_model(
-            MODEL_GENERIC_ONOFF
-        ):
+        outputs = _outputs(node)
+        if not outputs:
+            continue
+        if len(outputs) == 1:
             entities.append(
                 MeshLight(
                     coordinator, node, invert_ctl=node.unicast in inverted
+                )
+            )
+            continue
+        for element in outputs:
+            entities.append(
+                MeshLight(
+                    coordinator,
+                    node,
+                    element=element,
+                    invert_ctl=element.unicast in inverted,
                 )
             )
     async_add_entities(entities)
@@ -134,27 +187,50 @@ class MeshLight(LightEntity):
     _attr_should_poll = False
 
     def __init__(
-        self, coordinator: MeshCoordinator, node, *, invert_ctl: bool = False
+        self,
+        coordinator: MeshCoordinator,
+        node,
+        *,
+        element=None,
+        invert_ctl: bool = False,
     ) -> None:
+        """One light on ``node``, or on ``element`` of it.
+
+        ``element`` is given only for a node with several outputs (see
+        :func:`_outputs`). It scopes BOTH capability detection and addressing
+        to that element: on such a node the models are duplicated per channel,
+        so a node-wide search would send every channel's command to the first
+        one's address.
+        """
         self._coordinator = coordinator
         self._node = node
-        self._unicast = node.unicast
+        self._element = element
+        self._unicast = (element or node).unicast
         # Whether this lamp's CTL server maps temperature inversely. Frozen at
         # construction rather than read per command: the options flow is an
         # ``OptionsFlowWithReload``, so changing it rebuilds every entity.
         self._invert_ctl = invert_ctl
 
+        # Keyed on the element this light IS, which for a single-output node
+        # is element 0, whose address is the node's — so every entity that
+        # exists today keeps its unique id, and with it its history and any
+        # customisation.
         self._attr_unique_id = (
-            f"{coordinator.network.identifier}_{node.unicast:04x}"
+            f"{coordinator.network.identifier}_{self._unicast:04x}"
         )
+        # The DEVICE stays the node: two strips in one box are two entities on
+        # one device, not two boxes. Node-keyed, so existing devices are
+        # untouched as well.
+        device_uid = f"{coordinator.network.identifier}_{node.unicast:04x}"
 
         # Capability → HA color mode. COLOR_TEMP implies brightness support in
         # HA, so a CTL node needs only that single mode in the set.
-        if node.has_model(MODEL_LIGHT_CTL):
+        scope = element or node
+        if scope.has_model(MODEL_LIGHT_CTL):
             mode = ColorMode.COLOR_TEMP
             self._attr_min_color_temp_kelvin = DEFAULT_MIN_KELVIN
             self._attr_max_color_temp_kelvin = DEFAULT_MAX_KELVIN
-        elif node.has_model(MODEL_LIGHT_LIGHTNESS):
+        elif scope.has_model(MODEL_LIGHT_LIGHTNESS):
             mode = ColorMode.BRIGHTNESS
         else:
             mode = ColorMode.ONOFF
@@ -167,26 +243,42 @@ class MeshLight(LightEntity):
             ColorMode.ONOFF: "Generic OnOff",
         }[mode]
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, self._attr_unique_id)},
+            identifiers={(DOMAIN, device_uid)},
             name=node.name or f"Mesh {node.unicast:04x}",
             manufacturer=_manufacturer(node.cid),
             model=model,
         )
+        # A single-output node leaves the name to the device, as before. Each
+        # output of a multi-output one needs its own, or two strips arrive as
+        # two entities with one name between them; the export usually supplies
+        # it, and the element address is the fallback that is at least unique.
+        if element is not None:
+            self._attr_name = element.name or f"Output {element.unicast:04x}"
 
         # Every command is addressed to the element that actually HOSTS the
         # model it targets, not to the node's primary address. An element
         # ignores an opcode it has no model for — without acting and without
         # answering — so a node that lays its lighting servers out across
         # several elements would take every command in silence.
-        self._onoff_unicast = _model_unicast(
-            node, MODEL_GENERIC_ONOFF, MODEL_LIGHT_LIGHTNESS
-        )
-        self._lightness_unicast = _model_unicast(node, MODEL_LIGHT_LIGHTNESS)
-        self._ctl_unicast = _model_unicast(node, MODEL_LIGHT_CTL)
+        if element is not None:
+            # An output carries its own stack: every opcode goes to it.
+            self._onoff_unicast = element.unicast
+            self._lightness_unicast = element.unicast
+            self._ctl_unicast = element.unicast
+        else:
+            self._onoff_unicast = _model_unicast(
+                node, MODEL_GENERIC_ONOFF, MODEL_LIGHT_LIGHTNESS
+            )
+            self._lightness_unicast = _model_unicast(node, MODEL_LIGHT_LIGHTNESS)
+            self._ctl_unicast = _model_unicast(node, MODEL_LIGHT_CTL)
         # The Light CTL Temperature server, if any, is on its own element with
         # its own unicast — address temperature-only changes there so brightness
         # is left untouched. None → fall back to Light CTL Set instead.
-        temp_element = node.element_for_model(MODEL_LIGHT_CTL_TEMP)
+        temp_element = (
+            _temp_element_for(node, element)
+            if element is not None
+            else node.element_for_model(MODEL_LIGHT_CTL_TEMP)
+        )
         self._ctl_temp_unicast = (
             temp_element.unicast if temp_element is not None else None
         )
