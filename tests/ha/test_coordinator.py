@@ -1427,3 +1427,64 @@ async def test_a_probe_queued_behind_a_failing_connect_waits_its_turn(hass) -> N
         await queued
         assert connects == 1
     await coord.async_stop()
+
+
+async def test_a_missing_proxy_warns_once_not_on_every_probe(hass, caplog) -> None:
+    """An unplugged lamp is not news every fifteen seconds.
+
+    Probing carries on for as long as the link is down, and this line warned on
+    every miss: 49 WARNING lines in twelve minutes on 2026-09-12, between 07:41
+    and 07:53, while v0.7.0 was being validated with the lamp unplugged. Only
+    the miss that crosses ``UNREACHABLE_THRESHOLD`` — the one that takes the
+    integration unavailable — warns, exactly like the connect failure logged
+    beside it; the rest stay at debug, where the advert diagnostic is still
+    there for whoever turns the logger up.
+    """
+    entry = _make_entry(hass)
+    with _patch_transport(FakeController(), address=None):
+        coord = MeshCoordinator(hass, entry)
+        with caplog.at_level("DEBUG"):
+            for _ in range(UNREACHABLE_THRESHOLD + 2):
+                assert await coord.async_set_onoff(UNICAST, True) is None
+        await coord.async_stop()
+
+    assert coord.available is False
+    logged = [
+        r
+        for r in caplog.records
+        if r.getMessage().startswith("no connectable mesh proxy")
+    ]
+    # Every miss is still logged — only the level changes.
+    assert len(logged) == UNREACHABLE_THRESHOLD + 2
+    warned = [r for r in logged if r.levelname == "WARNING"]
+    assert len(warned) == 1
+
+
+async def test_a_proxy_that_comes_back_says_how_many_misses_it_took(
+    hass, caplog
+) -> None:
+    """The one warning an outage leaves needs an end as well as a beginning.
+
+    With the misses themselves down at debug, nothing in a default log said the
+    proxy had returned — the outage read as open forever. Recovery logs one INFO
+    line naming the count, and only when the misses had actually cost
+    availability: a transient miss on a busy single-slot lamp is not worth a
+    line in either direction.
+    """
+    entry = _make_entry(hass)
+    with _patch_transport(FakeController()):
+        coord = MeshCoordinator(hass, entry)
+        with patch.object(coordinator_mod, "find_proxy_address", return_value=None):
+            for _ in range(UNREACHABLE_THRESHOLD):
+                assert await coord.async_set_onoff(UNICAST, True) is None
+        assert coord.available is False
+
+        with caplog.at_level("INFO"):
+            await coord.async_set_onoff(UNICAST, True)
+        # Before the stop: `async_stop` clears availability on its way out.
+        assert coord.available is True
+        await coord.async_stop()
+
+    assert [
+        r.getMessage() for r in caplog.records if "reachable again" in r.getMessage()
+    ] == [f"mesh proxy reachable again after {UNREACHABLE_THRESHOLD} misses"]
