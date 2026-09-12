@@ -562,13 +562,25 @@ class MeshCoordinator:
         address = find_proxy_address(self.hass, self._network.net_key)
         if address is None:
             seen = discovered_proxies(self.hass)
-            logger.warning(
+            self._set_unavailable()
+            # A miss here is routine while the lamp is simply unplugged or out
+            # of range, and the probe carries on for as long as that lasts: on
+            # 2026-09-12, validating v0.7.0 with the lamp unplugged, this line
+            # wrote 49 warnings in twelve minutes (07:41-07:53). Only the miss
+            # that crosses UNREACHABLE_THRESHOLD is worth one -- it is the miss
+            # that takes the integration unavailable -- exactly as for the
+            # connect failure below. `_fail_count` is cleared only by a
+            # successful connect, so that is once per outage; the misses either
+            # side keep the advert diagnostic at debug for whoever needs it.
+            logger.log(
+                logging.WARNING
+                if self._fail_count == UNREACHABLE_THRESHOLD
+                else logging.DEBUG,
                 "no connectable mesh proxy for network_id %s; "
                 "0x1828 adverts HA sees: %s",
                 k3(self._network.net_key).hex(),
                 seen or "none",
             )
-            self._set_unavailable()
             return None
 
         # Bound before the try: from the moment async_connect_bearer returns, the
@@ -980,11 +992,18 @@ class MeshCoordinator:
         single proxy slot for nothing.
         """
         was_available = self._available
+        misses = self._fail_count
         self._available = True
         self._fail_count = 0
         self._backoff = 0.0
         self._next_attempt = 0.0
         self._clear_issue()
+        # An outage now leaves a single warning behind, so without this line
+        # nothing at default level would say it ended. Only an outage that cost
+        # availability gets one: the transient misses below the threshold are
+        # not logged on the way down either.
+        if misses >= UNREACHABLE_THRESHOLD:
+            logger.info("mesh proxy reachable again after %d misses", misses)
         if not was_available:
             self._notify_listeners()
 
