@@ -36,10 +36,10 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no longer names the first output, which is how a two-strip box ended up with
   a strip called *MyHomeIsCool*.
 
-  Validated on the reporter's export end to end, and on the author's
-  single-output lamp for the absence of change. Neither the author nor the
-  library has a multi-channel controller to command, so the reporter's
-  hardware is what confirms the second half.
+  Validated on the author's single-output lamp for the absence of change, and
+  on the reporter's own two-strip box for the rest: both outputs appear as
+  separate controls, in the right order, and they stay in that order across a
+  Home Assistant restart (#30, confirmed 2026-09-12).
 
 ## [0.7.1] — 2026-09-12
 
