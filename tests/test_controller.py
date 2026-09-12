@@ -963,3 +963,24 @@ async def test_get_ctl_returns_the_temperature_for_a_node_without_a_temp_element
         await controller.stop()
     assert result == 4000
     assert captured[-1].opcode == OP_LIGHT_CTL_GET
+
+
+async def test_a_late_subscribe_failure_marks_the_controller_failed():
+    """The bearer can lose its Data Out subscription AFTER ``start()`` returned.
+
+    On 2026-09-04 the proxy rejected the CCCD write with ``Insufficient
+    authorization`` seven seconds after the bearer had proceeded on its grace
+    period. The TX pump was healthy — nothing had been written yet — so
+    ``failed`` said False while no Status could ever come back and the link was
+    already dropping. The controller must mirror the bearer's failure the same
+    way it mirrors the pump's, so the coordinator tears the link down.
+    """
+    controller, bearer, _device = make_setup()
+    await controller.start()
+    try:
+        assert controller.failed is False
+        bearer.failure = RuntimeError("Insufficient authorization (8)")
+        assert controller.failed is True
+        assert isinstance(controller.failure, RuntimeError)
+    finally:
+        await controller.stop()

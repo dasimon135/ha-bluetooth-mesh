@@ -288,19 +288,27 @@ class MeshController:
 
     @property
     def failure(self) -> BaseException | None:
-        """The transport error that killed the TX pump, if any."""
-        return self._pump.failure
+        """The transport error that killed the link, if any.
+
+        Either half can die silently: the TX pump on a GATT write, or the
+        bearer's Data Out subscribe when it fails only after its grace period
+        (``GattBearer.failure``). The pump is consulted first because a write
+        error is the more specific diagnosis when both are set.
+        """
+        return self._pump.failure or getattr(self._bearer, "failure", None)
 
     @property
     def failed(self) -> bool:
-        """True once the TX pump died: nothing can be transmitted any more.
+        """True once the link died: nothing can be transmitted or received.
 
         Best-effort commands cannot report this by raising, so callers must
         check it to tell "the node did not answer" (normal, the proxy filter
         forwards no Status) apart from "we can no longer send at all" — the
-        latter requires dropping the link and reconnecting.
+        latter requires dropping the link and reconnecting. A lost subscribe
+        counts too: with no Data Out, no Status can ever come back, and on
+        2026-09-04 the proxy dropped the connection along with it.
         """
-        return self._pump.failure is not None
+        return self.failure is not None
 
     @property
     def seq(self) -> int:
