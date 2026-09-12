@@ -32,6 +32,25 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   produced on demand — but a node that answers is unchanged: every existing
   command test passes as before.
 
+- **An unplugged lamp no longer fills the log with the same warning every
+  fifteen seconds.** `no connectable mesh proxy for network_id …` warned on
+  every probe, and probing carries on for as long as the link is down: while
+  v0.7.0 was being validated on 2026-09-12 with the lamp unplugged, that one
+  line wrote 49 warnings in twelve minutes, between 07:41 and 07:53. A miss is
+  routine — the lamp is off, out of range, or the vendor app holds its single
+  slot — and only the miss that crosses the unreachable threshold means
+  anything: it is the one that takes the integration unavailable. That one
+  still warns, exactly like the connect failure logged beside it; the misses
+  either side keep the `0x1828` advert diagnostic at debug, unchanged, for
+  whoever turns the logger up.
+
+  Coming back now says so once, at info: `mesh proxy reachable again after N
+  misses`. With the misses themselves down at debug, an outage would otherwise
+  leave a beginning in the log and no end.
+
+  The retry timing is untouched: a missing advert still does not widen the
+  backoff, because nothing was attempted.
+
 ## [0.7.0] — 2026-09-12
 
 ### Changed
