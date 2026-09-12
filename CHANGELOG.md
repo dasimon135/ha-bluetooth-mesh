@@ -6,7 +6,33 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-09-12
+
 ### Fixed
+
+- **A command the lamp did not acknowledge is no longer shown as its state.**
+  Every Set already returned what the node answered in its Status, or `None`
+  when it answered nothing — and the light entity kept the optimistic state it
+  had written before sending, whatever came back: the on/off and colour
+  temperature answers were discarded outright, and a timed-out brightness
+  simply stayed at the value asked for. On 2026-09-10 the author's node had
+  stopped applying writes while still answering reads (a power-cycle cured it;
+  the same thing had happened on 2026-09-08). The dashboard said *on* and
+  *82 %* over a dark lamp, and not one line above debug said the node had
+  answered nothing. The README promised "state is read, not assumed"; it was
+  true of reads and false of every write that timed out.
+
+  A tap still shows at once. Each attribute then settles on the node's answer
+  — on/off as answered, brightness and colour temperature as reported — and
+  falls back to its previous value when there is no answer, `unknown` staying
+  `unknown`. A node that answers the opposite of what it was told is shown as
+  it answered, with a warning. A node that stops answering gets one warning
+  per such episode (`mesh node 0x000c did not acknowledge set_onoff; showing
+  its last known state`) and one info line when it answers again; silence
+  while the mesh is unreachable is left to the coordinator, which already
+  reports it. Not hardware-validated on a node in that state — it cannot be
+  produced on demand — but a node that answers is unchanged: every existing
+  command test passes as before.
 
 - **An unplugged lamp no longer fills the log with the same warning every
   fifteen seconds.** `no connectable mesh proxy for network_id …` warned on

@@ -70,7 +70,12 @@ The integration configures that filter, so:
   make true;
 * colour temperature is read back too, and the lamp is asked once for the
   Kelvin range it actually tracks — so the slider offers that lamp's real
-  extremes instead of a conventional 2700–6500 guess.
+  extremes instead of a conventional 2700–6500 guess;
+* a command shows at once, then settles on what the lamp **answered**. A lamp
+  that answers nothing leaves the entity as it was, and the log says so once
+  per such episode — a node that keeps answering reads while dropping writes
+  is otherwise invisible from the dashboard, which would keep asserting the
+  state it asked for.
 
 Some lamps map colour temperature the wrong way round: they glow warm white when
 Home Assistant says cool. Tick those under **Lamps with inverted colour
