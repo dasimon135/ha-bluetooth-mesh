@@ -139,13 +139,18 @@ def discovered_proxies(hass: HomeAssistant) -> list[tuple[str, str]]:
 
 
 async def async_connect_bearer(
-    hass: HomeAssistant, address: str
+    hass: HomeAssistant, address: str, *, max_attempts: int = 4
 ) -> tuple["BleakClient", GattBearer]:
     """Connect to the proxy at ``address`` and wrap it in a proxy ``GattBearer``.
 
     Raises :class:`MeshTransportError` if HA has no connectable ``BLEDevice`` for
     the address (the proxy dropped out of range) or if the connection fails. The
     caller is responsible for calling ``bearer.start(on_message)``.
+
+    ``max_attempts`` is bleak-retry-connector's retry budget for this one call.
+    Its default of four suits a transient BLE miss; a coordinator that is
+    backing off from a node it has been hammering asks for one, because every
+    try is pressure on a node that needs quiet.
     """
     ble_device = bluetooth.async_ble_device_from_address(
         hass, address, connectable=True
@@ -156,7 +161,10 @@ async def async_connect_bearer(
         )
     try:
         client = await establish_connection(
-            BleakClientWithServiceCache, ble_device, f"btmesh-{address}"
+            BleakClientWithServiceCache,
+            ble_device,
+            f"btmesh-{address}",
+            max_attempts=max_attempts,
         )
     except Exception as exc:  # bleak_retry_connector.BleakConnectionError etc.
         raise MeshTransportError(

@@ -46,6 +46,31 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A node that is hammered never recovers, so consecutive connect failures now
+  back off.** Three paths re-established a lost proxy link — push discovery on
+  every 0x1828 advert a proxy sends, the 15 s probe, and the watchdog on a
+  dropped keep-alive — and not one of them ever slowed down: each fired the
+  moment the connect lock was free, and each attempt was bleak-retry-connector's
+  four GATT connects. On 2026-09-10 a plain reload of the entry dropped the
+  held link and started that storm; forty minutes and 61 failed connects later
+  (BlueSight raised `kind: storm`) the node still refused everyone, the vendor
+  app included, and a power-cycle of the node changed nothing because the storm
+  resumed while it booted. Disabling the integration for 130 s, then enabling
+  it, connected in 8 s. The node was never wedged: it never had a quiet moment.
+  The 2026-09-08 incident, filed as "cause not isolated", was the same thing —
+  what cleared it was the *disabling* that preceded the re-enable, not the
+  re-enable. The BRC1H pairing storm in daikin_madoka is the same mechanism.
+
+  A GATT failure now widens the wait before the next automatic attempt, from
+  the 15 s retry interval doubling up to 5 min, and every automatic path honours
+  it: an advert inside the wait starts nothing, and the probe tick is armed for
+  whichever is longer, its interval or the remainder of the wait. While backing
+  off each attempt is a single GATT try, not four. A miss that never reached
+  the radio (no connectable proxy advertised) does not widen the wait — it put
+  no pressure on the node, and the advert that ends it is the one to act on at
+  once, as before. A successful connect clears the wait. One info line per step
+  (`mesh proxy backoff: next connect attempt in N s`) tells the climb in the log.
+
 - **A failed connect now says what failed, and says it out loud once.** The
   handler logged `logger.debug("mesh connect failed: %s", exc)`, and the
   `asyncio.timeout` guarding the connect raises a `TimeoutError` whose `str()`
