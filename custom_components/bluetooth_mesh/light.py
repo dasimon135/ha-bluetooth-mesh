@@ -21,6 +21,8 @@ live or stale.
 
 from __future__ import annotations
 
+import logging
+
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
@@ -41,6 +43,8 @@ from .const import (
     MODEL_LIGHT_LIGHTNESS,
 )
 from .coordinator import MeshCoordinator
+
+logger = logging.getLogger(__name__)
 
 # HA brightness is a 0..255 byte; mesh Lightness/CTL are 16-bit 0..65535.
 MESH_LEVEL_MAX = 0xFFFF
@@ -115,8 +119,12 @@ async def async_setup_entry(
 class MeshLight(LightEntity):
     """A mesh node exposed as a Home Assistant light.
 
-    Optimistic: the cached ``is_on`` / ``brightness`` / ``color_temp_kelvin``
-    reflect the last commanded (and, when the mesh answered, confirmed) state.
+    Optimistic for the length of one round trip: a tap shows at once, then
+    the cached ``is_on`` / ``brightness`` / ``color_temp_kelvin`` settle on what
+    the node *answered* in its Status -- or fall back to what they were, when
+    it answered nothing. A Set that times out is not a state; until 2026-09-10
+    it was shown as one, on a node that had stopped applying writes while still
+    answering reads, and nothing above debug said so (see _note_answer).
     """
 
     _attr_has_entity_name = True
@@ -188,6 +196,11 @@ class MeshLight(LightEntity):
         self._is_on: bool | None = None
         self._brightness: int | None = None
         self._color_temp_kelvin: int | None = None
+        # Sets the node has not acknowledged since it last did. One warning
+        # per such outage, one info line when it ends -- a warning per tap
+        # would bury the first, and a silent node is exactly the failure a
+        # user cannot see from the dashboard.
+        self._unacknowledged = 0
         # The exposed range starts as the conventional default and is replaced
         # by the lamp's own the first time it answers. Asked once: it is a
         # property of the device, not a state.
@@ -374,6 +387,55 @@ class MeshLight(LightEntity):
 
     # ---------------------------------------------------------------- commands
 
+    def _note_answer(self, command: str, answered: bool) -> None:
+        """Account for whether the node acknowledged ``command``.
+
+        Silence while the mesh is unreachable is the coordinator's news (it
+        warns, and takes the entity unavailable); the entity only reports the
+        other case, a node that is reachable and does not answer its writes.
+        """
+        if answered:
+            if self._unacknowledged:
+                logger.info(
+                    "mesh node %#06x acknowledges again after %d unacknowledged "
+                    "commands",
+                    self._unicast,
+                    self._unacknowledged,
+                )
+                self._unacknowledged = 0
+            return
+        self._unacknowledged += 1
+        if self._unacknowledged == 1 and self._coordinator.available:
+            logger.warning(
+                "mesh node %#06x did not acknowledge %s; showing its last known "
+                "state. It answers reads but not writes: power-cycle it if this "
+                "persists",
+                self._unicast,
+                command,
+            )
+        else:
+            logger.debug(
+                "mesh node %#06x did not acknowledge %s (%d in a row)",
+                self._unicast,
+                command,
+                self._unacknowledged,
+            )
+
+    def _settle_onoff(self, answer: bool | None, requested: bool, was_on) -> None:
+        """Show the on/off state the node answered, else the one before."""
+        self._note_answer("set_onoff", answer is not None)
+        if answer is None:
+            self._is_on = was_on
+            return
+        self._is_on = answer
+        if answer is not requested:
+            logger.warning(
+                "mesh node %#06x answered %s to an %s command",
+                self._unicast,
+                "on" if answer else "off",
+                "on" if requested else "off",
+            )
+
     async def async_turn_on(self, **kwargs) -> None:
         """Apply requested brightness and/or temperature and ensure the lamp is on.
 
@@ -384,10 +446,12 @@ class MeshLight(LightEntity):
         lightness). Because that Temperature message does NOT switch the light on,
         a turn-on that only changes temperature — or a bare turn-on — also sends
         Generic OnOff, so the lamp actually lights instead of HA showing it on
-        while it stays dark. Brightness is tracked from the last commanded value
-        (the lamp restores it across off/on), never read back mid-fade.
+        while it stays dark. Each attribute then settles on the node's Status
+        reply, and falls back to its previous value when there is none.
         """
         was_on = self._is_on
+        previous_brightness = self._brightness
+        previous_kelvin = self._color_temp_kelvin
 
         # Optimistic state up front so the UI reflects the tap instantly.
         self._is_on = True
@@ -400,6 +464,9 @@ class MeshLight(LightEntity):
         # Track whether any command drives lightness > 0 (which itself lights the
         # lamp) versus a temperature-only change (which does not).
         drove_lightness = False
+        # Whether a command that lights the lamp was acknowledged: only then
+        # is the optimistic "on" a state the node has confirmed.
+        lit = False
         temp_only = False
 
         if ATTR_BRIGHTNESS in kwargs:
@@ -407,8 +474,12 @@ class MeshLight(LightEntity):
                 self._lightness_unicast,
                 self._brightness_to_level(kwargs[ATTR_BRIGHTNESS]),
             )
-            if result is not None:  # confirmed present lightness → trust it
+            self._note_answer("set_lightness", result is not None)
+            if result is not None:  # the settled lightness the node reports
                 self._brightness = self._level_to_brightness(result)
+                lit = True
+            else:
+                self._brightness = previous_brightness
             drove_lightness = True
 
         if ATTR_COLOR_TEMP_KELVIN in kwargs:
@@ -416,9 +487,10 @@ class MeshLight(LightEntity):
             if self._ctl_temp_unicast is not None:
                 # Dedicated CTL Temperature element: sets ONLY temperature and
                 # does NOT switch the light on.
-                await self._coordinator.async_set_ctl_temperature(
+                result = await self._coordinator.async_set_ctl_temperature(
                     self._ctl_temp_unicast, mesh_kelvin
                 )
+                self._note_answer("set_ctl_temperature", result is not None)
                 temp_only = True
             else:
                 # No temperature element: Light CTL Set carries a lightness (the
@@ -426,20 +498,37 @@ class MeshLight(LightEntity):
                 level = self._brightness_to_level(
                     self._brightness if self._brightness else HA_BRIGHTNESS_MAX
                 )
-                await self._coordinator.async_set_ctl(
+                result = await self._coordinator.async_set_ctl(
                     self._ctl_unicast, level, mesh_kelvin
                 )
+                self._note_answer("set_ctl", result is not None)
                 drove_lightness = True
+                lit = lit or result is not None
+            if result is not None:
+                self._color_temp_kelvin = self._ha_kelvin(result)
+            else:
+                self._color_temp_kelvin = previous_kelvin
 
         if not drove_lightness and (not temp_only or not was_on):
             # Plain turn-on, or a temperature-only turn-on of a lamp that was
             # off: switch it on explicitly so the optimistic on-state is true.
-            await self._coordinator.async_set_onoff(self._onoff_unicast, True)
+            answer = await self._coordinator.async_set_onoff(
+                self._onoff_unicast, True
+            )
+            self._settle_onoff(answer, True, was_on)
+        elif not lit:
+            # Nothing that lights the lamp was acknowledged (a temperature-only
+            # change on a lamp already on, or a lightness the node ignored):
+            # the on-state is whatever it was, not what the tap assumed.
+            self._is_on = was_on
 
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs) -> None:
         """Switch the node off via Generic OnOff (optimistic UI first)."""
+        was_on = self._is_on
         self._is_on = False
         self.async_write_ha_state()
-        await self._coordinator.async_set_onoff(self._onoff_unicast, False)
+        answer = await self._coordinator.async_set_onoff(self._onoff_unicast, False)
+        self._settle_onoff(answer, False, was_on)
+        self.async_write_ha_state()

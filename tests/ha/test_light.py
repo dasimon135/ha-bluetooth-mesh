@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -60,6 +61,8 @@ class FakeCoordinator:
         # (None = it stayed silent / has none to give).
         self.ctl_temperature = ctl_temperature
         self.ctl_range = ctl_range
+        # Whether the lamp answers a Set at all (False = every Set times out).
+        self.acknowledge = True
         self.listeners: list = []
 
     def async_add_listener(self, callback_):
@@ -73,11 +76,11 @@ class FakeCoordinator:
 
     async def async_set_onoff(self, unicast: int, on: bool) -> bool:
         self.calls.append(("set_onoff", unicast, on))
-        return on
+        return on if self.acknowledge else None
 
     async def async_set_lightness(self, unicast: int, level_0_1: float) -> int:
         self.calls.append(("set_lightness", unicast, level_0_1))
-        return round(level_0_1 * 0xFFFF)
+        return round(level_0_1 * 0xFFFF) if self.acknowledge else None
 
     async def async_get_lightness(self, unicast: int) -> int:
         self.calls.append(("get_lightness", unicast))
@@ -92,11 +95,11 @@ class FakeCoordinator:
         self, unicast: int, level_0_1: float, kelvin: int
     ) -> int:
         self.calls.append(("set_ctl", unicast, level_0_1, kelvin))
-        return kelvin
+        return kelvin if self.acknowledge else None
 
     async def async_set_ctl_temperature(self, unicast: int, kelvin: int) -> int:
         self.calls.append(("set_ctl_temperature", unicast, kelvin))
-        return kelvin
+        return kelvin if self.acknowledge else None
 
     async def async_get_ctl_temperature(self, unicast: int) -> int | None:
         self.calls.append(("get_ctl_temperature", unicast))
@@ -858,3 +861,133 @@ async def test_a_node_without_a_temperature_element_reads_through_light_ctl(
     assert ("get_ctl", 0x0030) in coordinator.calls
     assert not any(c[0] == "get_ctl_temperature" for c in coordinator.calls)
     assert light.color_temp_kelvin == 3200
+
+
+# ---------------------------------------------------------------------------
+# A Set the node does not acknowledge must not become the state shown.
+#
+# 2026-09-10, David's network: the node had stopped applying commands while
+# still answering reads. Google Assistant switched the lamp "on" at 20:26, the
+# dashboard said on, the lamp stayed dark; a brightness of 40 % showed as 82 %
+# because that is what the last Set had asked for. Not one line above debug
+# said the node had answered nothing. The README promises "state is read, not
+# assumed" — true of reads, false of every write that timed out. Same symptom
+# on 2026-09-08. The cause in the node is not established; what the entity
+# shows, and what the log says, are.
+
+
+async def test_an_unacknowledged_turn_on_keeps_the_previous_state(hass, caplog) -> None:
+    light, coordinator = _light()
+    light._is_on = False
+    coordinator.acknowledge = False
+
+    with caplog.at_level("DEBUG"):
+        await light.async_turn_on()
+
+    assert ("set_onoff", UNICAST, True) in coordinator.calls
+    assert light.is_on is False
+    warned = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warned) == 1
+    assert "did not acknowledge" in warned[0].getMessage()
+
+
+async def test_an_unacknowledged_turn_off_keeps_the_lamp_on(hass) -> None:
+    light, coordinator = _light()
+    light._is_on = True
+    coordinator.acknowledge = False
+
+    await light.async_turn_off()
+
+    assert light.is_on is True
+
+
+async def test_an_unacknowledged_brightness_keeps_the_previous_one(hass) -> None:
+    light, coordinator = _light()
+    light._is_on = True
+    light._brightness = 100
+    coordinator.acknowledge = False
+
+    await light.async_turn_on(brightness=200)
+
+    assert light.brightness == 100
+    assert light.is_on is True
+
+
+async def test_an_unacknowledged_temperature_keeps_the_previous_one(hass) -> None:
+    light, coordinator = _light()
+    light._is_on = True
+    light._color_temp_kelvin = 3000
+    coordinator.acknowledge = False
+
+    await light.async_turn_on(color_temp_kelvin=5000)
+
+    assert light.color_temp_kelvin == 3000
+
+
+async def test_an_unknown_state_stays_unknown_when_the_node_is_silent(hass) -> None:
+    light, coordinator = _light()
+    assert light.is_on is None
+    coordinator.acknowledge = False
+
+    await light.async_turn_on()
+
+    assert light.is_on is None
+
+
+async def test_the_lamp_answer_wins_over_the_command(hass, caplog) -> None:
+    """A node that acknowledges with the opposite state is shown as it answered."""
+    light, coordinator = _light()
+    light._is_on = False
+    coordinator.async_set_onoff = AsyncMock(return_value=False)
+
+    with caplog.at_level("WARNING"):
+        await light.async_turn_on()
+
+    assert light.is_on is False
+    assert any("answered off" in r.getMessage() for r in caplog.records)
+
+
+async def test_an_acknowledged_temperature_is_shown_as_answered(hass) -> None:
+    light, coordinator = _light()
+    light._is_on = True
+    coordinator.async_set_ctl_temperature = AsyncMock(return_value=4500)
+
+    await light.async_turn_on(color_temp_kelvin=5000)
+
+    assert light.color_temp_kelvin == 4500
+
+
+async def test_unacknowledged_commands_warn_once_per_outage(hass, caplog) -> None:
+    """One warning when the node goes silent, one info line when it answers again."""
+    light, coordinator = _light()
+    light._is_on = False
+    coordinator.acknowledge = False
+
+    with caplog.at_level("DEBUG"):
+        for _ in range(3):
+            await light.async_turn_on()
+        coordinator.acknowledge = True
+        await light.async_turn_on()
+        coordinator.acknowledge = False
+        await light.async_turn_off()
+
+    records = [r for r in caplog.records if r.name.endswith(".light")]
+    warnings = [r.getMessage() for r in records if r.levelname == "WARNING"]
+    assert len(warnings) == 2  # the outage ended in between, so a second one
+    infos = [r.getMessage() for r in records if r.levelname == "INFO"]
+    assert len(infos) == 1
+    assert "3 unacknowledged" in infos[0]
+
+
+async def test_no_warning_while_the_mesh_is_unreachable(hass, caplog) -> None:
+    """Unreachable is the coordinator's news; the entity must not repeat it."""
+    light, coordinator = _light()
+    coordinator.available = False
+    coordinator.acknowledge = False
+    light._is_on = False
+
+    with caplog.at_level("DEBUG"):
+        await light.async_turn_on()
+
+    assert light.is_on is False
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
