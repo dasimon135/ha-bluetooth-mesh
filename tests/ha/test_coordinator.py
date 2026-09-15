@@ -126,6 +126,16 @@ class FakeController:
         self.seq += 1
         return self.composition
 
+    async def set_group_onoff(self, group_address: int, on: bool) -> None:
+        self.calls.append(("set_group_onoff", group_address, on))
+        self.seq += 1
+        self.tid = (self.tid + 1) & 0xFF
+
+    async def set_group_lightness(self, group_address: int, level_0_1: float) -> None:
+        self.calls.append(("set_group_lightness", group_address, level_0_1))
+        self.seq += 1
+        self.tid = (self.tid + 1) & 0xFF
+
 
 def _make_entry(hass) -> MockConfigEntry:
     """A config entry carrying the sanitized sample .connect JSON."""
@@ -211,6 +221,42 @@ async def test_command_reuses_held_connection_persists_seq_frees_on_stop(hass) -
     assert coord._controller is None
     assert fake.stopped is True
     assert client.disconnect.await_count >= 1
+
+
+async def test_async_set_group_onoff_sends_unacknowledged_and_returns_nothing(
+    hass,
+) -> None:
+    """A group Set is fire-and-forget: nothing to settle on, so no return value.
+
+    Unlike ``async_set_onoff``, which waits for the target's Status, a group
+    address gets no single reply to wait for (ha-bluetooth-mesh#33) — an acked
+    Set there would get one Status per subscribed member instead.
+    """
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with _patch_transport(fake):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+
+        result = await coord.async_set_group_onoff(0xC028, True)
+
+        assert result is None
+        assert fake.calls[-1] == ("set_group_onoff", 0xC028, True)
+    await coord.async_stop()
+
+
+async def test_async_set_group_lightness_sends_unacknowledged(hass) -> None:
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with _patch_transport(fake):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+
+        result = await coord.async_set_group_lightness(0xC028, 1.0)
+
+        assert result is None
+        assert fake.calls[-1] == ("set_group_lightness", 0xC028, 1.0)
+    await coord.async_stop()
 
 
 async def test_keepalive_permanent_by_default_never_arms_idle(hass) -> None:

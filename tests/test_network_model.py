@@ -433,3 +433,67 @@ def test_elements_for_model_returns_every_host_in_order():
     assert [e.unicast for e in node.elements_for_model(0x1300)] == [0x000C, 0x000D]
     assert [e.unicast for e in node.elements_for_model(0x1306)] == [0x000E]
     assert node.elements_for_model(0x1234) == ()
+
+
+# ---------------------------------------------------------------------------
+# Mesh groups (ha-bluetooth-mesh#33): the vendor app already subscribes a
+# model to a group address when the user builds a room/group in it — the
+# `.connect` export just needs reading, no Config Model Subscription of our
+# own. `tos_groups` (ThingOS) names the group; each model's own `subscribe`
+# list says which elements the app already wired to it.
+
+
+def test_model_subscribe_parses_hex_group_addresses():
+    node = _node(
+        0x000C,
+        [
+            {
+                "index": 0,
+                "models": [
+                    {"modelId": "1300", "bind": [0], "subscribe": ["C002", "C028"]}
+                ],
+            }
+        ],
+    )
+    network = Network.from_connect(_doc([node]))
+
+    assert network.nodes[0].elements[0].models[0].subscribe == (0xC002, 0xC028)
+
+
+def test_model_subscribe_defaults_to_empty_when_absent():
+    node = _node(0x000C, [{"index": 0, "models": [{"modelId": "1000", "bind": [0]}]}])
+    network = Network.from_connect(_doc([node]))
+
+    assert network.nodes[0].elements[0].models[0].subscribe == ()
+
+
+def test_groups_parsed_from_tos_groups_skips_the_internal_all_group():
+    doc = _doc([_GOOD_NODE])
+    doc["tos_groups"] = [
+        {
+            "id": "AAA",
+            "type": "all",
+            "name": "TOS_Internal_All",
+            "multicastAddress": 49154,
+        },
+        {"id": "BBB", "type": "room", "name": "Diele", "multicastAddress": 49183},
+        {
+            "id": "CCC",
+            "type": "group",
+            "name": "Garderobe",
+            "multicastAddress": 49192,
+        },
+    ]
+
+    network = Network.from_connect(doc)
+
+    assert [(g.name, g.kind, g.address) for g in network.groups] == [
+        ("Diele", "room", 0xC01F),
+        ("Garderobe", "group", 0xC028),
+    ]
+
+
+def test_groups_defaults_to_empty_without_tos_groups():
+    network = Network.from_connect(_doc([_GOOD_NODE]))
+
+    assert network.groups == ()

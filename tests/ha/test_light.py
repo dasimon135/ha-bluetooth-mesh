@@ -26,12 +26,17 @@ from homeassistant.components.light import ColorMode
 
 from custom_components.bluetooth_mesh.btmesh.network_model import (
     Element,
+    Group,
     Model,
     Network,
     Node,
 )
 from custom_components.bluetooth_mesh.const import CONF_INVERTED_CTL, DOMAIN
-from custom_components.bluetooth_mesh.light import MeshLight, async_setup_entry
+from custom_components.bluetooth_mesh.light import (
+    MeshGroupLight,
+    MeshLight,
+    async_setup_entry,
+)
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "sample.connect.json"
 UNICAST = 0x000C
@@ -114,6 +119,14 @@ class FakeCoordinator:
     ) -> tuple[int, int] | None:
         self.calls.append(("get_ctl_temperature_range", unicast))
         return self.ctl_range
+
+    async def async_set_group_onoff(self, group_address: int, on: bool) -> None:
+        self.calls.append(("set_group_onoff", group_address, on))
+
+    async def async_set_group_lightness(
+        self, group_address: int, level_0_1: float
+    ) -> None:
+        self.calls.append(("set_group_lightness", group_address, level_0_1))
 
 
 def _fixture_network() -> Network:
@@ -1115,3 +1128,145 @@ async def test_a_single_output_node_is_named_by_its_device_as_before(hass) -> No
     added, _ = await _setup(hass, _fixture_network())
 
     assert added[0].name is None
+
+
+# ---------------------------------------------------------------------------
+# Mesh groups (ha-bluetooth-mesh#33): a room/group the vendor app already
+# built. Sending one unacknowledged Set to the group address reaches every
+# member at once instead of one unicast Set per entity in sequence, which is
+# the "loop" marq24 saw toggling an HA light group over Oben/Unten.
+
+GROUP_ADDR = 0xC028
+
+
+def _two_output_network_with_group(*, names=("Top", "Bottom")) -> Network:
+    """The #30 two-strip box, both outputs already subscribed to a group."""
+    node = Node(
+        uuid="aaaabbbb-cccc-dddd-eeee-ffff00001111",
+        unicast=0x0045,
+        device_key=b"\x00" * 16,
+        cid=0x07E9,
+        name="Two Strip Box",
+        elements=(
+            Element(
+                index=0,
+                unicast=0x0045,
+                name=names[0],
+                models=(
+                    Model(
+                        model_id=0x1000,
+                        bound_appkey_indexes=(0,),
+                        subscribe=(GROUP_ADDR,),
+                    ),
+                    Model(
+                        model_id=0x1300,
+                        bound_appkey_indexes=(0,),
+                        subscribe=(GROUP_ADDR,),
+                    ),
+                ),
+            ),
+            Element(
+                index=1,
+                unicast=0x0046,
+                name=names[1],
+                models=(
+                    Model(
+                        model_id=0x1000,
+                        bound_appkey_indexes=(0,),
+                        subscribe=(GROUP_ADDR,),
+                    ),
+                    Model(
+                        model_id=0x1300,
+                        bound_appkey_indexes=(0,),
+                        subscribe=(GROUP_ADDR,),
+                    ),
+                ),
+            ),
+        ),
+    )
+    base = replace(_fixture_network(), nodes=(node,))
+    return replace(
+        base,
+        groups=(Group(id="g1", name="Garderobe", kind="group", address=GROUP_ADDR),),
+    )
+
+
+async def test_a_group_with_two_subscribed_outputs_gets_one_group_light(
+    hass,
+) -> None:
+    added, _ = await _setup(hass, _two_output_network_with_group())
+
+    groups = [light for light in added if isinstance(light, MeshGroupLight)]
+    assert len(groups) == 1
+    assert groups[0].name == "Garderobe"
+
+
+async def test_group_light_unique_id_is_keyed_on_the_group_address(hass) -> None:
+    added, _ = await _setup(hass, _two_output_network_with_group())
+
+    group_light = next(light for light in added if isinstance(light, MeshGroupLight))
+    assert group_light.unique_id == f"{MESH_UUID}_group_c028"
+
+
+async def test_a_network_with_no_groups_creates_no_group_light(hass) -> None:
+    added, _ = await _setup(hass, _two_output_network())
+
+    assert not any(isinstance(light, MeshGroupLight) for light in added)
+
+
+async def test_group_turn_on_sends_one_unacknowledged_set_to_the_group_address(
+    hass,
+) -> None:
+    added, coordinator = await _setup(hass, _two_output_network_with_group())
+    group_light = next(light for light in added if isinstance(light, MeshGroupLight))
+
+    await group_light.async_turn_on(brightness=128)
+
+    assert coordinator.calls == [
+        ("set_group_lightness", GROUP_ADDR, pytest.approx(128 / 255, abs=1e-6))
+    ]
+    assert group_light.is_on is True
+    assert group_light.brightness == pytest.approx(128, abs=1)
+
+
+async def test_group_turn_on_updates_every_member_optimistically(hass) -> None:
+    """The point of the group Set: both outputs show the change at once,
+
+    without each entity sending its own unicast command (that sequential
+    round trip is the "loop" ha-bluetooth-mesh#33 is about).
+    """
+    added, coordinator = await _setup(hass, _two_output_network_with_group())
+    group_light = next(light for light in added if isinstance(light, MeshGroupLight))
+    members = [light for light in added if isinstance(light, MeshLight)]
+
+    await group_light.async_turn_on(brightness=255)
+
+    for member in members:
+        assert member.is_on is True
+        assert member.brightness == 255
+    # Only the ONE group Set went out — no per-member unicast Set.
+    assert coordinator.calls == [
+        ("set_group_lightness", GROUP_ADDR, pytest.approx(1.0, abs=1e-6))
+    ]
+
+
+async def test_group_turn_off_sends_one_unacknowledged_set(hass) -> None:
+    added, coordinator = await _setup(hass, _two_output_network_with_group())
+    group_light = next(light for light in added if isinstance(light, MeshGroupLight))
+    members = [light for light in added if isinstance(light, MeshLight)]
+
+    await group_light.async_turn_off()
+
+    assert coordinator.calls == [("set_group_onoff", GROUP_ADDR, False)]
+    assert group_light.is_on is False
+    for member in members:
+        assert member.is_on is False
+
+
+async def test_group_light_mode_is_brightness_when_a_member_supports_it(
+    hass,
+) -> None:
+    added, _ = await _setup(hass, _two_output_network_with_group())
+
+    group_light = next(light for light in added if isinstance(light, MeshGroupLight))
+    assert group_light.color_mode == ColorMode.BRIGHTNESS

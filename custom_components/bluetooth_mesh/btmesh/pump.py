@@ -58,6 +58,7 @@ class BearerPump:
             while True:
                 msg_type, pdu = await self._queue.get()
                 await self._bearer.send(msg_type, pdu)
+                self._queue.task_done()
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
@@ -65,6 +66,19 @@ class BearerPump:
             logger.error("bearer TX pump died: %s", exc)
             if self.on_error is not None:
                 self.on_error(exc)
+
+    async def flush(self) -> None:
+        """Wait until every PDU queued so far has reached the bearer.
+
+        A sender with no reply to wait for (an unacknowledged group Set) has
+        nothing else to yield on, and stopping the pump right after ``put()``
+        would cancel it before it ever resumed from ``queue.get()`` — the PDU
+        would never go out. ``Queue.join()`` blocks on the queue's own
+        producer/consumer bookkeeping rather than a fixed delay, so it returns
+        exactly when the backlog at the time of the call has drained, not a
+        moment before or a guessed sleep after.
+        """
+        await self._queue.join()
 
     async def stop(self) -> None:
         if self._task is not None:

@@ -453,6 +453,32 @@ class MeshController:
         status = parse_light_lightness_status(_full_payload(resp))
         return _settled(status.present_lightness, status.target_lightness)
 
+    async def set_group_onoff(self, group_address: int, on: bool) -> None:
+        """Set Generic OnOff on a mesh group address — fire-and-forget.
+
+        Unacknowledged and unawaited: an acked Set to a group address gets a
+        Status back from every element subscribed to it (ha-bluetooth-mesh#33),
+        one per member, which is a flood rather than the single reply a
+        unicast Set gets. There is nothing to settle on, so unlike
+        :meth:`set_onoff` this returns nothing — the entities behind the group
+        address stay on their own optimistic/read-back state.
+        """
+        payload = generic_onoff_set(on, self._next_tid(), ack=False)
+        self._node.send_access(group_address, payload)
+        await self._pump.flush()
+
+    async def set_group_lightness(self, group_address: int, level_0_1: float) -> None:
+        """Set Light Lightness on a mesh group address — fire-and-forget.
+
+        See :meth:`set_group_onoff` for why this is unacknowledged and returns
+        nothing.
+        """
+        level = min(1.0, max(0.0, level_0_1))
+        lightness = round(level * 0xFFFF)
+        payload = light_lightness_set(lightness, self._next_tid(), ack=False)
+        self._node.send_access(group_address, payload)
+        await self._pump.flush()
+
     async def set_ctl(
         self, unicast: int, level_0_1: float, kelvin: int, *, timeout: float = 5.0
     ) -> int | None:

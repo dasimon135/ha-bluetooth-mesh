@@ -24,9 +24,11 @@ __all__ = [
     "OP_CONFIG_MODEL_APP_STATUS",
     "OP_GENERIC_ONOFF_GET",
     "OP_GENERIC_ONOFF_SET",
+    "OP_GENERIC_ONOFF_SET_UNACK",
     "OP_GENERIC_ONOFF_STATUS",
     "OP_LIGHT_LIGHTNESS_GET",
     "OP_LIGHT_LIGHTNESS_SET",
+    "OP_LIGHT_LIGHTNESS_SET_UNACK",
     "OP_LIGHT_LIGHTNESS_STATUS",
     "OP_LIGHT_CTL_GET",
     "OP_LIGHT_CTL_SET",
@@ -115,10 +117,12 @@ OP_CONFIG_RELAY_STATUS = 0x8028
 # Generic OnOff model opcodes (Mesh Model spec §7.1, Zephyr mesh sample).
 OP_GENERIC_ONOFF_GET = 0x8201
 OP_GENERIC_ONOFF_SET = 0x8202
+OP_GENERIC_ONOFF_SET_UNACK = 0x8203
 OP_GENERIC_ONOFF_STATUS = 0x8204
 # Light Lightness model opcodes (Mesh Model spec §7.1).
 OP_LIGHT_LIGHTNESS_GET = 0x824B
 OP_LIGHT_LIGHTNESS_SET = 0x824C
+OP_LIGHT_LIGHTNESS_SET_UNACK = 0x824D
 OP_LIGHT_LIGHTNESS_STATUS = 0x824E
 # Light CTL (color temperature) model opcodes (Mesh Model spec §7.1). Verified
 # against the Nordic nRF5-SDK-for-Mesh header
@@ -523,11 +527,18 @@ def generic_onoff_get() -> bytes:
     return encode_opcode(OP_GENERIC_ONOFF_GET)
 
 
-def generic_onoff_set(onoff: bool, tid: int) -> bytes:
-    """Generic OnOff Set (acked) without transition time (Model spec §3.2.1.2)."""
+def generic_onoff_set(onoff: bool, tid: int, *, ack: bool = True) -> bytes:
+    """Generic OnOff Set without transition time (Model spec §3.2.1.2).
+
+    ``ack=False`` uses the Set Unacknowledged opcode — the form for a group or
+    virtual destination, where every subscriber replying to an acked Set would
+    flood the sender with one Status per member instead of the single reply a
+    unicast destination gives.
+    """
     if not 0 <= tid <= 0xFF:
         raise AccessError(f"TID out of range: {tid:#x}")
-    return encode_opcode(OP_GENERIC_ONOFF_SET) + bytes([int(bool(onoff)), tid])
+    opcode = OP_GENERIC_ONOFF_SET if ack else OP_GENERIC_ONOFF_SET_UNACK
+    return encode_opcode(opcode) + bytes([int(bool(onoff)), tid])
 
 
 def light_lightness_get() -> bytes:
@@ -535,14 +546,19 @@ def light_lightness_get() -> bytes:
     return encode_opcode(OP_LIGHT_LIGHTNESS_GET)
 
 
-def light_lightness_set(lightness: int, tid: int) -> bytes:
-    """Light Lightness Set (acked) without transition time (Model spec §6.3.1.2)."""
+def light_lightness_set(lightness: int, tid: int, *, ack: bool = True) -> bytes:
+    """Light Lightness Set without transition time (Model spec §6.3.1.2).
+
+    ``ack=False`` uses the Set Unacknowledged opcode — see
+    :func:`generic_onoff_set` for why a group/virtual destination wants it.
+    """
     if not 0 <= lightness <= 0xFFFF:
         raise AccessError(f"lightness out of range: {lightness:#x}")
     if not 0 <= tid <= 0xFF:
         raise AccessError(f"TID out of range: {tid:#x}")
+    opcode = OP_LIGHT_LIGHTNESS_SET if ack else OP_LIGHT_LIGHTNESS_SET_UNACK
     return (
-        encode_opcode(OP_LIGHT_LIGHTNESS_SET)
+        encode_opcode(opcode)
         + lightness.to_bytes(2, "little")
         + bytes([tid])
     )
