@@ -24,6 +24,15 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unacknowledged Set to that address instead of one acknowledged Set per
   member in turn. Tracked as [#33](https://github.com/dasimon135/ha-bluetooth-mesh/issues/33).
 
+  A group light shows its members' state rather than keeping its own: on when
+  any member is on, at their average brightness. In the first release candidate
+  it only remembered what it had itself been told, so a room covering the same
+  strips as a group showed *off* over two lit strips once the group had switched
+  them on — reported on the reporter's own box, where the vendor app's room and
+  group are the same two outputs. A group whose members all sit on one node is
+  now listed under that node's device; one spanning several nodes stays without
+  a device, since none of them is more its own than another.
+
   Covers on/off and brightness. Colour/CTL groups are not modelled yet — no
   hardware to validate against exists here either.
 

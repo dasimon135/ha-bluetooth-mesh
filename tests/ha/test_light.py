@@ -1270,3 +1270,160 @@ async def test_group_light_mode_is_brightness_when_a_member_supports_it(
 
     group_light = next(light for light in added if isinstance(light, MeshGroupLight))
     assert group_light.color_mode == ColorMode.BRIGHTNESS
+
+
+# A group whose members all sit on one node belongs to that node's device;
+# marq24's Garderobe is both strips of one box. A group spanning several nodes
+# has no single device to claim it and stays device-less.
+
+ROOM_ADDR = 0xC01F
+
+
+def _two_nodes_network_with_group() -> Network:
+    """Two single-output lamps on separate nodes, both subscribed to a group."""
+
+    def lamp(unicast: int, name: str) -> Node:
+        return Node(
+            uuid=f"aaaabbbb-cccc-dddd-eeee-ffff0000{unicast:04x}",
+            unicast=unicast,
+            device_key=b"\x00" * 16,
+            cid=0x07E9,
+            name=name,
+            elements=(
+                Element(
+                    index=0,
+                    unicast=unicast,
+                    name="",
+                    models=(
+                        Model(
+                            model_id=0x1000,
+                            bound_appkey_indexes=(0,),
+                            subscribe=(GROUP_ADDR,),
+                        ),
+                        Model(
+                            model_id=0x1300,
+                            bound_appkey_indexes=(0,),
+                            subscribe=(GROUP_ADDR,),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+    base = replace(_fixture_network(), nodes=(lamp(0x0010, "Hall"), lamp(0x0020, "Stairs")))
+    return replace(
+        base,
+        groups=(Group(id="g1", name="Landing", kind="group", address=GROUP_ADDR),),
+    )
+
+
+def _two_groups_over_the_same_outputs() -> Network:
+    """marq24's box: the Diele room and the Garderobe group, same two strips."""
+    network = _two_output_network_with_group()
+    node = network.nodes[0]
+    elements = tuple(
+        replace(
+            element,
+            models=tuple(
+                replace(model, subscribe=(ROOM_ADDR, GROUP_ADDR))
+                for model in element.models
+            ),
+        )
+        for element in node.elements
+    )
+    return replace(
+        network,
+        nodes=(replace(node, elements=elements),),
+        groups=(
+            Group(id="r1", name="Diele", kind="room", address=ROOM_ADDR),
+            Group(id="g1", name="Garderobe", kind="group", address=GROUP_ADDR),
+        ),
+    )
+
+
+async def test_a_group_on_one_node_belongs_to_that_nodes_device(hass) -> None:
+    added, _ = await _setup(hass, _two_output_network_with_group())
+
+    group_light = next(light for light in added if isinstance(light, MeshGroupLight))
+    assert group_light.device_info["identifiers"] == {(DOMAIN, f"{MESH_UUID}_0045")}
+
+
+async def test_a_group_spanning_several_nodes_has_no_device(hass) -> None:
+    added, _ = await _setup(hass, _two_nodes_network_with_group())
+
+    group_light = next(light for light in added if isinstance(light, MeshGroupLight))
+    assert group_light.device_info is None
+
+
+async def test_a_group_shows_a_member_turned_on_directly(hass) -> None:
+    """The group's state is its members', not the last thing it was told."""
+    added, _ = await _setup(hass, _two_output_network_with_group())
+    group_light = next(light for light in added if isinstance(light, MeshGroupLight))
+    top = next(light for light in added if isinstance(light, MeshLight))
+
+    await top.async_turn_on(brightness=200)
+
+    assert group_light.is_on is True
+
+
+async def test_a_room_follows_a_group_over_the_same_outputs(hass) -> None:
+    """Diele showed off over two lit strips after Garderobe switched them on."""
+    added, _ = await _setup(hass, _two_groups_over_the_same_outputs())
+    room, group = (light for light in added if isinstance(light, MeshGroupLight))
+
+    await group.async_turn_on(brightness=255)
+    assert room.is_on is True
+    assert room.brightness == 255
+
+    await group.async_turn_off()
+    assert room.is_on is False
+
+
+async def test_a_group_is_off_only_when_every_member_is_off(hass) -> None:
+    added, _ = await _setup(hass, _two_output_network_with_group())
+    group_light = next(light for light in added if isinstance(light, MeshGroupLight))
+    top, bottom = (light for light in added if isinstance(light, MeshLight))
+
+    await top.async_turn_on()
+    await bottom.async_turn_off()
+    assert group_light.is_on is True
+
+    await top.async_turn_off()
+    assert group_light.is_on is False
+
+
+async def test_a_group_with_no_member_known_yet_is_unknown(hass) -> None:
+    added, _ = await _setup(hass, _two_output_network_with_group())
+
+    group_light = next(light for light in added if isinstance(light, MeshGroupLight))
+    assert group_light.is_on is None
+
+
+async def test_a_member_changing_rewrites_the_group(hass) -> None:
+    """Without this the dashboard keeps the group's stale state until touched."""
+    added, _ = await _setup(hass, _two_output_network_with_group())
+    group_light = next(light for light in added if isinstance(light, MeshGroupLight))
+    top = next(light for light in added if isinstance(light, MeshLight))
+    writes: list[None] = []
+    group_light.async_write_ha_state = lambda: writes.append(None)
+    group_light.hass = hass
+    await group_light.async_added_to_hass()
+
+    await top.async_turn_off()
+
+    assert writes
+
+
+async def test_a_removed_group_stops_listening(hass) -> None:
+    added, _ = await _setup(hass, _two_output_network_with_group())
+    group_light = next(light for light in added if isinstance(light, MeshGroupLight))
+    top = next(light for light in added if isinstance(light, MeshLight))
+    writes: list[None] = []
+    group_light.async_write_ha_state = lambda: writes.append(None)
+    group_light.hass = hass
+    await group_light.async_added_to_hass()
+
+    group_light._call_on_remove_callbacks()
+    await top.async_turn_off()
+
+    assert writes == []
