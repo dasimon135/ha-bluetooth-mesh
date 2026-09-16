@@ -22,6 +22,7 @@ live or stale.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
@@ -321,6 +322,8 @@ class MeshLight(LightEntity):
         # by the lamp's own the first time it answers. Asked once: it is a
         # property of the device, not a state.
         self._range_read = False
+        # Group entities over this output, re-rendered whenever it changes.
+        self._state_listeners: list[Callable[[], None]] = []
 
     # -------------------------------------------------------------- lifecycle
 
@@ -340,6 +343,18 @@ class MeshLight(LightEntity):
         )
         if self._coordinator.available:
             self._schedule_refresh()
+
+    @callback
+    def async_write_ha_state(self) -> None:
+        super().async_write_ha_state()
+        for listener in tuple(self._state_listeners):
+            listener()
+
+    @callback
+    def add_state_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
+        """Call ``listener`` after every state write; returns its remover."""
+        self._state_listeners.append(listener)
+        return lambda: self._state_listeners.remove(listener)
 
     @callback
     def _handle_availability(self) -> None:
@@ -673,11 +688,15 @@ class MeshGroupLight(LightEntity):
     the "loop" a Home Assistant light group makes visible when it fires
     ``light.turn_on`` at each member entity in turn. There is no per-member
     Status to wait for (an acked group Set would get one reply per member, a
-    flood rather than a shortcut), so this entity's own state and its
-    members' displayed state are both pushed optimistically, never read back.
+    flood rather than a shortcut), so the members' displayed state is pushed
+    optimistically, never read back.
 
-    Not attached to any device: a group can span more than one physical node,
-    and none of them is more "its" device than another.
+    Holds no state of its own: it shows its members', so a member switched
+    directly, or through another group over the same outputs (a vendor-app
+    room and group often cover the same lamps), is reflected here too.
+
+    Attached to a device only when every member sits on the same node; a group
+    spanning several has no device that is more "its" own than another.
     """
 
     _attr_has_entity_name = True
@@ -707,8 +726,14 @@ class MeshGroupLight(LightEntity):
         self._attr_color_mode = mode
         self._attr_supported_color_modes = {mode}
 
-        self._is_on: bool | None = None
-        self._brightness: int | None = None
+        devices = {frozenset(m.device_info["identifiers"]) for m in members}
+        if len(devices) == 1:
+            self._attr_device_info = DeviceInfo(identifiers=set(devices.pop()))
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        for member in self._members:
+            self.async_on_remove(member.add_state_listener(self.async_write_ha_state))
 
     @property
     def available(self) -> bool:
@@ -716,25 +741,33 @@ class MeshGroupLight(LightEntity):
 
     @property
     def is_on(self) -> bool | None:
-        return self._is_on
+        known = [m.is_on for m in self._members if m.is_on is not None]
+        if not known:
+            return None
+        return any(known)
 
     @property
     def brightness(self) -> int | None:
-        return self._brightness
+        lit = [
+            m.brightness
+            for m in self._members
+            if m.is_on and m.brightness is not None
+        ]
+        if not lit:
+            return None
+        return round(sum(lit) / len(lit))
 
     def _push_to_members(self, on: bool, brightness: int | None) -> None:
         for member in self._members:
             member.apply_group_state(on, brightness)
 
     async def async_turn_on(self, **kwargs) -> None:
-        self._is_on = True
         drives_brightness = (
             ATTR_BRIGHTNESS in kwargs and self._attr_color_mode is ColorMode.BRIGHTNESS
         )
-        if drives_brightness:
-            self._brightness = kwargs[ATTR_BRIGHTNESS]
-        self.async_write_ha_state()
-        self._push_to_members(True, self._brightness if drives_brightness else None)
+        self._push_to_members(
+            True, kwargs[ATTR_BRIGHTNESS] if drives_brightness else None
+        )
 
         if drives_brightness:
             await self._coordinator.async_set_group_lightness(
@@ -745,7 +778,5 @@ class MeshGroupLight(LightEntity):
             await self._coordinator.async_set_group_onoff(self._group.address, True)
 
     async def async_turn_off(self, **kwargs) -> None:
-        self._is_on = False
-        self.async_write_ha_state()
         self._push_to_members(False, None)
         await self._coordinator.async_set_group_onoff(self._group.address, False)
