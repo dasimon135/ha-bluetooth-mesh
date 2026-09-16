@@ -6,6 +6,8 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-09-16
+
 ### Added
 
 - **A room or group the vendor app already built is now one light in Home
