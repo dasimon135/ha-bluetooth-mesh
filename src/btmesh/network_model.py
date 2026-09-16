@@ -36,6 +36,7 @@ __all__ = [
     "Model",
     "Element",
     "Node",
+    "Group",
     "Network",
 ]
 
@@ -79,6 +80,12 @@ class Model:
 
     model_id: int
     bound_appkey_indexes: tuple[int, ...]
+    # Group/virtual addresses this model already subscribes to, per the export
+    # (spec §4.2.5). The vendor app writes these when the user builds a room or
+    # group — nothing in this stack configures a subscription itself, so an
+    # empty tuple means "no group has this model on its member list", not
+    # "unread".
+    subscribe: tuple[int, ...] = ()
 
     @property
     def is_vendor(self) -> bool:
@@ -147,6 +154,28 @@ class Node:
 
 
 @dataclass(frozen=True)
+class Group:
+    """A mesh group the vendor app already built (ThingOS ``tos_groups``).
+
+    Sending one message to ``address`` reaches every element already
+    subscribed to it (see :attr:`Model.subscribe`) in a single round trip,
+    which is what a room/group toggle in the vendor app does. This stack does
+    not configure that subscription itself — see ha-bluetooth-mesh#33 — it
+    only reads what the app already wrote.
+
+    Only the Generic OnOff / Light Lightness control address is modelled
+    (``multicastAddress`` in the export); the CTL-temperature and HSL
+    sub-addresses (``multicastAddress2..4``) are unused until a group needs to
+    carry colour.
+    """
+
+    id: str
+    name: str
+    kind: str
+    address: int
+
+
+@dataclass(frozen=True)
 class Network:
     """A mesh network parsed from a ThingOS ``.connect`` export.
 
@@ -168,6 +197,10 @@ class Network:
     # want to drive are bound to — see :meth:`app_key_for_models`. Defaulted so
     # a Network built by hand (tests, fixtures) stays valid.
     app_keys: tuple[AppKey, ...] = ()
+    # Groups the vendor app already built (ThingOS ``tos_groups``), minus the
+    # internal "all nodes" pseudo-group every export carries. Empty for an
+    # export with none, or one from an app that does not write this field.
+    groups: tuple[Group, ...] = ()
 
     @property
     def identifier(self) -> str:
@@ -317,6 +350,7 @@ class Network:
             iv_index=_as_int(data.get("ivIndex", 0), "ivIndex"),
             nodes=tuple(nodes),
             app_keys=app_keys,
+            groups=_parse_groups(data.get("tos_groups", [])),
         )
 
     @classmethod
@@ -359,6 +393,39 @@ def _parse_app_keys(entries: list) -> tuple[AppKey, ...]:
             )
         )
     return tuple(keys)
+
+
+def _parse_groups(entries: object) -> tuple[Group, ...]:
+    """Parse ``tos_groups[]``, dropping the internal "all nodes" pseudo-group.
+
+    Unlike nodes, a malformed or missing group entry is not this network's
+    problem to raise over: it is vendor-app sugar layered on top of a mesh
+    that works without it, so a bad entry is skipped rather than failing the
+    whole import.
+    """
+    if not isinstance(entries, list):
+        return ()
+    groups = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") == "all":
+            continue
+        name = entry.get("name")
+        address = entry.get("multicastAddress")
+        if not isinstance(name, str) or not name:
+            continue
+        if isinstance(address, bool) or not isinstance(address, int):
+            continue
+        groups.append(
+            Group(
+                id=str(entry.get("id", "")),
+                name=name,
+                kind=str(entry.get("type", "")),
+                address=address,
+            )
+        )
+    return tuple(groups)
 
 
 def _hex_bytes(entry: dict, key: str, label: str) -> bytes:
@@ -442,7 +509,13 @@ def _parse_model(raw: dict) -> Model:
     if not isinstance(bind, list):
         raise NetworkModelError(f"'bind' must be a list, got {bind!r}")
     indexes = tuple(_as_int(b, "models[].bind[]") for b in bind)
-    return Model(model_id=model_id, bound_appkey_indexes=indexes)
+    subscribe = raw.get("subscribe", [])
+    if not isinstance(subscribe, list):
+        raise NetworkModelError(f"'subscribe' must be a list, got {subscribe!r}")
+    addresses = tuple(_hex_int(a, "models[].subscribe[]") for a in subscribe)
+    return Model(
+        model_id=model_id, bound_appkey_indexes=indexes, subscribe=addresses
+    )
 
 
 def _parse_element(

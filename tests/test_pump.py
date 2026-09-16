@@ -45,3 +45,22 @@ async def test_put_can_override_the_message_type_preserving_order():
         (MSG_TYPE_PROXY_CONFIG, b"\x01"),
         (MSG_TYPE_NETWORK_PDU, b"\x02"),
     ]
+
+
+async def test_flush_waits_until_every_queued_pdu_reached_the_bearer():
+    """A fire-and-forget sender needs to know the PDU left before it returns.
+
+    Without this, a caller that queues a PDU and immediately stops the pump
+    (as a fire-and-forget group Set does, with no Status reply to await) races
+    the drain: ``stop()`` cancels the task before it ever resumes from
+    ``queue.get()``, and the PDU is silently dropped.
+    """
+    bearer = RecordingBearer()
+    pump = BearerPump(bearer, MSG_TYPE_NETWORK_PDU)
+    pump.start()
+    try:
+        pump.put(b"\x01")
+        await pump.flush()
+        assert bearer.sent == [(MSG_TYPE_NETWORK_PDU, b"\x01")]
+    finally:
+        await pump.stop()

@@ -129,12 +129,23 @@ def _outputs(node) -> tuple:
     )
 
 
+def _element_subscribes(element, address: int) -> bool:
+    """Whether any model on ``element`` already subscribes to ``address``.
+
+    The vendor app writes this when the user builds a room/group in it
+    (ha-bluetooth-mesh#33) — nothing here configures a subscription, this only
+    reads what the export already carries.
+    """
+    return any(address in model.subscribe for model in element.models)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: BluetoothMeshConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Create one light per lighting element (see :func:`_outputs`).
+    """Create one light per lighting element (see :func:`_outputs`), plus one
+    per mesh group with at least two of those elements already subscribed.
 
     A node with a single lighting element — every lamp tested here — yields
     exactly the entity it did before, addressed across the whole node, so no
@@ -146,26 +157,39 @@ async def async_setup_entry(
     # an ``OptionsFlowWithReload``, so changing this rebuilds every entity.
     inverted = set(entry.options.get(CONF_INVERTED_CTL, ()))
     entities: list[MeshLight] = []
+    # The output element behind each entity, so a group below can tell which
+    # entities are already subscribed to it without re-deriving addressing.
+    outputs_by_light: list[tuple[MeshLight, object]] = []
     for node in coordinator.network.nodes:
         outputs = _outputs(node)
         if not outputs:
             continue
         if len(outputs) == 1:
-            entities.append(
-                MeshLight(
-                    coordinator, node, invert_ctl=node.unicast in inverted
-                )
-            )
+            light = MeshLight(coordinator, node, invert_ctl=node.unicast in inverted)
+            entities.append(light)
+            outputs_by_light.append((light, outputs[0]))
             continue
         for element in outputs:
-            entities.append(
-                MeshLight(
-                    coordinator,
-                    node,
-                    element=element,
-                    invert_ctl=element.unicast in inverted,
-                )
+            light = MeshLight(
+                coordinator,
+                node,
+                element=element,
+                invert_ctl=element.unicast in inverted,
             )
+            entities.append(light)
+            outputs_by_light.append((light, element))
+
+    for group in coordinator.network.groups:
+        members = tuple(
+            light
+            for light, element in outputs_by_light
+            if _element_subscribes(element, group.address)
+        )
+        # A "group" of fewer than two members controls nothing a direct
+        # entity does not already: one message, one lamp, no loop to avoid.
+        if len(members) >= 2:
+            entities.append(MeshGroupLight(coordinator, group, members))
+
     async_add_entities(entities)
 
 
@@ -528,6 +552,21 @@ class MeshLight(LightEntity):
                 "on" if requested else "off",
             )
 
+    def apply_group_state(self, on: bool, brightness: int | None) -> None:
+        """Reflect a :class:`MeshGroupLight` command sent on this entity's behalf.
+
+        A group Set is one unacknowledged message to every subscribed element
+        at once — there is no per-member Status for this entity to settle its
+        own optimistic cache on the way a direct command does, so the group
+        entity pushes the same intent here directly instead of this entity
+        sending its own unicast command (which is exactly the sequential
+        round trip ha-bluetooth-mesh#33 exists to avoid).
+        """
+        self._is_on = on
+        if brightness is not None:
+            self._brightness = brightness
+        self.async_write_ha_state()
+
     async def async_turn_on(self, **kwargs) -> None:
         """Apply requested brightness and/or temperature and ensure the lamp is on.
 
@@ -624,3 +663,89 @@ class MeshLight(LightEntity):
         answer = await self._coordinator.async_set_onoff(self._onoff_unicast, False)
         self._settle_onoff(answer, False, was_on)
         self.async_write_ha_state()
+
+
+class MeshGroupLight(LightEntity):
+    """A mesh group the vendor app already built, addressed as one light.
+
+    Commanding this entity sends ONE unacknowledged Set to the group address
+    (ha-bluetooth-mesh#33) instead of one unicast Set per member in sequence —
+    the "loop" a Home Assistant light group makes visible when it fires
+    ``light.turn_on`` at each member entity in turn. There is no per-member
+    Status to wait for (an acked group Set would get one reply per member, a
+    flood rather than a shortcut), so this entity's own state and its
+    members' displayed state are both pushed optimistically, never read back.
+
+    Not attached to any device: a group can span more than one physical node,
+    and none of them is more "its" device than another.
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+
+    def __init__(
+        self,
+        coordinator: MeshCoordinator,
+        group,
+        members: tuple[MeshLight, ...],
+    ) -> None:
+        self._coordinator = coordinator
+        self._group = group
+        self._members = members
+        self._attr_unique_id = (
+            f"{coordinator.network.identifier}_group_{group.address:04x}"
+        )
+        self._attr_name = group.name or f"Group {group.address:04x}"
+
+        # Brightness only if at least one member can dim — CTL/colour groups
+        # are not modelled yet (see ha-bluetooth-mesh#33): a group send only
+        # covers Generic OnOff and Light Lightness so far.
+        if any(m.color_mode in (ColorMode.BRIGHTNESS, ColorMode.COLOR_TEMP) for m in members):
+            mode = ColorMode.BRIGHTNESS
+        else:
+            mode = ColorMode.ONOFF
+        self._attr_color_mode = mode
+        self._attr_supported_color_modes = {mode}
+
+        self._is_on: bool | None = None
+        self._brightness: int | None = None
+
+    @property
+    def available(self) -> bool:
+        return self._coordinator.available
+
+    @property
+    def is_on(self) -> bool | None:
+        return self._is_on
+
+    @property
+    def brightness(self) -> int | None:
+        return self._brightness
+
+    def _push_to_members(self, on: bool, brightness: int | None) -> None:
+        for member in self._members:
+            member.apply_group_state(on, brightness)
+
+    async def async_turn_on(self, **kwargs) -> None:
+        self._is_on = True
+        drives_brightness = (
+            ATTR_BRIGHTNESS in kwargs and self._attr_color_mode is ColorMode.BRIGHTNESS
+        )
+        if drives_brightness:
+            self._brightness = kwargs[ATTR_BRIGHTNESS]
+        self.async_write_ha_state()
+        self._push_to_members(True, self._brightness if drives_brightness else None)
+
+        if drives_brightness:
+            await self._coordinator.async_set_group_lightness(
+                self._group.address,
+                MeshLight._brightness_to_level(kwargs[ATTR_BRIGHTNESS]),
+            )
+        else:
+            await self._coordinator.async_set_group_onoff(self._group.address, True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        self._is_on = False
+        self.async_write_ha_state()
+        self._push_to_members(False, None)
+        await self._coordinator.async_set_group_onoff(self._group.address, False)

@@ -19,6 +19,7 @@ from btmesh import node as node_module
 from btmesh.access import (
     OP_GENERIC_ONOFF_GET,
     OP_GENERIC_ONOFF_SET,
+    OP_GENERIC_ONOFF_SET_UNACK,
     OP_GENERIC_ONOFF_STATUS,
     OP_LIGHT_CTL_GET,
     OP_LIGHT_CTL_SET,
@@ -30,6 +31,7 @@ from btmesh.access import (
     OP_LIGHT_CTL_TEMPERATURE_STATUS,
     OP_LIGHT_LIGHTNESS_GET,
     OP_LIGHT_LIGHTNESS_SET,
+    OP_LIGHT_LIGHTNESS_SET_UNACK,
     OP_LIGHT_LIGHTNESS_STATUS,
     encode_opcode,
 )
@@ -337,6 +339,63 @@ async def test_set_lightness_clamps_out_of_range():
         assert await controller.set_lightness(UNICAST, 9.0) == 0xFFFF
     finally:
         await controller.stop()
+
+
+# ------------------------------------------------------------ mesh groups
+#
+# A group send is unacknowledged and fire-and-forget: an acked Set to a group
+# address gets a Status back from EVERY subscribed element, and this stack
+# does not configure the subscription itself (ha-bluetooth-mesh#33) — it only
+# addresses a message to a group the vendor app already built.
+
+GROUP = 0xC028
+
+
+async def test_set_group_onoff_emits_unacknowledged_set_to_the_group_address():
+    controller, _, captured = make_setup()
+    await controller.start()
+    try:
+        await controller.set_group_onoff(GROUP, True)
+    finally:
+        await controller.stop()
+    assert captured[-1].opcode == OP_GENERIC_ONOFF_SET_UNACK
+    assert captured[-1].params[0] == 1  # onoff = ON
+
+
+async def test_set_group_onoff_off_uses_the_off_parameter():
+    controller, _, captured = make_setup()
+    await controller.start()
+    try:
+        await controller.set_group_onoff(GROUP, False)
+    finally:
+        await controller.stop()
+    assert captured[-1].opcode == OP_GENERIC_ONOFF_SET_UNACK
+    assert captured[-1].params[0] == 0
+
+
+async def test_set_group_lightness_emits_unacknowledged_set_to_the_group_address():
+    controller, _, captured = make_setup()
+    await controller.start()
+    try:
+        await controller.set_group_lightness(GROUP, 1.0)
+    finally:
+        await controller.stop()
+    assert captured[-1].opcode == OP_LIGHT_LIGHTNESS_SET_UNACK
+    assert int.from_bytes(captured[-1].params[0:2], "little") == 0xFFFF
+
+
+async def test_set_group_lightness_clamps_out_of_range():
+    controller, _, captured = make_setup()
+    await controller.start()
+    try:
+        await controller.set_group_lightness(GROUP, -5.0)
+        assert int.from_bytes(captured[-1].params[0:2], "little") == 0x0000
+        await controller.set_group_lightness(GROUP, 9.0)
+        assert int.from_bytes(captured[-1].params[0:2], "little") == 0xFFFF
+    finally:
+        await controller.stop()
+
+
 
 
 # ----------------------------------------------------------- ctl temperature

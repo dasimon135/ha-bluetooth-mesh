@@ -92,6 +92,10 @@ def test_generic_onoff_set_validates_tid():
         generic_onoff_set(True, 0x100)
 
 
+def test_generic_onoff_set_unack_uses_unack_opcode():
+    assert generic_onoff_set(True, 0x2A, ack=False) == bytes.fromhex("8203" "01" "2a")
+
+
 def test_config_composition_data_get():
     assert config_composition_data_get() == bytes.fromhex("8008" "00")
     assert config_composition_data_get(page=0xFF) == bytes.fromhex("8008" "ff")
@@ -215,6 +219,12 @@ def test_light_lightness_set_layout():
 
     assert light_lightness_set(0xFFFF, 5) == bytes.fromhex("824cffff05")
     assert light_lightness_set(0, 0) == bytes.fromhex("824c000000")
+
+
+def test_light_lightness_set_unack_uses_unack_opcode():
+    from btmesh.access import light_lightness_set
+
+    assert light_lightness_set(0xFFFF, 5, ack=False) == bytes.fromhex("824dffff05")
 
 
 def test_parse_light_lightness_status_short_and_full():

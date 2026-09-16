@@ -6,6 +6,27 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-09-16
+
+### Added
+
+- **A room or group the vendor app already built is now one light in Home
+  Assistant, controlled with a single message.** Raised in
+  [#30](https://github.com/dasimon135/ha-bluetooth-mesh/issues/30) after the
+  element-per-output fix: toggling a Home Assistant `light.group` over two
+  outputs switched them in a visible sequence, one full round trip after the
+  other, where the vendor app's own group toggle moves both at once.
+
+  The gap was not a missing protocol feature — the app already subscribed the
+  member elements to a group address when the room/group was built, and the
+  `.connect` export already carries it. Nothing here configures a mesh
+  subscription; a new entity per group now simply addresses a single
+  unacknowledged Set to that address instead of one acknowledged Set per
+  member in turn. Tracked as [#33](https://github.com/dasimon135/ha-bluetooth-mesh/issues/33).
+
+  Covers on/off and brightness. Colour/CTL groups are not modelled yet — no
+  hardware to validate against exists here either.
+
 ## [0.8.0] — 2026-09-12
 
 ### Fixed

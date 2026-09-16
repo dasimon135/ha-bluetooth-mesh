@@ -866,6 +866,24 @@ class MeshCoordinator:
             lambda c: c.set_lightness(unicast, level_0_1, timeout=STATUS_TIMEOUT)
         )
 
+    async def async_set_group_onoff(self, group_address: int, on: bool) -> None:
+        """Set Generic OnOff on a mesh group address in one unacknowledged Set.
+
+        Unlike :meth:`async_set_onoff`, there is no Status to settle on — see
+        :meth:`btmesh.controller.MeshController.set_group_onoff` — so this
+        always returns ``None``. Callers that need the members' displayed
+        state to reflect the change update those entities themselves.
+        """
+        await self._run_connected(lambda c: c.set_group_onoff(group_address, on))
+
+    async def async_set_group_lightness(
+        self, group_address: int, level_0_1: float
+    ) -> None:
+        """Set Light Lightness (0..1) on a mesh group address, unacknowledged."""
+        await self._run_connected(
+            lambda c: c.set_group_lightness(group_address, level_0_1)
+        )
+
     async def async_set_ctl(
         self, unicast: int, level_0_1: float, kelvin: int
     ) -> int | None:
