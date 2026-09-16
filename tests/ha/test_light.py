@@ -1399,20 +1399,31 @@ async def test_a_group_with_no_member_known_yet_is_unknown(hass) -> None:
     assert group_light.is_on is None
 
 
-async def test_a_member_writing_its_state_rewrites_the_group(hass, monkeypatch) -> None:
+async def test_a_member_changing_rewrites_the_group(hass) -> None:
     """Without this the dashboard keeps the group's stale state until touched."""
-    from homeassistant.helpers.entity import Entity
-
-    monkeypatch.setattr(Entity, "async_write_ha_state", lambda self: None)
     added, _ = await _setup(hass, _two_output_network_with_group())
     group_light = next(light for light in added if isinstance(light, MeshGroupLight))
     top = next(light for light in added if isinstance(light, MeshLight))
-    del top.async_write_ha_state
     writes: list[None] = []
     group_light.async_write_ha_state = lambda: writes.append(None)
     group_light.hass = hass
     await group_light.async_added_to_hass()
 
-    top.async_write_ha_state()
+    await top.async_turn_off()
 
-    assert writes == [None]
+    assert writes
+
+
+async def test_a_removed_group_stops_listening(hass) -> None:
+    added, _ = await _setup(hass, _two_output_network_with_group())
+    group_light = next(light for light in added if isinstance(light, MeshGroupLight))
+    top = next(light for light in added if isinstance(light, MeshLight))
+    writes: list[None] = []
+    group_light.async_write_ha_state = lambda: writes.append(None)
+    group_light.hass = hass
+    await group_light.async_added_to_hass()
+
+    group_light._call_on_remove_callbacks()
+    await top.async_turn_off()
+
+    assert writes == []

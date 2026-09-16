@@ -345,8 +345,13 @@ class MeshLight(LightEntity):
             self._schedule_refresh()
 
     @callback
-    def async_write_ha_state(self) -> None:
-        super().async_write_ha_state()
+    def _write_state(self) -> None:
+        """Write this light's state, then re-render the groups over it.
+
+        Every state write in this class goes through here: HA's
+        ``async_write_ha_state`` is final, so the groups cannot hook it.
+        """
+        self.async_write_ha_state()
         for listener in tuple(self._state_listeners):
             listener()
 
@@ -359,7 +364,7 @@ class MeshLight(LightEntity):
     @callback
     def _handle_availability(self) -> None:
         """Push the availability change to HA, and re-read when back online."""
-        self.async_write_ha_state()
+        self._write_state()
         if self._coordinator.available:
             self._schedule_refresh()
 
@@ -393,7 +398,7 @@ class MeshLight(LightEntity):
                 self._brightness = self._level_to_brightness(level)
         if self._attr_color_mode is ColorMode.COLOR_TEMP:
             await self._refresh_ctl()
-        self.async_write_ha_state()
+        self._write_state()
 
     async def _refresh_ctl(self) -> None:
         """Read the lamp's colour temperature, and once, the range it works in.
@@ -580,7 +585,7 @@ class MeshLight(LightEntity):
         self._is_on = on
         if brightness is not None:
             self._brightness = brightness
-        self.async_write_ha_state()
+        self._write_state()
 
     async def async_turn_on(self, **kwargs) -> None:
         """Apply requested brightness and/or temperature and ensure the lamp is on.
@@ -605,7 +610,7 @@ class MeshLight(LightEntity):
             self._brightness = kwargs[ATTR_BRIGHTNESS]
         if ATTR_COLOR_TEMP_KELVIN in kwargs:
             self._color_temp_kelvin = kwargs[ATTR_COLOR_TEMP_KELVIN]
-        self.async_write_ha_state()
+        self._write_state()
 
         # Track whether any command drives lightness > 0 (which itself lights the
         # lamp) versus a temperature-only change (which does not).
@@ -668,16 +673,16 @@ class MeshLight(LightEntity):
             # the on-state is whatever it was, not what the tap assumed.
             self._is_on = was_on
 
-        self.async_write_ha_state()
+        self._write_state()
 
     async def async_turn_off(self, **kwargs) -> None:
         """Switch the node off via Generic OnOff (optimistic UI first)."""
         was_on = self._is_on
         self._is_on = False
-        self.async_write_ha_state()
+        self._write_state()
         answer = await self._coordinator.async_set_onoff(self._onoff_unicast, False)
         self._settle_onoff(answer, False, was_on)
-        self.async_write_ha_state()
+        self._write_state()
 
 
 class MeshGroupLight(LightEntity):
