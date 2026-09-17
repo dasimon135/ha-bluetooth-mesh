@@ -36,6 +36,13 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Covers on/off and brightness. Colour/CTL groups are not modelled yet — no
   hardware to validate against exists here either.
 
+  Validated on the author's single-output lamp for the absence of change — no
+  group exists there, so no new entity appears and the one light behaves as it
+  did — and on the reporter's own two-strip box for the rest: the app's room and
+  its group both move both strips at the same instant, both follow a member
+  switched on its own, and a group whose members are deliberately driven apart
+  reports their average (#33, confirmed 2026-09-17).
+
 ## [0.8.0] — 2026-09-12
 
 ### Fixed
