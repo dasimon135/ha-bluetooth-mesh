@@ -6,6 +6,28 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A node gone quiet is no longer dialed anyway, and the automatic recovery
+  loop no longer spends four connection attempts where one would do.** Two of
+  the three fixes scoped in
+  [#31](https://github.com/dasimon135/ha-bluetooth-mesh/issues/31), after a
+  2026-09-12 outage where Home Assistant's own path scoring got poisoned by
+  its own failed attempts against an absent node, sending the eventual retries
+  through the worst proxy in range. A cached advert can still read
+  `connectable=yes` for minutes after the node actually stopped advertising;
+  connecting on that stale word only spends a bleak attempt nobody can win, so
+  a match older than 30 s is now treated as silence rather than a live proxy.
+  Separately, bleak-retry-connector's own retry budget (four attempts inside
+  one call) is now spent only by an explicit command — the automatic
+  background loop (the startup probe, the periodic retry, the reconnect after
+  a dropped link) always spends one, leaning on the coordinator's own backoff
+  for the rest of its patience instead of retrying inside every single try.
+
+  Not yet re-validated against the proxy-wedge scenario that opened #31 —
+  that needs the field conditions from that outage, not a unit test. Item 3
+  (naming the stuck proxy in the `proxy_unreachable` repair) is still open.
+
 ## [0.9.0] — 2026-09-16
 
 ### Added

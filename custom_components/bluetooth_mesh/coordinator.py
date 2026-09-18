@@ -536,7 +536,9 @@ class MeshCoordinator:
 
     # ------------------------------------------------------- keep-alive core
 
-    async def _ensure_connected(self) -> "MeshController | None":
+    async def _ensure_connected(
+        self, *, automatic: bool = False
+    ) -> "MeshController | None":
         """Return a live controller, reusing the held connection or opening one.
 
         Opening a proxy connection over an ESPHome BLE proxy costs several
@@ -547,6 +549,15 @@ class MeshCoordinator:
         not depend on a Status reply for availability. Returns ``None`` (and marks
         unavailable) when no proxy is reachable or the connect fails. Callers hold
         :attr:`_lock`.
+
+        ``automatic`` marks a call from the background recovery machinery (a
+        probe, or the reconnect after a dropped link) rather than a user's own
+        command. bleak-retry-connector's own retry budget already tries several
+        times inside ONE call, and for an automatic try that is pressure of its
+        own: several failures charged to whatever proxy habluetooth scores best,
+        in the same second, on a node that may simply not be there
+        (ha-bluetooth-mesh#31). A user's command is a deliberate one-off, not
+        part of that loop, so it keeps the full budget regardless of backoff.
         """
         if self._controller is not None:
             if (
@@ -594,7 +605,7 @@ class MeshCoordinator:
                 client, bearer = await async_connect_bearer(
                     self.hass,
                     address,
-                    max_attempts=1 if self._backoff else CONNECT_ATTEMPTS,
+                    max_attempts=1 if automatic else CONNECT_ATTEMPTS,
                 )
                 controller = MeshController(
                     self._network, bearer, src_addr=self._src_addr,
@@ -741,7 +752,7 @@ class MeshCoordinator:
             if self._stopped or client is not self._client:
                 return  # a command got there first and already reconnected
             await self._teardown()
-            await self._ensure_connected()
+            await self._ensure_connected(automatic=True)
 
     # ------------------------------------------------------- connection teardown
 
@@ -932,7 +943,7 @@ class MeshCoordinator:
                 # connected the second that reconnect failed -- one attempt
                 # inside the wait the failure had just imposed.
                 return
-            controller = await self._ensure_connected()
+            controller = await self._ensure_connected(automatic=True)
             if controller is not None and self._idle_timeout > 0:
                 # Probe only — hand the slot straight back to the vendor app.
                 await self._teardown()

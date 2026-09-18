@@ -1390,8 +1390,15 @@ async def test_the_backoff_is_capped_and_each_step_is_logged(hass, caplog) -> No
     assert [r.args[0] for r in steps] == [15, 30, 60, 120, 240, 300, 300]
 
 
-async def test_a_successful_connect_resets_the_backoff_and_the_attempts(hass) -> None:
-    """Pressure is per attempt: one GATT try while backing off, four otherwise."""
+async def test_automatic_reconnects_always_use_one_attempt(hass) -> None:
+    """Every automatic try spends one GATT attempt, backing off or not.
+
+    bleak-retry-connector's own budget already tries several times inside ONE
+    call; for the background recovery loop that is pressure of its own -- see
+    ha-bluetooth-mesh#31, where four such attempts landed inside one second and
+    were read as a storm. A user's command is exempted (see the companion test
+    below); the automatic loop never is.
+    """
     entry = _make_entry(hass)
     callbacks: list = []
     fake = FakeController()
@@ -1421,8 +1428,8 @@ async def test_a_successful_connect_resets_the_backoff_and_the_attempts(hass) ->
         assert coord.available is True
 
         # The link is lost again; no failure has happened since the success,
-        # so the very next advert reconnects at once, with the full retry
-        # budget.
+        # so the very next advert reconnects at once -- still automatic, so
+        # still one attempt.
         async with coord._lock:
             await coord._teardown()
         await _advertise(coord, callbacks)
@@ -1430,7 +1437,37 @@ async def test_a_successful_connect_resets_the_backoff_and_the_attempts(hass) ->
         assert coord._controller is fake
 
         attempts = [c.kwargs.get("max_attempts") for c in connects.await_args_list]
-        assert attempts == [4, 1, 1, 4]
+        assert attempts == [1, 1, 1, 1]
+    await coord.async_stop()
+
+
+async def test_a_users_command_keeps_the_full_budget_mid_backoff(hass) -> None:
+    """A command is a deliberate one-off, not the automatic recovery loop.
+
+    It is never gated by ``_may_attempt()`` (it must reach a node right now,
+    not wait out a backoff meant to quiet the background loop), and per
+    ha-bluetooth-mesh#31 it keeps bleak-retry-connector's full attempt budget
+    even while that background loop has backed off to one.
+    """
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with (
+        _patch_transport(fake, ctor_side_effect=[TimeoutError(), fake]),
+        _fake_clock(),
+    ):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        connects = coordinator_mod.async_connect_bearer
+        await _wait_for(lambda: connects.await_count == 1)
+        await _wait_for(lambda: not coord._lock.locked())
+        assert coord._backoff > 0  # the startup probe failed and backed off
+
+        result = await coord.async_set_onoff(UNICAST, True)
+
+        assert result is True
+        assert connects.await_count == 2
+        attempts = [c.kwargs.get("max_attempts") for c in connects.await_args_list]
+        assert attempts == [1, coordinator_mod.CONNECT_ATTEMPTS]
     await coord.async_stop()
 
 

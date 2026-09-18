@@ -18,6 +18,7 @@ scope (it only ever runs inside Home Assistant).
 from __future__ import annotations
 
 import logging
+from time import monotonic
 from typing import TYPE_CHECKING, Callable
 
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
@@ -47,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "MeshTransportError",
+    "PROXY_ADVERT_MAX_AGE",
     "find_proxy_address",
     "async_connect_bearer",
     "async_register_proxy_callback",
@@ -56,6 +58,15 @@ __all__ = [
 
 class MeshTransportError(Exception):
     """A mesh proxy could not be located or connected through HA-bluetooth."""
+
+
+# Past this, a cached advert is treated as silence rather than a live proxy
+# (ha-bluetooth-mesh#31): HA's discovered-service-info snapshot keeps an entry
+# connectable for minutes after the last real advert, and a connect attempt
+# against a node that has gone quiet only charges a failure to whichever proxy
+# habluetooth currently scores best -- exactly the attempts that poisoned that
+# scoring during the 2026-09-12 storm.
+PROXY_ADVERT_MAX_AGE = 30.0
 
 
 def _matches_network_id(
@@ -91,10 +102,24 @@ def find_proxy_address(hass: HomeAssistant, net_key: bytes) -> str | None:
     contradicting it. Actual connectability is re-verified at connect time by
     :func:`async_ble_device_from_address`. The snapshot is point-in-time; the
     coordinator retries, so a transient ``None`` is expected.
+
+    A match older than :data:`PROXY_ADVERT_MAX_AGE` is skipped rather than
+    returned: the entry can still read ``connectable=yes`` well after the node
+    actually went quiet, and connecting on that stale word only spends a bleak
+    attempt nobody can win (ha-bluetooth-mesh#31).
     """
     network_id = k3(net_key)
+    now = monotonic()
     for info in bluetooth.async_discovered_service_info(hass, connectable=False):
         if not _matches_network_id(info, network_id):
+            continue
+        age = now - info.time
+        if age > PROXY_ADVERT_MAX_AGE:
+            logger.debug(
+                "mesh proxy %s advertises Network ID %s but the last advert "
+                "is %.0f s old; treating it as silent",
+                info.address, network_id.hex(), age,
+            )
             continue
         if getattr(info, "connectable", False):
             logger.debug(

@@ -11,6 +11,7 @@ pytest-homeassistant-custom-component installed::
 
 from __future__ import annotations
 
+from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,6 +26,7 @@ from custom_components.bluetooth_mesh import mesh_transport
 from custom_components.bluetooth_mesh.btmesh.bearer import PROXY_SERVICE, GattBearer
 from custom_components.bluetooth_mesh.btmesh.crypto import k3
 from custom_components.bluetooth_mesh.mesh_transport import (
+    PROXY_ADVERT_MAX_AGE,
     MeshTransportError,
     async_connect_bearer,
     async_register_proxy_callback,
@@ -42,14 +44,22 @@ def _network_id_advert(net_key: bytes) -> bytes:
 
 
 def _fake_info(
-    address: str, service_data: dict[str, bytes], connectable: bool = True
+    address: str,
+    service_data: dict[str, bytes],
+    connectable: bool = True,
+    time: float | None = None,
 ):
-    """A BluetoothServiceInfoBleak-like object (duck-typed for our code)."""
+    """A BluetoothServiceInfoBleak-like object (duck-typed for our code).
+
+    ``time`` defaults to "just now" so every existing test stays inside
+    :data:`PROXY_ADVERT_MAX_AGE` without having to know about it.
+    """
     return SimpleNamespace(
         address=address,
         device=SimpleNamespace(address=address),
         service_data=service_data,
         connectable=connectable,
+        time=monotonic() if time is None else time,
     )
 
 
@@ -127,6 +137,40 @@ def test_find_proxy_address_none_for_only_foreign(hass) -> None:
         return_value=[foreign, no_proxy],
     ):
         assert find_proxy_address(hass, NET_KEY) is None
+
+
+def test_find_proxy_address_skips_a_stale_advert(hass) -> None:
+    """A cached advert older than PROXY_ADVERT_MAX_AGE is treated as silence.
+
+    HA's snapshot can still read ``connectable=yes`` minutes after a node last
+    advertised (ha-bluetooth-mesh#31); attempting the connect anyway only
+    charges a failure to whatever proxy habluetooth currently scores best.
+    """
+    stale = _fake_info(
+        "AA:BB:CC:DD:EE:FF",
+        {PROXY_SERVICE: _network_id_advert(NET_KEY)},
+        time=monotonic() - PROXY_ADVERT_MAX_AGE - 1,
+    )
+    with patch.object(
+        mesh_transport.bluetooth,
+        "async_discovered_service_info",
+        return_value=[stale],
+    ):
+        assert find_proxy_address(hass, NET_KEY) is None
+
+
+def test_find_proxy_address_accepts_an_advert_within_the_max_age(hass) -> None:
+    fresh = _fake_info(
+        "AA:BB:CC:DD:EE:FF",
+        {PROXY_SERVICE: _network_id_advert(NET_KEY)},
+        time=monotonic() - PROXY_ADVERT_MAX_AGE + 1,
+    )
+    with patch.object(
+        mesh_transport.bluetooth,
+        "async_discovered_service_info",
+        return_value=[fresh],
+    ):
+        assert find_proxy_address(hass, NET_KEY) == "AA:BB:CC:DD:EE:FF"
 
 
 async def test_async_connect_bearer_returns_bearer(hass) -> None:
