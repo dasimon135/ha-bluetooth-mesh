@@ -2,22 +2,23 @@
 
 This is the single long-lived object per config entry. It owns the parsed
 :class:`btmesh.network_model.Network`, and drives mesh commands through the
-HA-bluetooth bridge (:mod:`.mesh_transport`) using an **on-demand** connection
-model: every command opens a fresh proxy connection, runs, and closes it again.
+HA-bluetooth bridge (:mod:`.mesh_transport`) over one **held** proxy
+connection, serialised by a single lock.
 
-Why on-demand rather than a persistent connection: a mesh node offers a *single*
-proxy connection slot. Holding it open forever means a HA restart or a dropped
-link leaves a zombie connection pinned at the ESPHome proxy that blocks every
-reconnection, and it prevents the vendor app from ever talking to the lamp. By
-connecting per command and disconnecting cleanly in a ``finally`` block, the
-slot is free the moment the command returns.
+A mesh node offers a *single* proxy connection slot, shared with the vendor
+app, so how long the link is held is the user's choice (the keep-alive option).
+``0``, the default, keeps it for good and re-establishes it when it drops: every
+command is then instant. A positive value hands the slot back after that many
+idle seconds, which leaves room for the vendor app at the price of a connect of
+several seconds on the next command.
 
 Three cross-cutting concerns live here rather than in the entities:
 
-* **Availability + a periodic probe.** Because we no longer hold a connection,
-  availability is refreshed by a light periodic probe (a Generic OnOff GET on
-  the first node) plus the outcome of every real command. A miss marks the
-  coordinator unavailable.
+* **Availability + a periodic probe.** Bringing the proxy link up is the
+  availability signal; no GET is involved. While unavailable, or while a
+  permanent link is missing, a probe retries on a timer and on every matching
+  0x1828 advert, behind a backoff that widens after each failed GATT connect.
+  Misses flip availability only once ``UNREACHABLE_THRESHOLD`` of them pile up.
 * **A repairs issue.** When the proxy stays unreachable past a threshold, a
   user-facing ``proxy_unreachable`` repair is raised with actionable advice
   (the single-slot problem: close the Häfele app / free the lamp). It clears on
@@ -154,19 +155,18 @@ PROBE_TIMEOUT = 3.0
 # a burst of commands feel instant instead of paying that cost every time. This
 # is the fallback when the config entry has no explicit keep-alive option;
 # ``0`` (the shipped default) keeps the connection always open. Overridable per
-# entry via the options flow (:data:`.const.CONF_KEEPALIVE`).
-DEFAULT_IDLE_DISCONNECT = DEFAULT_KEEPALIVE
+# entry via the options flow (:data:`.const.CONF_KEEPALIVE`). The default
+# itself is :data:`.const.DEFAULT_KEEPALIVE`.
 
 
 class MeshCoordinator:
-    """Own one mesh subnet's network model and on-demand commands for an entry.
+    """Own one mesh subnet's network model and its proxy link for an entry.
 
     Construct it, ``await async_start()`` in ``async_setup_entry``, and
     ``await async_stop()`` in ``async_unload_entry``. The command coroutines are
     best-effort: they return ``None`` when the mesh is unavailable or a command
-    times out, never raising to the caller. Each command connects to the proxy,
-    runs, and disconnects again — the lamp's single proxy slot is only ever held
-    for the duration of one command.
+    times out, never raising to the caller. Once stopped it never connects
+    again, whatever is still queued on its lock.
     """
 
     def __init__(self, hass: HomeAssistant, entry) -> None:
@@ -227,7 +227,7 @@ class MeshCoordinator:
         self._controller: MeshController | None = None
         self._idle_unsub: CALLBACK_TYPE | None = None
         self._idle_timeout: int = int(
-            entry.options.get(CONF_KEEPALIVE, DEFAULT_IDLE_DISCONNECT)
+            entry.options.get(CONF_KEEPALIVE, DEFAULT_KEEPALIVE)
         )
         # Serialise everything through a single connection at a time: two
         # commands must never contend for the lamp's single proxy slot.
@@ -543,7 +543,7 @@ class MeshCoordinator:
 
         Opening a proxy connection over an ESPHome BLE proxy costs several
         seconds, so the connection is kept open between commands (see
-        :data:`IDLE_DISCONNECT`) and simply reused here when still alive.
+        :data:`.const.CONF_KEEPALIVE`) and simply reused here when still alive.
         **Bringing the connection up is the availability signal** — the mesh node
         is on the other end of the proxy link, so control will reach it; we do
         not depend on a Status reply for availability. Returns ``None`` (and marks
@@ -559,6 +559,14 @@ class MeshCoordinator:
         (ha-bluetooth-mesh#31). A user's command is a deliberate one-off, not
         part of that loop, so it keeps the full budget regardless of backoff.
         """
+        if self._stopped:
+            # A command queued on the lock while the entry was unloading gets
+            # here after async_stop released the link. Connecting now would hand
+            # the node's single slot to an object nobody will ever stop again:
+            # its idle timer refuses to arm and its drop handler stands down,
+            # both on this same flag, and the entry's next coordinator finds the
+            # slot taken.
+            return None
         if self._controller is not None:
             if (
                 getattr(self._client, "is_connected", True)
@@ -615,7 +623,6 @@ class MeshCoordinator:
                 await controller.start()
         except Exception as exc:  # noqa: BLE001 - transport/GATT/connect
             await self._disconnect(client)
-            await self._teardown()
             self._set_unavailable()
             self._back_off()
             # `asyncio.timeout` above raises a TimeoutError whose str() is the
@@ -640,6 +647,14 @@ class MeshCoordinator:
 
         self._client = client
         self._controller = controller
+        # start() has already spent SEQ numbers: claiming the proxy filter is
+        # two network PDUs. Until now the cursor only came back after a command,
+        # so a link that carried none (a probe that hands the slot back, a
+        # reconnect after a drop) left it where it was, and the next controller
+        # sent its own filter setup under the same two numbers, to the same
+        # node, which is entitled to drop them as replays.
+        self._seq = controller.seq
+        self._persist()
         # Learn about a drop when it happens, not at the next click. bleak
         # fires this on OUR disconnects too; the handler tells them apart by
         # identity, since _teardown clears self._client before disconnecting.
@@ -658,7 +673,7 @@ class MeshCoordinator:
         self._set_available()
         return controller
 
-    async def _run_connected(self, call=None):
+    async def _run_connected(self, call):
         """Reuse (or open) the held proxy connection and run ``call(controller)``.
 
         Under the lock it (re)establishes the keep-alive connection, runs the
@@ -669,8 +684,7 @@ class MeshCoordinator:
         itself is NOT dropped here, so the next command within the idle window
         skips the multi-second connect. A command that actually errors (a dead
         link, not a mere unconfirmed Status) tears the connection down so the next
-        call reconnects fresh. When ``call`` is ``None`` this is a pure
-        reachability check. Returns the command's result, or ``None``.
+        call reconnects fresh. Returns the command's result, or ``None``.
         """
         async with self._lock:
             self._cancel_idle()
@@ -680,9 +694,8 @@ class MeshCoordinator:
 
             result = None
             try:
-                if call is not None:
-                    async with asyncio.timeout(COMMAND_TIMEOUT):
-                        result = await call(controller)
+                async with asyncio.timeout(COMMAND_TIMEOUT):
+                    result = await call(controller)
             except Exception as exc:  # noqa: BLE001 - dead link / command timeout
                 # A raised error (not a mere unconfirmed Status — those return
                 # None without raising) means the link is likely bad: drop it so
@@ -917,7 +930,7 @@ class MeshCoordinator:
 
     # ---------------------------------------------------------------- probe
 
-    async def _async_probe(self, now=None) -> None:
+    async def _async_probe(self) -> None:
         """Reachability check: bring the proxy connection up, then release it.
 
         Availability comes purely from whether the proxy link can be established

@@ -1571,3 +1571,55 @@ async def test_a_proxy_that_comes_back_says_how_many_misses_it_took(
     assert [
         r.getMessage() for r in caplog.records if "reachable again" in r.getMessage()
     ] == [f"mesh proxy reachable again after {UNREACHABLE_THRESHOLD} misses"]
+
+
+async def test_a_stopped_coordinator_never_connects_again(hass) -> None:
+    """A command still queued when the entry unloads must not take the slot.
+
+    It used to: nothing on the connect path looked at ``_stopped``, so the old
+    coordinator reconnected, its idle timer refused to arm and its drop handler
+    stood down (both on that same flag), and the link was held for good by an
+    object nobody would ever stop again, while the entry's next coordinator
+    found the node's single slot taken.
+    """
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with _patch_transport(fake):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        connects = coordinator_mod.async_connect_bearer
+        await _wait_for(lambda: connects.await_count == 1)
+        await _wait_for(lambda: not coord._lock.locked())
+        await coord.async_stop()
+
+        assert await coord.async_get_onoff(UNICAST) is None
+
+        assert connects.await_count == 1
+        assert coord._controller is None
+        assert fake.calls == []
+
+
+class _FilterClaimingController(FakeController):
+    """Like the real one: start() spends two SEQ claiming the proxy filter."""
+
+    async def start(self) -> None:
+        await super().start()
+        self.seq += 2
+
+
+async def test_the_seq_spent_on_connecting_reaches_the_cursor(hass) -> None:
+    """A link that carries no command still used sequence numbers.
+
+    The cursor only came back after a command, so a probe that hands the slot
+    back, or a reconnect after a drop, left it where it was and the next
+    controller sent its filter setup under the same two numbers.
+    """
+    entry = _make_entry(hass)
+    fake = _FilterClaimingController(seq=0x100)
+    with _patch_transport(fake):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await _wait_for(lambda: coord._controller is fake)
+
+        assert coord.seq == 0x102
+    await coord.async_stop()
