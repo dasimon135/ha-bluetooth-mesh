@@ -7,7 +7,8 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 Four defects found by reading the whole integration again, none of them
-reported by anyone. Unit-tested; not yet run on a real mesh.
+reported by anyone, and two of the three fixes of #31. Unit-tested; not yet run
+on a real mesh.
 
 ### Fixed
 
@@ -36,6 +37,36 @@ reported by anyone. Unit-tested; not yet run on a real mesh.
   as replays. The cursor now follows the controller as soon as the link is up.
   Whether a Häfele lamp actually applies its replay list to these messages is
   not known; the fix costs nothing either way.
+
+- **A node gone quiet is no longer dialed anyway, and an automatic reconnect
+  spends one connection attempt instead of four.** Two of the three fixes
+  scoped in [#31](https://github.com/dasimon135/ha-bluetooth-mesh/issues/31),
+  after the 2026-09-12 outage where Home Assistant's own path scoring was
+  poisoned by our failed attempts against an unplugged node, and the eventual
+  retries went through the worst proxy in range.
+
+  A cached advert can read `connectable=yes` for minutes after the node stopped
+  advertising, so a match nobody has heard for 30 s is now treated as silence:
+  no attempt, no failure charged to a proxy. "Nobody" is meant literally.
+  Home Assistant keeps one entry per address, owned by one proxy, and an owner
+  gone deaf freezes its timestamp while another proxy still hears the node, so
+  every scanner is asked before a node is called silent. One exception: a node
+  does not advertise while its slot is held, so for 30 s after a link of ours
+  ends the old advert is used as before. Without it the reconnect after a
+  dropped link, the 2026-09-04 fix, would have missed every time. The
+  *proxy unreachable* repair and the log now give each advert's age, so they no
+  longer show our own network as `connectable=yes` next to "no connectable
+  proxy".
+
+  The automatic paths (startup probe, periodic retry, advert-triggered retry,
+  reconnect after a drop) now always make a single attempt, where the first of
+  an outage used to make bleak-retry-connector's four. A command keeps the
+  four, except while backing off, where everything stays at one as it has been
+  since 0.7.0.
+
+  Not validated against the proxy-wedge scenario that opened #31: that needs
+  the conditions of that outage, not a unit test. Item 3 (naming the stuck
+  proxy in the repair) is still open.
 
 ### Changed
 

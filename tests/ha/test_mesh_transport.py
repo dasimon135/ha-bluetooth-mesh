@@ -11,6 +11,7 @@ pytest-homeassistant-custom-component installed::
 
 from __future__ import annotations
 
+import contextlib
 from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -139,6 +140,44 @@ def test_find_proxy_address_none_for_only_foreign(hass) -> None:
         assert find_proxy_address(hass, NET_KEY) is None
 
 
+ADDRESS = "AA:BB:CC:DD:EE:FF"
+
+
+def _stale_info(address: str = ADDRESS):
+    return _fake_info(
+        address,
+        {PROXY_SERVICE: _network_id_advert(NET_KEY)},
+        time=monotonic() - PROXY_ADVERT_MAX_AGE - 1,
+    )
+
+
+def _scanner_that_heard(address: str, seconds_ago: float):
+    """A BluetoothScannerDevice whose scanner holds its own timestamp."""
+    return SimpleNamespace(
+        scanner=SimpleNamespace(
+            discovered_device_timestamps={address: monotonic() - seconds_ago}
+        )
+    )
+
+
+@contextlib.contextmanager
+def _snapshot(infos, scanner_devices=()):
+    """Patch HA's merged snapshot and the per-scanner view behind it."""
+    with (
+        patch.object(
+            mesh_transport.bluetooth,
+            "async_discovered_service_info",
+            return_value=list(infos),
+        ),
+        patch.object(
+            mesh_transport.bluetooth,
+            "async_scanner_devices_by_address",
+            return_value=list(scanner_devices),
+        ) as by_address,
+    ):
+        yield by_address
+
+
 def test_find_proxy_address_skips_a_stale_advert(hass) -> None:
     """A cached advert older than PROXY_ADVERT_MAX_AGE is treated as silence.
 
@@ -146,31 +185,83 @@ def test_find_proxy_address_skips_a_stale_advert(hass) -> None:
     advertised (ha-bluetooth-mesh#31); attempting the connect anyway only
     charges a failure to whatever proxy habluetooth currently scores best.
     """
-    stale = _fake_info(
-        "AA:BB:CC:DD:EE:FF",
-        {PROXY_SERVICE: _network_id_advert(NET_KEY)},
-        time=monotonic() - PROXY_ADVERT_MAX_AGE - 1,
-    )
-    with patch.object(
-        mesh_transport.bluetooth,
-        "async_discovered_service_info",
-        return_value=[stale],
-    ):
+    with _snapshot([_stale_info()]):
         assert find_proxy_address(hass, NET_KEY) is None
 
 
 def test_find_proxy_address_accepts_an_advert_within_the_max_age(hass) -> None:
     fresh = _fake_info(
-        "AA:BB:CC:DD:EE:FF",
+        ADDRESS,
         {PROXY_SERVICE: _network_id_advert(NET_KEY)},
         time=monotonic() - PROXY_ADVERT_MAX_AGE + 1,
     )
-    with patch.object(
-        mesh_transport.bluetooth,
-        "async_discovered_service_info",
-        return_value=[fresh],
-    ):
-        assert find_proxy_address(hass, NET_KEY) == "AA:BB:CC:DD:EE:FF"
+    with _snapshot([fresh]) as by_address:
+        assert find_proxy_address(hass, NET_KEY) == ADDRESS
+    # The per-scanner walk is for the stale case only.
+    by_address.assert_not_called()
+
+
+def test_a_node_another_scanner_still_hears_is_not_silent(hass) -> None:
+    """The merged entry's time is its OWNING scanner's, not the node's.
+
+    habluetooth drops the adverts of every other scanner while the owner is
+    still scanning, without touching the entry. An owner gone deaf next to a
+    proxy that hears the node every second must not make a live node silent.
+    """
+    with _snapshot([_stale_info()], [_scanner_that_heard(ADDRESS, 2)]) as by_address:
+        assert find_proxy_address(hass, NET_KEY) == ADDRESS
+    by_address.assert_called_once_with(hass, ADDRESS, connectable=False)
+
+
+def test_a_node_no_scanner_has_heard_recently_stays_silent(hass) -> None:
+    scanners = [
+        _scanner_that_heard(ADDRESS, PROXY_ADVERT_MAX_AGE + 20),
+        _scanner_that_heard("11:22:33:44:55:66", 1),  # somebody else's advert
+    ]
+    with _snapshot([_stale_info()], scanners):
+        assert find_proxy_address(hass, NET_KEY) is None
+
+
+def test_find_proxy_address_without_a_max_age_returns_a_stale_match(hass) -> None:
+    """For the caller that knows why the advert is old.
+
+    A node is silent while its slot is held, so right after a link of ours ends
+    the newest advert is as old as the link was long.
+    """
+    with _snapshot([_stale_info()]):
+        assert find_proxy_address(hass, NET_KEY, max_age=None) == ADDRESS
+
+
+def test_a_stale_match_does_not_hide_a_fresh_one(hass) -> None:
+    fresh = _fake_info(
+        "C3:EB:49:65:67:55", {PROXY_SERVICE: _network_id_advert(NET_KEY)}
+    )
+    with _snapshot([_stale_info(), fresh]):
+        assert find_proxy_address(hass, NET_KEY) == "C3:EB:49:65:67:55"
+
+
+def test_discovered_proxies_says_how_old_each_advert_is(hass) -> None:
+    """The diagnostic has to show what the discovery decided on.
+
+    Without the age, the one warning of an outage read "no connectable proxy"
+    next to our own Network ID marked ``connectable=yes``.
+    """
+    fresh = _fake_info(
+        "C3:EB:49:65:67:55",
+        {PROXY_SERVICE: _network_id_advert(NET_KEY)},
+        time=monotonic() - 3,
+    )
+    with _snapshot([_stale_info(), fresh]):
+        seen = dict(mesh_transport.discovered_proxies(hass))
+
+    network_id = k3(NET_KEY).hex()
+    assert seen[ADDRESS] == (
+        f"network_id={network_id}, connectable=yes, "
+        f"heard {PROXY_ADVERT_MAX_AGE + 1:.0f} s ago"
+    )
+    assert seen["C3:EB:49:65:67:55"] == (
+        f"network_id={network_id}, connectable=yes, heard 3 s ago"
+    )
 
 
 async def test_async_connect_bearer_returns_bearer(hass) -> None:

@@ -57,6 +57,7 @@ from .const import (
     DOMAIN,
 )
 from .mesh_transport import (
+    PROXY_ADVERT_MAX_AGE,
     async_connect_bearer,
     async_register_proxy_callback,
     discovered_proxies,
@@ -115,11 +116,15 @@ PROBE_INTERVAL_UNAVAILABLE = timedelta(seconds=15)
 # radio (no connectable proxy advertised) does not count: it put no pressure on
 # the node, and the advert that ends it is the one to act on at once. While
 # backing off each attempt is a single GATT try: bleak-retry-connector's four
-# are four times the pressure, on a node that needs less. Two paths are not
-# gated on purpose: the drop watchdog, because a drop follows a success, which
-# cleared the wait (if its reconnect fails, the wait is back); and a command
-# from the user, which is a deliberate act -- it gets one try, and a failure
-# widens the wait like any other.
+# are four times the pressure, on a node that needs less. Since
+# ha-bluetooth-mesh#31 an AUTOMATIC try is a single one whether backing off or
+# not: on 2026-09-12 the first reconnect after a drop, which no failure had
+# preceded, spent its four on a node that had been unplugged, and habluetooth
+# charged all four to the proxy that heard it best. Two paths are not gated on
+# purpose: the drop watchdog, because a drop follows a success, which cleared
+# the wait (if its reconnect fails, the wait is back); and a command from the
+# user, which is a deliberate act -- while backing off it gets one try, and a
+# failure widens the wait like any other.
 CONNECT_BACKOFF_BASE = PROBE_INTERVAL_UNAVAILABLE
 CONNECT_BACKOFF_CAP = timedelta(minutes=5)
 # bleak-retry-connector's own default, spelled out because the coordinator
@@ -215,6 +220,10 @@ class MeshCoordinator:
         # monotonic instant before which no automatic connect may start.
         self._backoff = 0.0
         self._next_attempt = 0.0
+        # Monotonic instant our last link ended (None = never held one). A node
+        # is silent while its slot is held, so until it has had time to
+        # advertise again an old advert says nothing about it.
+        self._link_ended_at: float | None = None
         self._issue_active = False
         self._probe_unsub: CALLBACK_TYPE | None = None
         self._discovery_unsub: CALLBACK_TYPE | None = None
@@ -551,13 +560,16 @@ class MeshCoordinator:
         :attr:`_lock`.
 
         ``automatic`` marks a call from the background recovery machinery (a
-        probe, or the reconnect after a dropped link) rather than a user's own
-        command. bleak-retry-connector's own retry budget already tries several
-        times inside ONE call, and for an automatic try that is pressure of its
-        own: several failures charged to whatever proxy habluetooth scores best,
-        in the same second, on a node that may simply not be there
-        (ha-bluetooth-mesh#31). A user's command is a deliberate one-off, not
-        part of that loop, so it keeps the full budget regardless of backoff.
+        probe, or the reconnect after a dropped link) rather than a command.
+        bleak-retry-connector's own retry budget already tries several times
+        inside ONE call, and for an automatic try that is pressure of its own:
+        several failures charged to whatever proxy habluetooth scores best, in
+        the same second, on a node that may simply not be there
+        (ha-bluetooth-mesh#31). Such a try is a single attempt. A command keeps
+        the full budget, except while backing off, where everything is a single
+        attempt (see :data:`CONNECT_BACKOFF_BASE`). "Command" is every caller of
+        :meth:`_run_connected`, the lights' own state reads included: they are
+        not told apart, which is one more reason the backoff rule covers them.
         """
         if self._stopped:
             # A command queued on the lock while the entry was unloading gets
@@ -578,7 +590,11 @@ class MeshCoordinator:
             # cannot report by raising). Drop it and reconnect below.
             await self._teardown()
 
-        address = find_proxy_address(self.hass, self._network.net_key)
+        address = find_proxy_address(
+            self.hass,
+            self._network.net_key,
+            max_age=None if self._held_the_slot_recently() else PROXY_ADVERT_MAX_AGE,
+        )
         if address is None:
             seen = discovered_proxies(self.hass)
             self._set_unavailable()
@@ -613,7 +629,9 @@ class MeshCoordinator:
                 client, bearer = await async_connect_bearer(
                     self.hass,
                     address,
-                    max_attempts=1 if automatic else CONNECT_ATTEMPTS,
+                    max_attempts=(
+                        1 if automatic or self._backoff else CONNECT_ATTEMPTS
+                    ),
                 )
                 controller = MeshController(
                     self._network, bearer, src_addr=self._src_addr,
@@ -672,6 +690,22 @@ class MeshCoordinator:
                 self._notify_listeners()
         self._set_available()
         return controller
+
+    def _held_the_slot_recently(self) -> bool:
+        """True while an old advert is our own doing rather than the node's.
+
+        A node stops advertising 0x1828 for as long as its slot is held, so when
+        a link of ours ends the newest advert is as old as the link was long.
+        Reading that as silence made the reconnect after a drop miss every time
+        the link had lasted more than the limit, which is every time that
+        matters, and the 2026-09-04 fix (reconnect at once) was gone. A live
+        node is back on the air within a second or two; once it has had
+        :data:`PROXY_ADVERT_MAX_AGE` to do so, silence means silence again.
+        """
+        return (
+            self._link_ended_at is not None
+            and monotonic() - self._link_ended_at < PROXY_ADVERT_MAX_AGE
+        )
 
     async def _run_connected(self, call):
         """Reuse (or open) the held proxy connection and run ``call(controller)``.
@@ -744,6 +778,7 @@ class MeshCoordinator:
         """
         if self._stopped or client is not self._client:
             return  # our own teardown, or a client we already replaced
+        self._link_ended_at = monotonic()
         if not self.hass.is_running:
             # Home Assistant closes the ESPHome API links in its CLOSE stage —
             # after the final writes, before this entry is unloaded — so the
@@ -778,6 +813,10 @@ class MeshCoordinator:
         """
         controller, client = self._controller, self._client
         self._controller = self._client = None
+        if client is not None and getattr(client, "is_connected", True):
+            # Still up, so it ends here. A link that already dropped was
+            # stamped by the drop handler, at the time it actually ended.
+            self._link_ended_at = monotonic()
         if controller is not None:
             try:
                 await controller.stop()
