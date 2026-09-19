@@ -11,6 +11,7 @@ no BLE or controller is touched. Run in the daikin_madoka venv (HA + HHCC)::
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -1427,3 +1428,75 @@ async def test_a_removed_group_stops_listening(hass) -> None:
     await top.async_turn_off()
 
     assert writes == []
+
+
+async def test_a_disabled_member_does_not_stop_the_group_command(hass) -> None:
+    """A member the user disabled was never added to Home Assistant.
+
+    Every other test here stubs ``async_write_ha_state``, which is how this got
+    through: on such a member the real one raises ("Attribute hass is None"),
+    the group pushes its members' state BEFORE it sends, and so the group Set
+    never left. Disabling a lamp to drive only its room is an ordinary thing to
+    do, and it killed the room.
+    """
+    added, coordinator = await _setup(hass, _two_output_network_with_group())
+    group_light = next(light for light in added if isinstance(light, MeshGroupLight))
+    disabled, enabled = (light for light in added if isinstance(light, MeshLight))
+    del disabled.async_write_ha_state  # back to Home Assistant's own
+    assert disabled.hass is None
+
+    await group_light.async_turn_on()
+
+    assert coordinator.calls == [("set_group_onoff", GROUP_ADDR, True)]
+    # The group renders its members, so the disabled one still has to count.
+    assert disabled.is_on is True
+    assert enabled.is_on is True
+    assert group_light.is_on is True
+
+
+def _hold_the_first_get(coordinator: FakeCoordinator) -> asyncio.Event:
+    """Make ``async_get_onoff`` wait, as a real round trip over the slot does."""
+    release = asyncio.Event()
+    answer = coordinator.async_get_onoff
+
+    async def slow_get_onoff(unicast: int) -> bool | None:
+        await release.wait()
+        return await answer(unicast)
+
+    coordinator.async_get_onoff = slow_get_onoff  # type: ignore[method-assign]
+    return release
+
+
+async def test_a_second_notification_does_not_queue_a_second_read(hass) -> None:
+    light, coordinator = _light()
+    release = _hold_the_first_get(coordinator)
+    light.hass = hass
+    light.entity_id = "light.mesh_test"
+    await light.async_added_to_hass()  # available: one read is now in flight
+
+    light._handle_availability()
+    release.set()
+    await hass.async_block_till_done()
+
+    assert coordinator.calls.count(("get_onoff", UNICAST)) == 1
+
+
+async def test_removing_the_entity_cancels_the_read_in_flight(hass) -> None:
+    """A background task outlives the config entry unless somebody cancels it.
+
+    Left alone, a read still queued when the entry reloaded carried on against
+    the coordinator that had just been stopped.
+    """
+    light, coordinator = _light()
+    _hold_the_first_get(coordinator)
+    light.hass = hass
+    light.entity_id = "light.mesh_test"
+    await light.async_added_to_hass()
+    task = light._refresh_task
+    assert task is not None and not task.done()
+
+    await light.async_will_remove_from_hass()
+    await hass.async_block_till_done()
+
+    assert task.cancelled()
+    assert coordinator.calls == []
