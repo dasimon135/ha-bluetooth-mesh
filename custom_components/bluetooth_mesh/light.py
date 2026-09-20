@@ -1,10 +1,14 @@
 """Light platform for the Bluetooth Mesh integration (Task B4).
 
-Every provisioned node hosting a Light Lightness (0x1300) or Generic OnOff
-(0x1000) server — on any element — becomes a single :class:`MeshLight` entity.
-Each command is then addressed to the element that actually hosts the model it
-targets, because an element silently ignores an opcode it has no model for. The
-entity's capabilities scale with the node's composition:
+Every lighting OUTPUT of a provisioned node becomes a :class:`MeshLight`: one
+per element carrying its own Light Lightness server (0x1300), so a two-channel
+controller is two lights, and a node that dims nothing falls back to its
+Generic OnOff servers (0x1000). A node with a single output, which is every
+lamp, yields exactly one entity, addressed across the whole node. Each mesh
+group of the export is one :class:`MeshGroupLight` on top of its members. Each
+command is addressed to the element that actually hosts the model it targets,
+because an element silently ignores an opcode it has no model for. The
+entity's capabilities scale with the output's composition:
 
 * Light CTL server (0x1303) present → tunable white: HA ``COLOR_TEMP`` mode
   (which in HA implies brightness too).
@@ -13,14 +17,18 @@ entity's capabilities scale with the node's composition:
 
 All BLE lives behind the coordinator (``entry.runtime_data``); the entity only
 enumerates the static network model and calls the coordinator's best-effort
-command coroutines. State is optimistic: a mesh set returns a status value, so
-when that value is non-``None`` we cache it, otherwise we reflect the requested
-intent. The coordinator's availability governs whether HA shows the entity as
-live or stale.
+command coroutines. State is what the lamp says: it is read back when the mesh
+becomes reachable, and a Set shows the request only until the node answers,
+then settles on the Status it reported, or goes back to the previous value when
+it reported nothing. A group is the exception, because a group Set is
+unacknowledged by design: it reflects the request on its members.
+The coordinator's availability governs whether HA shows the entity as live or
+stale.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 
@@ -228,8 +236,6 @@ class MeshLight(LightEntity):
         one's address.
         """
         self._coordinator = coordinator
-        self._node = node
-        self._element = element
         self._unicast = (element or node).unicast
         # Whether this lamp's CTL server maps temperature inversely. Frozen at
         # construction rather than read per command: the options flow is an
@@ -322,6 +328,7 @@ class MeshLight(LightEntity):
         # by the lamp's own the first time it answers. Asked once: it is a
         # property of the device, not a state.
         self._range_read = False
+        self._refresh_task: asyncio.Task | None = None
         # Group entities over this output, re-rendered whenever it changes.
         self._state_listeners: list[Callable[[], None]] = []
 
@@ -350,8 +357,14 @@ class MeshLight(LightEntity):
 
         Every state write in this class goes through here: HA's
         ``async_write_ha_state`` is final, so the groups cannot hook it.
+
+        A light the user disabled was never added to Home Assistant, and
+        writing its state raises. A group still reaches it through
+        :meth:`apply_group_state` (the mesh knows nothing of HA's registry), so
+        the write is skipped and the groups are re-rendered all the same.
         """
-        self.async_write_ha_state()
+        if self.hass is not None:
+            self.async_write_ha_state()
         for listener in tuple(self._state_listeners):
             listener()
 
@@ -369,11 +382,30 @@ class MeshLight(LightEntity):
             self._schedule_refresh()
 
     def _schedule_refresh(self) -> None:
-        """Read the lamp in the background; a round trip must not block setup."""
-        self.hass.async_create_background_task(
+        """Read the lamp in the background; a round trip must not block setup.
+
+        One read at a time: a second notification while one is in flight would
+        only queue the same GETs behind it on the node's single slot.
+        """
+        if self._refresh_task is not None and not self._refresh_task.done():
+            return
+        self._refresh_task = self.hass.async_create_background_task(
             self.async_refresh_state(),
             f"bluetooth_mesh refresh {self._unicast:04x}",
         )
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Stop reading a lamp this entity no longer stands for.
+
+        A background task belongs to Home Assistant, not to the config entry,
+        so nothing else cancels it: left alone, a read still queued when the
+        entry reloads carried on against the coordinator that had just been
+        stopped.
+        """
+        if self._refresh_task is not None:
+            self._refresh_task.cancel()
+            self._refresh_task = None
+        await super().async_will_remove_from_hass()
 
     async def async_refresh_state(self) -> None:
         """Ask the lamp what it is actually doing and cache the answer.

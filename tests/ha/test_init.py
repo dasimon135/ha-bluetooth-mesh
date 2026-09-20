@@ -92,12 +92,16 @@ def test_hacs_declares_a_minimum_core_version() -> None:
 
     ``entry.runtime_data`` (2024.6), the reconfigure-flow helpers
     ``_abort_if_unique_id_mismatch`` / ``async_update_reload_and_abort``
-    (2024.11) and PEP 695 ``type`` aliases (Python 3.12) all fail on an older
-    core; without this key HACS would happily install it and the user would
-    get a traceback instead of a reason.
+    (2024.11), PEP 695 ``type`` aliases (Python 3.12) and
+    ``OptionsFlowWithReload`` (2025.8, the highest of them, imported by the
+    options flow since v0.4.2) all fail on an older core; without this key HACS
+    would happily install it and the user would get a traceback instead of a
+    reason. The floor said 2024.11.0 from v0.4.2 to v0.9.0, which was exactly
+    that: CI only ever runs the one core the test harness pins, so nothing
+    exercised it.
     """
     hacs = json.loads((REPO_ROOT / "hacs.json").read_text(encoding="utf-8"))
-    assert hacs["homeassistant"] == "2024.11.0"
+    assert hacs["homeassistant"] == "2025.8.0"
 
 
 def test_domain_const_matches_manifest() -> None:

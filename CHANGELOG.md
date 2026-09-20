@@ -6,6 +6,53 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Four defects found by reading the whole integration again, none of them
+reported by anyone. Unit-tested; not yet run on a real mesh.
+
+### Fixed
+
+- **A room stopped working once one of its lamps was disabled in Home
+  Assistant.** A mesh group shows its members' state, so it pushes the command
+  onto them before sending it. A lamp the user has disabled was never added to
+  Home Assistant, writing its state raises, and the group's single message never
+  left. Disabling the lamps to keep only the room is an ordinary thing to do.
+  The disabled member is now skipped for the state write and still counted in
+  what the room shows. The tests missed it because every one of them replaces
+  that state write with a stub.
+- **Reloading the entry could leave the lamp's only connection held by the
+  coordinator that had just been stopped.** A state read still waiting its turn
+  when the entry reloaded carried on against the old coordinator, which
+  reconnected. Nothing would ever release that link: its idle timer and its drop
+  handler both stand down once stopped. The new coordinator then found the slot
+  taken, backed off, and raised the *proxy unreachable* repair. A stopped
+  coordinator now refuses to connect, and a light cancels its read when it is
+  removed. A second notification no longer queues a second read behind one
+  already in flight.
+- **The two sequence numbers spent on every connection were not counted until
+  a command followed.** Claiming the proxy filter is two network messages. A
+  link that carried no command (a probe that hands the slot back, a reconnect
+  after a drop) left the cursor where it was, and the next connection sent its
+  own filter setup under the same two numbers, which a node is entitled to drop
+  as replays. The cursor now follows the controller as soon as the link is up.
+  Whether a Häfele lamp actually applies its replay list to these messages is
+  not known; the fix costs nothing either way.
+
+### Changed
+
+- **The minimum Home Assistant version is 2025.8.0, and has been since
+  v0.4.2.** `hacs.json` said 2024.11.0, but the options flow imports
+  `OptionsFlowWithReload`, which first shipped in 2025.8.0 (checked against the
+  core tags). On anything in between, HACS offered the install and the
+  integration failed at import, which is the very thing that floor exists to
+  prevent. CI runs the single core version the test harness pins, so nothing
+  ever exercised the declared one.
+- Removed what nothing read: two config keys left from before the config flow
+  existed, two attributes of the light, a `call=None` reachability mode and a
+  `now` parameter in the coordinator, and a teardown that could not have
+  anything to tear down. The module docstrings of the coordinator and the light
+  platform described a connect-per-command, one-entity-per-node design the code
+  left several releases ago; they now describe what it does.
+
 ## [0.9.0] — 2026-09-16
 
 ### Added
