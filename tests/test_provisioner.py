@@ -216,6 +216,47 @@ def test_device_confirmation_mismatch_raises():
     assert p.device_key is None
 
 
+def test_a_reflected_confirmation_is_refused():
+    """A peer without the AuthValue can still send our own confirmation back.
+
+    If it then sends our random back too, the check in ``_on_random`` compares
+    our value with itself and passes. The echo has to be refused where it
+    arrives, before our random is disclosed.
+    """
+    sent: list[bytes] = []
+    p = make_provisioner(sent)
+    p.start()
+    p.handle_pdu(CAPABILITIES_PDU)
+    p.handle_pdu(DEVICE_PUBLIC_KEY_PDU)
+    assert sent[-1] == PROV_CONFIRMATION_PDU
+
+    with pytest.raises(ProvisioningError) as excinfo:
+        p.handle_pdu(PROV_CONFIRMATION_PDU)  # ours, reflected
+
+    assert "echoed" in str(excinfo.value)
+    assert p.state is State.FAILED
+    assert sent[-1] == PROV_CONFIRMATION_PDU  # our random never left
+    assert p.device_key is None
+
+
+def test_a_reflected_random_is_refused():
+    sent: list[bytes] = []
+    p = make_provisioner(sent)
+    p.start()
+    p.handle_pdu(CAPABILITIES_PDU)
+    p.handle_pdu(DEVICE_PUBLIC_KEY_PDU)
+    p.handle_pdu(DEVICE_CONFIRMATION_PDU)
+    assert sent[-1] == PROV_RANDOM_PDU
+
+    with pytest.raises(ProvisioningError) as excinfo:
+        p.handle_pdu(PROV_RANDOM_PDU)  # ours, reflected
+
+    assert "echoed" in str(excinfo.value)
+    assert p.state is State.FAILED
+    assert sent[-1] == PROV_RANDOM_PDU  # no provisioning data was sent
+    assert p.device_key is None
+
+
 def test_malformed_pdu_is_fatal_and_shares_error_base():
     sent: list[bytes] = []
     p = make_provisioner(sent)

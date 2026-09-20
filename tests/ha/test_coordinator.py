@@ -587,21 +587,151 @@ async def test_seq_is_written_with_a_delay_not_on_every_command(hass) -> None:
     """One flash write per button press is not acceptable on an SD card.
 
     Home Assistant debounces Store writes for exactly this, and flushes them on
-    shutdown; the SEQ safety margin applied at startup already covers whatever
-    a crash leaves unflushed.
+    shutdown. Startup is the one write that is not debounced: it puts the
+    margin on disk before anything is sent.
     """
     entry = _make_entry(hass)
     fake = FakeController()
     with _patch_transport(fake):
         coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await _wait_for(lambda: coord._controller is fake)
+        await coord._flush_state()  # the disk is level with the cursor
         with patch.object(
             coord._store, "async_delay_save"
         ) as delayed, patch.object(coord._store, "async_save") as immediate:
-            await coord.async_start()
             await coord.async_set_onoff(UNICAST, True)
-            assert delayed.called
+            delayed.assert_called_once()
+            assert delayed.call_args.args[1] == coordinator_mod.SEQ_SAVE_DELAY
             assert not immediate.called
     await coord.async_stop()
+
+
+async def test_a_burst_cannot_outrun_the_safety_margin(hass) -> None:
+    """The debounce pushes the write back on every call, so it bounds nothing.
+
+    Forty GETs less than ten seconds apart (eight CTL lamps re-read after a
+    reconnect) used to write nothing until they were over; a crash in there
+    restarted below numbers already spent. Half a margin ahead of the disk, the
+    write happens now.
+    """
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with _patch_transport(fake):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await _wait_for(lambda: coord._controller is fake)
+        await coord._flush_state()  # the disk is level with the cursor
+
+        # Not ``async_load``: it answers with the write still pending, so it
+        # cannot tell a cursor that is on disk from one that is merely queued.
+        delays: list[float] = []
+        queue_write = coord._store.async_delay_save
+
+        def spy(data_func, delay=0):
+            delays.append(delay)
+            queue_write(data_func, delay)
+
+        half = SEQ_SAFETY_MARGIN // 2
+        with patch.object(coord._store, "async_delay_save", side_effect=spy):
+            for _ in range(half):
+                await coord.async_set_onoff(UNICAST, True)
+
+        # One SEQ per command here: debounced until the cursor is half a margin
+        # ahead of the disk, and written at once from there.
+        assert delays == [coordinator_mod.SEQ_SAVE_DELAY] * (half - 1) + [0]
+    await coord.async_stop()
+
+
+async def test_the_margin_is_on_disk_before_anything_is_sent(hass) -> None:
+    """Until the first write the file held the OLD cursor.
+
+    A crash in that window made the next start land on the same value again
+    and reuse whatever had gone out in between.
+    """
+    entry = _make_entry(hass)
+    store = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.unique_id.lower()}.seq")
+    await store.async_save({"seq": 1000, "iv_index": 0})
+    with _patch_transport(FakeController(), address=None):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+
+        assert (await coord._store.async_load())["seq"] == 1000 + SEQ_SAFETY_MARGIN
+    await coord.async_stop()
+
+
+async def test_the_cursor_survives_removing_and_re_adding_the_integration(
+    hass,
+) -> None:
+    """The nodes do not forget the SEQ they accepted when HA forgets the entry.
+
+    Keyed on the entry id, a re-added integration restarted at 0 and every
+    command was dropped as a replay until the cursor had climbed back.
+    """
+    first = _make_entry(hass)
+    with _patch_transport(FakeController(seq=5000)):
+        coord = MeshCoordinator(hass, first)
+        await coord.async_start()
+        await _wait_for(lambda: coord._controller is not None)
+        await coord.async_stop()
+    await hass.config_entries.async_remove(first.entry_id)
+
+    again = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CONNECT_JSON: FIXTURE.read_text(encoding="utf-8")},
+        unique_id=first.unique_id,
+    )
+    again.add_to_hass(hass)
+    assert again.entry_id != first.entry_id
+    with _patch_transport(FakeController(), address=None):
+        coord = MeshCoordinator(hass, again)
+        await coord.async_start()
+
+        assert coord.seq >= 5000 + SEQ_SAFETY_MARGIN
+    await coord.async_stop()
+
+
+async def test_a_cursor_kept_under_the_entry_id_is_moved_not_lost(hass) -> None:
+    """Up to v0.9.0 the file was keyed on the entry id."""
+    entry = _make_entry(hass)
+    legacy = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.seq")
+    await legacy.async_save({"seq": 700, "iv_index": 3})
+    with _patch_transport(FakeController(), address=None):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+
+        assert coord.seq == 700 + SEQ_SAFETY_MARGIN
+        assert coord.iv_index == 3
+        assert (await coord._store.async_load())["seq"] == 700 + SEQ_SAFETY_MARGIN
+        assert await legacy.async_load() is None
+    await coord.async_stop()
+
+
+async def test_an_iv_index_behind_ours_is_ignored(hass, caplog) -> None:
+    """An IV Index only grows; a lagging node must not drag us back.
+
+    Adopting it restarted the SEQ cursor at 0 under an index the mesh had left,
+    and again at 0 under the current one at the next healthy connection, this
+    time reusing numbers already spent under it.
+    """
+    entry = _make_entry(hass)
+    store = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.unique_id.lower()}.seq")
+    await store.async_save({"seq": 100, "iv_index": 5})
+    fake = FakeController()
+    fake.beacon = type("Beacon", (), {"iv_index": 4, "iv_update": False})()
+    with _patch_transport(fake):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await coord.async_set_onoff(UNICAST, True)
+        await coord.async_set_onoff(UNICAST, True)
+
+        assert coord.iv_index == 5
+        assert coord.seq == fake.seq  # not restarted
+        assert coord._controller is fake  # and the link was not dropped for it
+    await coord.async_stop()
+
+    warnings = [r for r in caplog.records if "ignoring IV Index" in r.getMessage()]
+    assert len(warnings) == 1
 
 
 async def test_stop_flushes_the_cursor_immediately(hass) -> None:
