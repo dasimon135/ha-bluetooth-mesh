@@ -18,6 +18,7 @@ scope (it only ever runs inside Home Assistant).
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from time import monotonic
 from typing import TYPE_CHECKING, Callable
 
@@ -49,6 +50,9 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "MeshTransportError",
     "PROXY_ADVERT_MAX_AGE",
+    "ProxyPath",
+    "connect_paths",
+    "scanner_by_source",
     "find_proxy_address",
     "async_connect_bearer",
     "async_register_proxy_callback",
@@ -207,6 +211,75 @@ def discovered_proxies(hass: HomeAssistant) -> list[tuple[str, str]]:
             (info.address, f"{kind}, connectable={conn}, heard {age:.0f} s ago")
         )
     return out
+
+
+def _free_slots(scanner) -> int | None:
+    """Connection slots the scanner reports free, or ``None`` when it does not.
+
+    Read defensively, and never let a diagnostic read break connecting: the
+    method arrived in a habluetooth later than the one our minimum Home
+    Assistant ships, a local adapter has no such notion at all, and this is a
+    hint, not a fact — "unknown" has to stay usable.
+    """
+    get_allocations = getattr(scanner, "get_allocations", None)
+    if not callable(get_allocations):
+        return None
+    try:
+        allocations = get_allocations()
+    except Exception:  # noqa: BLE001
+        logger.debug("reading slot allocations failed", exc_info=True)
+        return None
+    free = getattr(allocations, "free", None)
+    return free if isinstance(free, int) and not isinstance(free, bool) else None
+
+
+@dataclass(frozen=True)
+class ProxyPath:
+    """One Bluetooth proxy (or adapter) Home Assistant could connect through."""
+
+    source: str
+    name: str
+    rssi: int | None
+    free_slots: int | None  # None: this backend does not say
+
+    @property
+    def has_free_slot(self) -> bool:
+        """False only when the proxy positively reports none; unknown is usable."""
+        return self.free_slots is None or self.free_slots > 0
+
+
+def connect_paths(hass: HomeAssistant, address: str) -> list[ProxyPath]:
+    """The connectable scanners that hear ``address``, strongest first.
+
+    Home Assistant picks the path itself at connect time and does not say which
+    one it took, so this is the list of suspects rather than the culprit. With a
+    single proxy in range, which is the common case, they are the same thing.
+    """
+    paths: list[ProxyPath] = []
+    for scanner_device in bluetooth.async_scanner_devices_by_address(
+        hass, address, connectable=True
+    ):
+        scanner = scanner_device.scanner
+        advertisement = scanner_device.advertisement
+        paths.append(
+            ProxyPath(
+                source=scanner.source,
+                name=scanner.name,
+                rssi=advertisement.rssi if advertisement is not None else None,
+                free_slots=_free_slots(scanner),
+            )
+        )
+    paths.sort(key=lambda path: -(path.rssi if path.rssi is not None else -127))
+    return paths
+
+
+def scanner_by_source(hass: HomeAssistant, source: str):
+    """The scanner object currently registered for ``source``, or ``None``.
+
+    A proxy that restarts comes back as a NEW scanner object, which is the only
+    way to notice that it did.
+    """
+    return bluetooth.async_scanner_by_source(hass, source)
 
 
 async def async_connect_bearer(

@@ -117,15 +117,17 @@ class MeshProxySensor(SensorEntity):
         address = self._coordinator.proxy_address
         if address is None or address == self._synced:
             return
-        registry = dr.async_get(self.hass)
-        device = registry.async_get_device(identifiers={(DOMAIN, self._device_key)})
+        # Home Assistant hands the entity its own device as it is added, so
+        # there is nothing to look up: `async_get_device(identifiers=...)` is
+        # deprecated (removal in 2027.8) and its replacement does not exist on
+        # the oldest core this integration supports. None is a race, not an
+        # error -- the platform sets this while adding the entity -- and raising
+        # inside an availability callback would take the coordinator's notify
+        # loop down with it. The next notification writes it.
+        device = self.device_entry
         if device is None:
-            # The platform creates the device from `device_info` as the entity
-            # is added, so this is a race, not an error -- and raising inside an
-            # availability callback would take the coordinator's notify loop
-            # down with it. The next notification writes it.
             return
-        registry.async_update_device(
+        dr.async_get(self.hass).async_update_device(
             device.id,
             new_connections={(dr.CONNECTION_BLUETOOTH, dr.format_mac(address))},
         )

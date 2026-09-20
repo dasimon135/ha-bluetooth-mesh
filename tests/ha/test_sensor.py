@@ -68,14 +68,16 @@ class FakeDevice:
 
 
 class FakeRegistry:
-    """Records `async_update_device` the way the real registry is driven."""
+    """Records `async_update_device` the way the real registry is driven.
+
+    No lookup method on purpose: Home Assistant hands the entity its own device
+    (``device_entry``), so the entity has no business searching the registry --
+    and the method it used to call is deprecated.
+    """
 
     def __init__(self, device=None):
         self._device = device if device is not None else FakeDevice()
         self.updates: list[tuple] = []
-
-    def async_get_device(self, identifiers=None, connections=None):
-        return self._device
 
     def async_update_device(self, device_id, **kwargs):
         self.updates.append((device_id, kwargs))
@@ -91,15 +93,17 @@ def registry(monkeypatch):
     return reg
 
 
-def _sensor(coordinator, hass=object()):
+def _sensor(coordinator, hass=object(), device=None):
     """An entity wired to fakes, with the HA state write stubbed out.
 
     Writing state needs a real ``hass``; every assertion below is about the
     registry and the entity's own properties, so the write is recorded rather
-    than performed.
+    than performed. ``device_entry`` is what the entity platform sets on every
+    entity it adds with a device, which is where the entity reads it from.
     """
     entity = MeshProxySensor(coordinator)
     entity.hass = hass
+    entity.device_entry = device if device is not None else FakeDevice()
     entity.writes = []
     entity.async_write_ha_state = lambda: entity.writes.append(1)
     return entity
@@ -227,14 +231,15 @@ async def test_an_unchanged_address_is_not_rewritten_every_snapshot(registry):
 
 
 async def test_a_missing_device_is_survived(registry):
-    """The entity can be notified before the registry has the device (the
-    platform creates it from `device_info` as the entity is added). Raising
-    inside an availability callback would take the coordinator's notify loop
-    down with it."""
-    registry._device = None
+    """The entity can be notified before it has been given its device (the
+    platform sets `device_entry` as it adds the entity). Raising inside an
+    availability callback would take the coordinator's notify loop down with
+    it."""
     coordinator = FakeCoordinator(_network(), proxy_address=ADDRESS)
+    entity = _sensor(coordinator)
+    entity.device_entry = None
 
-    await _sensor(coordinator).async_added_to_hass()
+    await entity.async_added_to_hass()
 
     assert registry.updates == []
 

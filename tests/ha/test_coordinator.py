@@ -1819,3 +1819,222 @@ async def test_the_seq_spent_on_connecting_reaches_the_cursor(hass) -> None:
 
         assert coord.seq == 0x102
     await coord.async_stop()
+
+
+# --------------------------------------------------------------------------
+# A proxy wedged on one address (ha-bluetooth-mesh#31, item 3)
+#
+# Reproduced on 2026-09-08, 2026-09-12 and 2026-09-20: the proxy answers every
+# connect with a GATT error in about a second while it hears the node and has a
+# slot free, and only restarting that proxy clears it. Nothing here can unwedge
+# it, so the repair has to name it.
+# --------------------------------------------------------------------------
+
+
+def _path(source: str = "D0:CF:13:0F:05:5A", *, free_slots: int | None = 2):
+    return coordinator_mod.ProxyPath(
+        source=source, name=f"proxy-{source[-5:]}", rssi=-72, free_slots=free_slots
+    )
+
+
+@contextlib.contextmanager
+def _paths(paths, scanner=None):
+    """Patch what the coordinator can learn about the paths to the node."""
+    scanners = {p.source: scanner or object() for p in paths}
+    with (
+        patch.object(coordinator_mod, "connect_paths", return_value=list(paths)),
+        patch.object(
+            coordinator_mod,
+            "scanner_by_source",
+            side_effect=lambda hass_, source: scanners.get(source),
+        ),
+    ):
+        yield scanners
+
+
+async def _refuse(coord, times: int) -> None:
+    """Drive `times` instant refusals through the command path."""
+    for _ in range(times):
+        assert await coord.async_set_onoff(UNICAST, True) is None
+
+
+async def test_instant_refusals_through_one_proxy_raise_a_repair_naming_it(
+    hass,
+) -> None:
+    entry = _make_entry(hass)
+    path = _path()
+    with (
+        _patch_transport(FakeController(), ctor_side_effect=TimeoutError()),
+        _paths([path]),
+        _fake_clock(),  # every connect takes 0 s: a refusal, not a timeout
+    ):
+        coord = MeshCoordinator(hass, entry)
+        await _refuse(coord, coordinator_mod.STUCK_PROXY_FAILURES)
+
+        issue = ir.async_get(hass).async_get_issue(
+            DOMAIN, f"proxy_stuck_{entry.entry_id}"
+        )
+        assert issue is not None
+        assert issue.translation_key == "proxy_stuck"
+        assert issue.translation_placeholders["proxy"] == path.name
+        assert issue.translation_placeholders["proxy_address"] == path.source
+        # The vaguer repair must not be left on screen beside it.
+        assert (
+            ir.async_get(hass).async_get_issue(
+                DOMAIN, f"proxy_unreachable_{entry.entry_id}"
+            )
+            is None
+        )
+    await coord.async_stop()
+
+
+async def test_a_slow_failure_is_not_a_refusal(hass) -> None:
+    """A node that is busy or out of range takes its time; a wedged proxy does not."""
+    entry = _make_entry(hass)
+    with (
+        _patch_transport(FakeController(), ctor_side_effect=TimeoutError()),
+        _paths([_path()]),
+        _fake_clock() as clock,
+    ):
+        coord = MeshCoordinator(hass, entry)
+        for _ in range(coordinator_mod.STUCK_PROXY_FAILURES):
+            # Each connect spends longer than the refusal window.
+            coordinator_mod.MeshController.side_effect = lambda *a, **k: (
+                clock.__setitem__(
+                    "now", clock["now"] + coordinator_mod.STUCK_PROXY_FAST_FAILURE + 1
+                ),
+                (_ for _ in ()).throw(TimeoutError()),
+            )
+            assert await coord.async_set_onoff(UNICAST, True) is None
+
+        assert coord._refusals == 0
+        assert (
+            ir.async_get(hass).async_get_issue(DOMAIN, f"proxy_stuck_{entry.entry_id}")
+            is None
+        )
+    await coord.async_stop()
+
+
+async def test_a_saturated_proxy_is_not_accused(hass) -> None:
+    """No free slot is a reason to refuse, and not the maintainer's to fix."""
+    entry = _make_entry(hass)
+    with (
+        _patch_transport(FakeController(), ctor_side_effect=TimeoutError()),
+        _paths([_path(free_slots=0)]),
+        _fake_clock(),
+    ):
+        coord = MeshCoordinator(hass, entry)
+        await _refuse(coord, coordinator_mod.STUCK_PROXY_FAILURES)
+
+        assert coord._refusals == 0
+        assert (
+            ir.async_get(hass).async_get_issue(DOMAIN, f"proxy_stuck_{entry.entry_id}")
+            is None
+        )
+    await coord.async_stop()
+
+
+async def test_several_paths_means_nobody_is_named(hass) -> None:
+    """Home Assistant never says which path it used.
+
+    With two proxies in range the failure cannot be pinned on either, and
+    sending someone to restart a healthy proxy is worse than saying nothing.
+    """
+    entry = _make_entry(hass)
+    with (
+        _patch_transport(FakeController(), ctor_side_effect=TimeoutError()),
+        _paths([_path(), _path("C9:2A:00:00:00:01")]),
+        _fake_clock(),
+    ):
+        coord = MeshCoordinator(hass, entry)
+        await _refuse(coord, coordinator_mod.STUCK_PROXY_FAILURES)
+
+        assert coord._refusals == 0
+        assert (
+            ir.async_get(hass).async_get_issue(DOMAIN, f"proxy_stuck_{entry.entry_id}")
+            is None
+        )
+        # The ordinary outage repair still does its job.
+        assert (
+            ir.async_get(hass).async_get_issue(
+                DOMAIN, f"proxy_unreachable_{entry.entry_id}"
+            )
+            is not None
+        )
+    await coord.async_stop()
+
+
+async def test_restarting_the_proxy_drops_the_wait_its_refusals_imposed(hass) -> None:
+    """The lamp was reachable two minutes before the coordinator tried again.
+
+    A restarted proxy registers a NEW scanner object under the same source,
+    which is the only signal Home Assistant gives for it.
+    """
+    entry = _make_entry(hass)
+    callbacks: list = []
+    path = _path()
+    fake = FakeController()
+    refusals = coordinator_mod.STUCK_PROXY_FAILURES
+    with (
+        _patch_transport(
+            fake,
+            # Every try refuses until the proxy is restarted; then it works.
+            ctor_side_effect=[TimeoutError()] * (refusals + 1) + [fake],
+        ),
+        patch.object(
+            coordinator_mod,
+            "async_register_proxy_callback",
+            side_effect=_register_into(callbacks),
+        ),
+        _paths([path]) as scanners,
+        _fake_clock(),
+    ):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()  # the startup probe is the first refusal
+        await _wait_for(lambda: not coord._lock.locked())
+        await _refuse(coord, refusals)
+        assert coord._proxy_is_stuck
+        assert coord._backoff > 0
+        connects = coordinator_mod.async_connect_bearer
+        before = connects.await_count
+
+        # Adverts inside the wait change nothing while the proxy is the same.
+        await _advertise(coord, callbacks)
+        assert connects.await_count == before
+
+        scanners[path.source] = object()  # the proxy restarted
+        await _advertise(coord, callbacks)
+
+        assert connects.await_count == before + 1
+        assert coord._controller is fake  # connected, without waiting it out
+        assert coord._refusals == 0
+        assert coord._backoff == 0.0
+    await coord.async_stop()
+
+
+async def test_a_successful_connect_forgets_the_streak(hass) -> None:
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with (
+        _patch_transport(
+            fake,
+            ctor_side_effect=[TimeoutError()] * coordinator_mod.STUCK_PROXY_FAILURES
+            + [fake],
+        ),
+        _paths([_path()]),
+        _fake_clock(),
+    ):
+        coord = MeshCoordinator(hass, entry)
+        await _refuse(coord, coordinator_mod.STUCK_PROXY_FAILURES)
+        assert coord._proxy_is_stuck
+
+        assert await coord.async_set_onoff(UNICAST, True) is True
+
+        assert coord._refusals == 0
+        assert coord._refused_path is None
+        for kind in ("proxy_stuck", "proxy_unreachable"):
+            assert (
+                ir.async_get(hass).async_get_issue(DOMAIN, f"{kind}_{entry.entry_id}")
+                is None
+            )
+    await coord.async_stop()

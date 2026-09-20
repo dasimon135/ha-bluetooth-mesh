@@ -55,6 +55,10 @@
     "proxy_unreachable": {
       "title": "No Bluetooth proxy for mesh network {network}",
       "description": "Home Assistant cannot find a Bluetooth proxy advertising the mesh network \"{network}\" (expected Network ID {network_id}). A mesh node offers a single proxy connection slot: if the Häfele Connect Mesh app (or another client) is connected to a lamp, it holds that slot and Home Assistant is locked out. Close the app and free the lamp, and make sure at least one lamp is powered and in range of a Bluetooth proxy.\n\nDiagnostics — mesh proxy adverts Home Assistant currently sees: {seen}\n\nHome Assistant keeps retrying and clears this issue automatically once a proxy is reachable."
+    },
+    "proxy_stuck": {
+      "title": "Restart the Bluetooth proxy {proxy}",
+      "description": "The proxy **{proxy}** (`{proxy_address}`) has refused every connection to the mesh network “{network}” {failures} times in a row, each time in about a second, while it hears the node perfectly and has a free connection slot. That is not a lamp problem: the proxy itself is stuck on this address, and only restarting it clears the condition.\n\nRestart **{proxy}** — an ESPHome proxy has a *Restart* button on its device page — or cut its power for a few seconds. Home Assistant reconnects on its own within seconds of the proxy coming back, and this issue disappears.\n\nThe condition appears when the node disappears (unplugged, out of range) while the proxy is holding a connection to it. Nothing in this integration can clear it from the Home Assistant side."
     }
   },
   "exceptions": {
