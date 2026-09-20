@@ -6,6 +6,8 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-09-20
+
 Eight defects found by reading the whole integration again, none of them
 reported by anyone, and all three fixes of #31. Everything below has been run
 on a real mesh, except where it says otherwise.
