@@ -90,8 +90,12 @@ SEQ_SAFETY_MARGIN = 32
 
 # The cursor is written through Home Assistant's debounced Store rather than on
 # every command: one flash write per button press wears out an SD card for no
-# benefit. Anything the debounce loses to a crash is covered by the margin
-# above — at one or two SEQ per command, this window cannot burn 32.
+# benefit. Anything the debounce loses to a crash has to stay under the margin
+# above, and the debounce alone does not guarantee that: every new call pushes
+# the pending write back, so a burst with less than this delay between commands
+# (eight CTL lamps re-read after a reconnect is forty GETs) wrote nothing at all
+# until it was over. `_persist` therefore writes at once whenever the cursor is
+# half a margin ahead of what is on disk.
 SEQ_SAVE_DELAY = 10.0
 
 # How often to probe the mesh for availability. We no longer hold a connection,
@@ -180,9 +184,22 @@ class MeshCoordinator:
         self._network = Network.from_connect(
             json.loads(entry.data[CONF_CONNECT_JSON])
         )
+        # Keyed on the NETWORK, not on the config entry. The nodes remember the
+        # highest SEQ they accepted from our address, and they do not forget it
+        # when the integration is removed: keyed on the entry id, removing and
+        # re-adding the integration (the first thing anyone tries when something
+        # is wrong) restarted the cursor at 0, and every command was dropped as
+        # a replay, in silence, until it had climbed back past the old value.
+        # The file is left behind on removal for the same reason.
         self._store: Store = Store(
+            hass, STORAGE_VERSION, f"{DOMAIN}.{self._network.identifier.lower()}.seq"
+        )
+        # Where the cursor lived up to v0.9.0; read once, then deleted.
+        self._legacy_store: Store = Store(
             hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.seq"
         )
+        self._saved_seq = 0
+        self._iv_regress_warned = False
         # Where our traffic comes FROM, and which key it is encrypted WITH —
         # both derived from the export rather than assumed, because getting
         # either wrong fails in complete silence (see the two helpers below).
@@ -416,6 +433,12 @@ class MeshCoordinator:
         """
         self._stopped = False
         self._seq, self._iv_index = await self._load_state()
+        # Put the margin on disk before anything is sent. Until the first write
+        # the file still holds the OLD cursor, so a crash in that window made
+        # the next start land on this same value again and reuse whatever had
+        # gone out in between. It also moves a cursor read from the legacy file
+        # under its new key.
+        await self._flush_state()
         # Probe in the BACKGROUND. Awaiting a full connect here — up to
         # CONNECT_TIMEOUT plus bleak's retries — happens inside
         # async_setup_entry, well past the 10s mark where Home Assistant starts
@@ -1010,6 +1033,10 @@ class MeshCoordinator:
         """
         data = await self._store.async_load()
         if not data:
+            data = await self._legacy_store.async_load()
+            if data:
+                await self._legacy_store.async_remove()
+        if not data:
             return 0, self._network.iv_index
         return (
             int(data.get("seq", 0)) + SEQ_SAFETY_MARGIN,
@@ -1017,11 +1044,21 @@ class MeshCoordinator:
         )
 
     def _state_to_save(self) -> dict[str, int]:
+        self._saved_seq = self._seq
         return {"seq": self._seq, "iv_index": self._iv_index}
 
     def _persist(self) -> None:
-        """Queue a debounced write of the SEQ cursor and IV Index."""
-        self._store.async_delay_save(self._state_to_save, SEQ_SAVE_DELAY)
+        """Queue a write of the SEQ cursor and IV Index.
+
+        Debounced, unless the cursor has run half a margin ahead of the disk or
+        has been restarted (a new IV Index): then it is written now, so that
+        what a crash can lose never reaches :data:`SEQ_SAFETY_MARGIN`.
+        """
+        ahead = self._seq - self._saved_seq
+        urgent = not 0 <= ahead < SEQ_SAFETY_MARGIN // 2
+        self._store.async_delay_save(
+            self._state_to_save, 0 if urgent else SEQ_SAVE_DELAY
+        )
 
     async def _flush_state(self) -> None:
         """Write the cursor out now (best-effort), bypassing the debounce."""
@@ -1053,6 +1090,23 @@ class MeshCoordinator:
             return False
         self._beacon = beacon
         if beacon.iv_index == self._iv_index:
+            return False
+        if beacon.iv_index < self._iv_index:
+            # An IV Index only ever grows. A node that was switched off at the
+            # wall during an IV Update comes back announcing the old one, and
+            # adopting it restarted the SEQ cursor at 0 under an index the mesh
+            # had left (everything dropped), then again at 0 under the current
+            # one on the next connection to a healthy node, this time reusing
+            # numbers already spent under it. The spec's IV Update procedure has a
+            # node ignore a beacon whose index is behind its own; so do we.
+            if not self._iv_regress_warned:
+                self._iv_regress_warned = True
+                logger.warning(
+                    "ignoring IV Index %#x announced through this proxy: it is "
+                    "behind the %#x already in use, so that node has missed an "
+                    "IV Update and will catch up on its own",
+                    beacon.iv_index, self._iv_index,
+                )
             return False
         logger.warning(
             "adopting IV Index %#x announced by the subnet (was %#x); "

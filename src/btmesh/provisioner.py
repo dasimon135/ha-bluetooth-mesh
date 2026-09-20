@@ -209,6 +209,7 @@ class Provisioner:
         self._secret = b""
         self._conf_salt = b""
         self._conf_key = b""
+        self._confirmation = b""
         self._device_confirmation = b""
 
     @property
@@ -338,16 +339,27 @@ class Provisioner:
         )
         self._conf_salt = s1(inputs)
         self._conf_key = k1(self._secret, self._conf_salt, b"prck")
-        confirmation = aes_cmac(self._conf_key, self._random + self._auth_value)
-        self._emit(Confirmation(value=confirmation))
+        self._confirmation = aes_cmac(
+            self._conf_key, self._random + self._auth_value
+        )
+        self._emit(Confirmation(value=self._confirmation))
         self._set_state(State.WAIT_CONFIRMATION)
 
     def _on_confirmation(self, conf: Confirmation) -> None:
+        # A peer that does not know the AuthValue cannot compute a confirmation,
+        # but it can send ours back, and later our random with it: the check in
+        # _on_random then compares our own value with itself and passes. The
+        # spec closed that hole by having the provisioner refuse its own
+        # confirmation (and its own random) coming back.
+        if conf.value == self._confirmation:
+            raise ProvisioningError("device echoed the provisioner confirmation")
         self._device_confirmation = conf.value
         self._emit(Random(value=self._random))
         self._set_state(State.WAIT_RANDOM)
 
     def _on_random(self, rand: Random) -> None:
+        if rand.value == self._random:
+            raise ProvisioningError("device echoed the provisioner random")
         expected = aes_cmac(self._conf_key, rand.value + self._auth_value)
         if expected != self._device_confirmation:
             raise ProvisioningError(

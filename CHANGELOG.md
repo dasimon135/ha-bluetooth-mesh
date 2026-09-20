@@ -6,7 +6,7 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Four defects found by reading the whole integration again, none of them
+Eight defects found by reading the whole integration again, none of them
 reported by anyone, and two of the three fixes of #31. Unit-tested; not yet run
 on a real mesh.
 
@@ -38,6 +38,37 @@ on a real mesh.
   Whether a Häfele lamp actually applies its replay list to these messages is
   not known; the fix costs nothing either way.
 
+- **Removing the integration and adding it back no longer leaves every lamp
+  deaf to it.** The nodes remember the highest sequence number they accepted
+  from our address, and they do not forget it when Home Assistant forgets the
+  entry. The cursor was stored under the config entry's id, so a re-added
+  integration, which is the first thing anyone tries when something is wrong,
+  started again at 0 and every command was dropped as a replay, without a word,
+  until the cursor had climbed back past its old value. It is now stored under
+  the network's identity and left in place on removal. A cursor stored the old
+  way is moved on first start.
+- **The sequence cursor on disk can no longer fall a whole safety margin
+  behind.** Two holes. The margin added at startup was only written with the
+  first debounced save, so a crash before it made the next start land on the
+  same value and reuse what had been sent in between: it is now written before
+  anything is sent. And the debounce pushes the write back on every call, so a
+  burst (eight tunable-white lamps re-read after a reconnect is forty messages)
+  wrote nothing until it was over: the cursor is now written at once whenever
+  it is half a margin ahead of the disk. The comment claiming the window
+  "cannot burn 32" was wrong.
+- **An IV Index behind ours is ignored.** A lamp switched off at the wall
+  during an IV Update comes back announcing the old index. Reaching the mesh
+  through it made the integration adopt that index and restart its sequence
+  cursor at 0, twice over: once under an index the mesh had left, then again
+  under the current one, reusing numbers already spent. An IV Index only
+  grows, and the spec has a node ignore such a beacon. One warning, then
+  nothing.
+- **Provisioning refuses its own confirmation and random sent back to it**
+  (library only; provisioning is not reachable from Home Assistant yet, #12).
+  A peer that does not know the AuthValue cannot compute a confirmation, but it
+  can reflect ours, then our random, and the final check compared our value
+  with itself. The reflected public key was already refused; these two were
+  not.
 - **A node gone quiet is no longer dialed anyway, and an automatic reconnect
   spends one connection attempt instead of four.** Two of the three fixes
   scoped in [#31](https://github.com/dasimon135/ha-bluetooth-mesh/issues/31),
