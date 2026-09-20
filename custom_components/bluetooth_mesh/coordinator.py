@@ -58,10 +58,13 @@ from .const import (
 )
 from .mesh_transport import (
     PROXY_ADVERT_MAX_AGE,
+    ProxyPath,
     async_connect_bearer,
     async_register_proxy_callback,
+    connect_paths,
     discovered_proxies,
     find_proxy_address,
+    scanner_by_source,
 )
 
 logger = logging.getLogger(__name__)
@@ -135,6 +138,21 @@ CONNECT_BACKOFF_CAP = timedelta(minutes=5)
 # passes one or the other explicitly.
 CONNECT_ATTEMPTS = 4
 
+# A proxy can wedge on one address: it answers every connect with an instant
+# GATT error while it has a free slot and hears the node perfectly, and only a
+# restart of that proxy clears it. Seen on 2026-09-08, 2026-09-12 and again on
+# 2026-09-20, where it was provoked on purpose -- unplug the lamp while the
+# proxy holds a connection to it, and every attempt after it comes back fails
+# in about a second. Nothing here can unwedge it, so the repair names the proxy
+# and says to restart it; that is what the three outages each cost an hour to
+# work out by hand. Its signature, all four at once:
+#   * every attempt failed against the SAME source,
+#   * each in under this many seconds (a refusal, not a timeout or a search),
+#   * that source hears the node and has a slot free,
+#   * and it has happened this many times in a row.
+STUCK_PROXY_FAST_FAILURE = 3.0
+STUCK_PROXY_FAILURES = 3
+
 # Hard ceiling on establishing the proxy connection so a hung connect can never
 # wedge the lock forever.
 CONNECT_TIMEOUT = 20.0
@@ -200,6 +218,13 @@ class MeshCoordinator:
         )
         self._saved_seq = 0
         self._iv_regress_warned = False
+        # Consecutive fast refusals, and the source they all came through (see
+        # STUCK_PROXY_FAILURES). The scanner object is kept, not just its
+        # address: a proxy that restarts registers a NEW one, which is how we
+        # notice it happened and stop accusing it.
+        self._refusals = 0
+        self._refused_path: ProxyPath | None = None
+        self._refused_scanner: object | None = None
         # Where our traffic comes FROM, and which key it is encrypted WITH —
         # both derived from the export rather than assumed, because getting
         # either wrong fails in complete silence (see the two helpers below).
@@ -241,7 +266,9 @@ class MeshCoordinator:
         # is silent while its slot is held, so until it has had time to
         # advertise again an old advert says nothing about it.
         self._link_ended_at: float | None = None
-        self._issue_active = False
+        # Which repair is on screen, so a plain outage that turns out to be
+        # a wedged proxy replaces it instead of being swallowed as "already up".
+        self._issue_kind: str | None = None
         self._probe_unsub: CALLBACK_TYPE | None = None
         self._discovery_unsub: CALLBACK_TYPE | None = None
         # Entities subscribed to availability transitions (see async_add_listener).
@@ -550,6 +577,7 @@ class MeshCoordinator:
             return
         if self._lock.locked():
             return  # a connect is already in flight; adverts arrive constantly
+        self._proxy_restarted()  # its refusals are what imposed the wait
         if not self._may_attempt():
             return  # the node is being left alone on purpose
         logger.debug("mesh proxy %s advertised; probing now", address)
@@ -647,6 +675,7 @@ class MeshCoordinator:
         # up, so _teardown() cannot free it — this local reference is the only
         # way back to it, and leaking it would lock out both HA and the app.
         client = None
+        started = monotonic()
         try:
             async with asyncio.timeout(CONNECT_TIMEOUT):
                 client, bearer = await async_connect_bearer(
@@ -664,6 +693,9 @@ class MeshCoordinator:
                 await controller.start()
         except Exception as exc:  # noqa: BLE001 - transport/GATT/connect
             await self._disconnect(client)
+            # Before _set_unavailable: that one raises the repair, and which
+            # repair to raise depends on what this failure adds to the streak.
+            self._note_refusal(address, monotonic() - started)
             self._set_unavailable()
             self._back_off()
             # `asyncio.timeout` above raises a TimeoutError whose str() is the
@@ -1130,6 +1162,7 @@ class MeshCoordinator:
         misses = self._fail_count
         self._available = True
         self._fail_count = 0
+        self._forget_refusals()
         self._backoff = 0.0
         self._next_attempt = 0.0
         self._clear_issue()
@@ -1160,40 +1193,130 @@ class MeshCoordinator:
             if was_available:
                 self._notify_listeners()
 
+    # ----------------------------------------------------------- stuck proxy
+
+    def _note_refusal(self, address: str, elapsed: float) -> None:
+        """Record a failed connect, and tell a refusal from an ordinary miss.
+
+        A wedged proxy refuses in about a second while it hears the node and
+        has a slot free. A node that is merely busy, out of range or unplugged
+        looks nothing like that: the attempt takes its time, or the node is not
+        there to be heard at all.
+
+        Only ever accuses a proxy when the node has exactly ONE connectable
+        path. Home Assistant picks the path itself and never reports which one
+        it used, so with several in range the failure cannot be pinned on any
+        of them, and naming the wrong proxy would send someone to restart a
+        healthy one.
+        """
+        paths = connect_paths(self.hass, address)
+        path = paths[0] if len(paths) == 1 else None
+        if (
+            path is None
+            or elapsed > STUCK_PROXY_FAST_FAILURE
+            or not path.has_free_slot
+        ):
+            self._forget_refusals()
+            return
+        if (
+            self._refused_path is not None
+            and path.source != self._refused_path.source
+        ):
+            self._refusals = 0  # another proxy: this streak is not its doing
+        self._refusals += 1
+        self._refused_path = path
+        self._refused_scanner = scanner_by_source(self.hass, path.source)
+
+    def _forget_refusals(self) -> None:
+        """Drop the streak: whatever it was tracking is over."""
+        self._refusals = 0
+        self._refused_path = None
+        self._refused_scanner = None
+
+    @property
+    def _proxy_is_stuck(self) -> bool:
+        return (
+            self._refusals >= STUCK_PROXY_FAILURES and self._refused_path is not None
+        )
+
+    def _proxy_restarted(self) -> bool:
+        """True once the proxy we were accusing has been restarted.
+
+        A restarted proxy registers a NEW scanner object under the same source,
+        which is the only signal Home Assistant gives that it happened. The
+        wait those refusals imposed was imposed by a condition that no longer
+        exists, so it goes with them: on 2026-09-20 the lamp was reachable two
+        minutes before the coordinator, still counting down, tried again.
+        """
+        if self._refused_scanner is None or self._refused_path is None:
+            return False
+        current = scanner_by_source(self.hass, self._refused_path.source)
+        if current is self._refused_scanner:
+            return False
+        logger.info(
+            "mesh proxy %s came back; dropping the wait its refusals imposed",
+            self._refused_path.name,
+        )
+        self._forget_refusals()
+        self._backoff = 0.0
+        self._next_attempt = 0.0
+        return True
+
     # --------------------------------------------------------------- repairs
 
     def _raise_proxy_issue(self) -> None:
-        """Raise the proxy_unreachable repair (idempotent while active).
+        """Raise whichever repair fits what is actually wrong.
 
-        Includes a diagnostic of every 0x1828 mesh-proxy advert HA currently
-        sees, so a "no proxy in range" miss (``none``) can be told apart from a
-        "wrong keys" one (a foreign ``network_id=...``) straight from the UI.
+        ``proxy_stuck`` once one proxy has refused instantly several times in a
+        row while hearing the node with a slot free: it names that proxy and
+        says to restart it, because nothing here can unwedge it and each of the
+        three occurrences so far cost an hour of reading logs by hand.
+
+        ``proxy_unreachable`` otherwise, with a diagnostic of every 0x1828
+        advert Home Assistant sees, so "no proxy in range" (``none``) can be
+        told apart from "wrong keys" (a foreign ``network_id=...``) from the UI.
+
+        Idempotent per kind: an outage that turns out to be a wedged proxy
+        replaces its repair instead of leaving the vaguer one on screen.
         """
-        if self._issue_active:
+        kind = "proxy_stuck" if self._proxy_is_stuck else "proxy_unreachable"
+        if self._issue_kind == kind:
             return
-        self._issue_active = True
-        seen = discovered_proxies(self.hass)
-        seen_text = (
-            ", ".join(f"{addr} ({desc})" for addr, desc in seen) if seen else "none"
-        )
-        network_id = k3(self._network.net_key).hex()
+        self._clear_issue()
+        self._issue_kind = kind
+        network = self._network.name or "mesh"
+        if kind == "proxy_stuck":
+            path = self._refused_path
+            assert path is not None  # guaranteed by _proxy_is_stuck
+            placeholders = {
+                "network": network,
+                "proxy": path.name,
+                "proxy_address": path.source,
+                "failures": str(self._refusals),
+            }
+        else:
+            seen = discovered_proxies(self.hass)
+            placeholders = {
+                "network": network,
+                "network_id": k3(self._network.net_key).hex(),
+                "seen": (
+                    ", ".join(f"{addr} ({desc})" for addr, desc in seen)
+                    if seen
+                    else "none"
+                ),
+            }
         ir.async_create_issue(
             self.hass,
             DOMAIN,
-            f"proxy_unreachable_{self.entry.entry_id}",
+            f"{kind}_{self.entry.entry_id}",
             is_fixable=False,
             severity=ir.IssueSeverity.ERROR,
-            translation_key="proxy_unreachable",
-            translation_placeholders={
-                "network": self._network.name or "mesh",
-                "network_id": network_id,
-                "seen": seen_text,
-            },
+            translation_key=kind,
+            translation_placeholders=placeholders,
         )
 
     def _clear_issue(self) -> None:
-        """Delete the repair issue (idempotent, even across a restart)."""
-        self._issue_active = False
-        ir.async_delete_issue(
-            self.hass, DOMAIN, f"proxy_unreachable_{self.entry.entry_id}"
-        )
+        """Delete both repairs (idempotent, even across a restart)."""
+        self._issue_kind = None
+        for kind in ("proxy_unreachable", "proxy_stuck"):
+            ir.async_delete_issue(self.hass, DOMAIN, f"{kind}_{self.entry.entry_id}")

@@ -7,8 +7,31 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 Eight defects found by reading the whole integration again, none of them
-reported by anyone, and two of the three fixes of #31. Unit-tested; not yet run
-on a real mesh.
+reported by anyone, and all three fixes of #31. Everything below has been run
+on a real mesh, except where it says otherwise.
+
+### Added
+
+- **Home Assistant now says which Bluetooth proxy to restart when one is
+  wedged.** Third and last fix of
+  [#31](https://github.com/dasimon135/ha-bluetooth-mesh/issues/31). A proxy can
+  get stuck on one address: it refuses every connection in about a second,
+  while it hears the lamp perfectly and has a connection slot free, and only
+  restarting that proxy clears it. It has happened three times
+  (2026-09-08, 2026-09-12, 2026-09-20), and each time it cost an hour of
+  reading logs by hand to work out that the lamp was not the problem.
+
+  That signature is now recognised, and the repair names the proxy and says to
+  restart it instead of talking vaguely about an unreachable network. It is
+  raised only when the lamp has exactly ONE connectable path: Home Assistant
+  picks the path itself and never reports which one it used, so with several
+  proxies in range the refusal cannot be pinned on any of them, and sending
+  someone to restart a healthy proxy is worse than saying nothing. A slow
+  failure, or a proxy with no free slot, is not a refusal and accuses nobody.
+
+  Once the proxy is restarted, the wait its refusals had imposed goes with
+  them: the integration reconnects within seconds instead of finishing a
+  backoff that had grown to four minutes, which is what happened on 2026-09-20.
 
 ### Fixed
 
@@ -101,6 +124,10 @@ on a real mesh.
 
 ### Changed
 
+- Stopped calling a Home Assistant device-registry method that is deprecated
+  and disappears in 2027.8. The proxy sensor was looking its own device up to
+  attach the Bluetooth address to it; Home Assistant hands every entity its
+  device as it is added, so the lookup is gone rather than replaced.
 - **The minimum Home Assistant version is 2025.8.0, and has been since
   v0.4.2.** `hacs.json` said 2024.11.0, but the options flow imports
   `OptionsFlowWithReload`, which first shipped in 2025.8.0 (checked against the

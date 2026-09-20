@@ -55,6 +55,10 @@
     "proxy_unreachable": {
       "title": "Aucun proxy Bluetooth pour le réseau mesh {network}",
       "description": "Home Assistant ne trouve aucun proxy Bluetooth diffusant le réseau mesh « {network} » (Network ID attendu : {network_id}). Un nœud mesh n'offre qu'un seul emplacement de connexion proxy : si l'application Häfele Connect Mesh (ou un autre client) est connectée à une lampe, elle occupe cet emplacement et Home Assistant est bloqué. Fermez l'application et libérez la lampe, et assurez-vous qu'au moins une lampe est alimentée et à portée d'un proxy Bluetooth.\n\nDiagnostic — annonces de proxy mesh que Home Assistant voit actuellement : {seen}\n\nHome Assistant réessaie en continu et efface automatiquement ce problème dès qu'un proxy est joignable."
+    },
+    "proxy_stuck": {
+      "title": "Redémarrez le proxy Bluetooth {proxy}",
+      "description": "Le proxy **{proxy}** (`{proxy_address}`) a refusé {failures} fois de suite toute connexion au réseau mesh « {network} », chaque fois en une seconde environ, alors qu'il entend parfaitement le nœud et dispose d'un emplacement de connexion libre. Ce n'est pas un problème de lampe : le proxy lui-même est bloqué sur cette adresse, et seul son redémarrage le débloque.\n\nRedémarrez **{proxy}** — un proxy ESPHome a un bouton *Restart* sur sa page d'appareil — ou coupez son alimentation quelques secondes. Home Assistant se reconnecte tout seul dans les secondes qui suivent le retour du proxy, et ce problème disparaît.\n\nCette situation survient quand le nœud disparaît (débranché, hors portée) pendant que le proxy tient une connexion vers lui. Rien dans cette intégration ne peut la résoudre côté Home Assistant."
     }
   },
   "exceptions": {
