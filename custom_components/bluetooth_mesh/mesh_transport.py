@@ -18,6 +18,7 @@ scope (it only ever runs inside Home Assistant).
 from __future__ import annotations
 
 import logging
+from time import monotonic
 from typing import TYPE_CHECKING, Callable
 
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
@@ -47,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "MeshTransportError",
+    "PROXY_ADVERT_MAX_AGE",
     "find_proxy_address",
     "async_connect_bearer",
     "async_register_proxy_callback",
@@ -56,6 +58,45 @@ __all__ = [
 
 class MeshTransportError(Exception):
     """A mesh proxy could not be located or connected through HA-bluetooth."""
+
+
+# Past this, a cached advert is treated as silence rather than a live proxy
+# (ha-bluetooth-mesh#31): HA's discovered-service-info snapshot keeps an entry
+# connectable for minutes after the last real advert, and a connect attempt
+# against a node that has gone quiet only charges a failure to whichever proxy
+# habluetooth currently scores best -- exactly the attempts that poisoned that
+# scoring during the 2026-09-12 storm.
+#
+# The rule has one blind spot, and the caller owns it: a node stops advertising
+# 0x1828 for as long as its single GATT slot is held, ours included. Right after
+# a link of ours ends, the newest advert is therefore as old as that link was
+# long, whatever state the node is in. ``find_proxy_address(max_age=None)`` is
+# for that window.
+PROXY_ADVERT_MAX_AGE = 30.0
+
+
+def _advert_age(hass: HomeAssistant, info: BluetoothServiceInfoBleak, now: float) -> float:
+    """Seconds since ANY scanner last heard ``info.address``.
+
+    ``info.time`` alone is not that. habluetooth keeps one entry per address,
+    owned by one scanner, and drops the adverts of every other scanner for as
+    long as the owner is still scanning and nobody is clearly louder, without
+    touching the entry. An owner that stops hearing the node while another
+    proxy still does leaves the timestamp frozen until the entry changes hands,
+    which can take minutes before the advertising interval has been learned.
+    Each scanner keeps its own timestamps, so ask them, but only once the cheap
+    answer says "stale": this walks every device of every scanner.
+    """
+    age = now - info.time
+    if age <= PROXY_ADVERT_MAX_AGE:
+        return age
+    for scanner_device in bluetooth.async_scanner_devices_by_address(
+        hass, info.address, connectable=False
+    ):
+        heard = scanner_device.scanner.discovered_device_timestamps.get(info.address)
+        if heard is not None:
+            age = min(age, now - heard)
+    return age
 
 
 def _matches_network_id(
@@ -72,7 +113,12 @@ def _matches_network_id(
     return id_type == _IDENTIFICATION_NETWORK_ID and parameter == network_id
 
 
-def find_proxy_address(hass: HomeAssistant, net_key: bytes) -> str | None:
+def find_proxy_address(
+    hass: HomeAssistant,
+    net_key: bytes,
+    *,
+    max_age: float | None = PROXY_ADVERT_MAX_AGE,
+) -> str | None:
     """Address of a connectable mesh proxy advertising ``net_key``'s Network ID.
 
     Computes ``network_id = k3(net_key)`` and scans HA's **full** advertisement
@@ -91,10 +137,26 @@ def find_proxy_address(hass: HomeAssistant, net_key: bytes) -> str | None:
     contradicting it. Actual connectability is re-verified at connect time by
     :func:`async_ble_device_from_address`. The snapshot is point-in-time; the
     coordinator retries, so a transient ``None`` is expected.
+
+    A match nobody has heard for more than ``max_age`` seconds is skipped rather
+    than returned: the entry can still read ``connectable=yes`` well after the
+    node actually went quiet, and connecting on that stale word only spends a
+    bleak attempt nobody can win (ha-bluetooth-mesh#31). ``None`` lifts the
+    rule, for a caller that knows why the advert is old (see
+    :data:`PROXY_ADVERT_MAX_AGE`).
     """
     network_id = k3(net_key)
+    now = monotonic()
     for info in bluetooth.async_discovered_service_info(hass, connectable=False):
         if not _matches_network_id(info, network_id):
+            continue
+        age = _advert_age(hass, info, now)
+        if max_age is not None and age > max_age:
+            logger.debug(
+                "mesh proxy %s advertises Network ID %s but the last advert "
+                "is %.0f s old; treating it as silent",
+                info.address, network_id.hex(), age,
+            )
             continue
         if getattr(info, "connectable", False):
             logger.debug(
@@ -118,8 +180,14 @@ def discovered_proxies(hass: HomeAssistant) -> list[tuple[str, str]]:
     *passive* / non-connectable scanner (``connectable=no`` — HA can see it but
     cannot connect through it), and a foreign network (a mismatching
     ``network_id``). Returns ``(address, description)`` pairs.
+
+    Each description carries the advert's age, because
+    :func:`find_proxy_address` turns down a match on it: without the age, the
+    one warning of an outage would read "no connectable proxy" next to our own
+    Network ID marked ``connectable=yes``.
     """
     out: list[tuple[str, str]] = []
+    now = monotonic()
     for info in bluetooth.async_discovered_service_info(hass, connectable=False):
         data = info.service_data.get(PROXY_SERVICE)
         if data is None:
@@ -134,7 +202,10 @@ def discovered_proxies(hass: HomeAssistant) -> list[tuple[str, str]]:
             else "node-identity"
         )
         conn = "yes" if getattr(info, "connectable", False) else "no"
-        out.append((info.address, f"{kind}, connectable={conn}"))
+        age = _advert_age(hass, info, now)
+        out.append(
+            (info.address, f"{kind}, connectable={conn}, heard {age:.0f} s ago")
+        )
     return out
 
 
@@ -148,9 +219,10 @@ async def async_connect_bearer(
     caller is responsible for calling ``bearer.start(on_message)``.
 
     ``max_attempts`` is bleak-retry-connector's retry budget for this one call.
-    Its default of four suits a transient BLE miss; a coordinator that is
-    backing off from a node it has been hammering asks for one, because every
-    try is pressure on a node that needs quiet.
+    Its default of four suits a transient BLE miss. The coordinator asks for
+    one on every automatic try, and on any try while it is backing off from a
+    node it has been hammering: each attempt is pressure on a node that needs
+    quiet, and a failure charged to whichever proxy carried it.
     """
     ble_device = bluetooth.async_ble_device_from_address(
         hass, address, connectable=True

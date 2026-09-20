@@ -1520,8 +1520,15 @@ async def test_the_backoff_is_capped_and_each_step_is_logged(hass, caplog) -> No
     assert [r.args[0] for r in steps] == [15, 30, 60, 120, 240, 300, 300]
 
 
-async def test_a_successful_connect_resets_the_backoff_and_the_attempts(hass) -> None:
-    """Pressure is per attempt: one GATT try while backing off, four otherwise."""
+async def test_automatic_reconnects_always_use_one_attempt(hass) -> None:
+    """Every automatic try spends one GATT attempt, backing off or not.
+
+    bleak-retry-connector's own budget already tries several times inside ONE
+    call; for the background recovery loop that is pressure of its own -- see
+    ha-bluetooth-mesh#31, where four such attempts landed inside one second and
+    were read as a storm. A command keeps the four outside a backoff (see the
+    companion test below); the automatic loop never gets them.
+    """
     entry = _make_entry(hass)
     callbacks: list = []
     fake = FakeController()
@@ -1551,8 +1558,8 @@ async def test_a_successful_connect_resets_the_backoff_and_the_attempts(hass) ->
         assert coord.available is True
 
         # The link is lost again; no failure has happened since the success,
-        # so the very next advert reconnects at once, with the full retry
-        # budget.
+        # so the very next advert reconnects at once -- still automatic, so
+        # still one attempt.
         async with coord._lock:
             await coord._teardown()
         await _advertise(coord, callbacks)
@@ -1560,7 +1567,103 @@ async def test_a_successful_connect_resets_the_backoff_and_the_attempts(hass) ->
         assert coord._controller is fake
 
         attempts = [c.kwargs.get("max_attempts") for c in connects.await_args_list]
-        assert attempts == [4, 1, 1, 4]
+        assert attempts == [1, 1, 1, 1]
+    await coord.async_stop()
+
+
+async def test_a_command_gets_the_full_budget_except_while_backing_off(hass) -> None:
+    """Four for a command, one once the node is being left alone.
+
+    The backoff rule is the 2026-09-10 one and covers every caller: a command
+    is never gated by ``_may_attempt()``, so while the background loop is
+    backing off a burst of them (a scene over six lamps, the lights' own state
+    reads) would otherwise be the storm again, four attempts at a time.
+    """
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with (
+        _patch_transport(fake, ctor_side_effect=[TimeoutError(), TimeoutError(), fake]),
+        _fake_clock(),
+    ):
+        coord = MeshCoordinator(hass, entry)
+        connects = coordinator_mod.async_connect_bearer
+
+        assert await coord.async_set_onoff(UNICAST, True) is None  # no backoff yet
+        assert coord._backoff > 0
+        assert await coord.async_set_onoff(UNICAST, True) is None  # backing off
+        assert await coord.async_set_onoff(UNICAST, True) is True
+
+        attempts = [c.kwargs.get("max_attempts") for c in connects.await_args_list]
+        assert attempts == [coordinator_mod.CONNECT_ATTEMPTS, 1, 1]
+    await coord.async_stop()
+
+
+async def test_the_reconnect_after_a_drop_is_one_attempt_on_the_old_advert(
+    hass,
+) -> None:
+    """The drop watchdog is automatic, and must not ask for a fresh advert.
+
+    A node is silent while its slot is held, so at the drop the newest advert
+    is as old as the link was long. Reading that as silence made this reconnect
+    miss whenever the link had lasted over 30 s, and lost the 2026-09-04 fix.
+    It is also the path that charged four failures to one proxy on 2026-09-12
+    (ha-bluetooth-mesh#31), which no earlier test looked at.
+    """
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with _patch_transport(fake) as client, _fake_clock() as clock:
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        connects = coordinator_mod.async_connect_bearer
+        find = coordinator_mod.find_proxy_address
+        await _wait_for(lambda: coord._controller is fake)
+        # The very first connect has no link of ours behind it.
+        assert find.call_args.kwargs == {
+            "max_age": coordinator_mod.PROXY_ADVERT_MAX_AGE
+        }
+
+        clock["now"] += 3600  # held for an hour, the node silent all along
+        on_drop = client.set_disconnected_callback.call_args.args[0]
+        client.is_connected = False
+        on_drop(client)
+        await _wait_for(lambda: connects.await_count == 2)
+        await _wait_for(lambda: not coord._lock.locked())
+
+        assert find.call_args.kwargs == {"max_age": None}
+        assert connects.await_args.kwargs["max_attempts"] == 1
+    await coord.async_stop()
+
+
+async def test_silence_means_silence_again_once_the_node_had_time_to_advertise(
+    hass,
+) -> None:
+    """The exemption lasts as long as the rule's own limit, not longer.
+
+    ha-bluetooth-mesh#31: the node was unplugged. One attempt at the drop, one
+    more inside the window, and after that a node nobody hears is not dialed.
+    """
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with _patch_transport(fake) as client, _fake_clock() as clock:
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        find = coordinator_mod.find_proxy_address
+        await _wait_for(lambda: coord._controller is fake)
+
+        async with coord._lock:
+            await coord._teardown()  # our link ends now
+        client.is_connected = False
+        clock["now"] += coordinator_mod.PROXY_ADVERT_MAX_AGE - 1
+        await coord._async_probe()
+        assert find.call_args.kwargs == {"max_age": None}
+
+        async with coord._lock:
+            await coord._teardown()
+        clock["now"] += coordinator_mod.PROXY_ADVERT_MAX_AGE + 1
+        await coord._async_probe()
+        assert find.call_args.kwargs == {
+            "max_age": coordinator_mod.PROXY_ADVERT_MAX_AGE
+        }
     await coord.async_stop()
 
 
