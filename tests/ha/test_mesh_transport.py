@@ -222,6 +222,24 @@ def test_a_node_no_scanner_has_heard_recently_stays_silent(hass) -> None:
         assert find_proxy_address(hass, NET_KEY) is None
 
 
+def test_a_scanner_without_timestamps_does_not_break_discovery(hass) -> None:
+    """A local adapter on Home Assistant 2025.8 has no per-scanner timestamps.
+
+    habluetooth 4.0.2 (HA 2025.8, the minimum this integration declares) puts
+    ``discovered_device_timestamps`` on remote scanners only. Read straight,
+    the local adapter's missing attribute raised on every reconnect, outside
+    any handler, and killed the recovery loop. It must be skipped, and the
+    proxy that does hear the node must still be found.
+    """
+    local_adapter = SimpleNamespace(scanner=SimpleNamespace(source="hci0"))
+    scanners = [local_adapter, _scanner_that_heard(ADDRESS, 2)]
+    with _snapshot([_stale_info()], scanners):
+        assert find_proxy_address(hass, NET_KEY) == ADDRESS
+        assert find_proxy_address(hass, NET_KEY, max_age=None) == ADDRESS
+        # The diagnostic reads the same ages and must not raise either.
+        assert mesh_transport.discovered_proxies(hass)
+
+
 def test_find_proxy_address_without_a_max_age_returns_a_stale_match(hass) -> None:
     """For the caller that knows why the advert is old.
 
