@@ -6,11 +6,49 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-09-23
+
+Two fixes to what 0.10.0 introduced, both found by a second read of the whole
+integration.
+
+### Fixed
+
+- **The *restart the proxy* repair no longer sends you looking for a button
+  that is not there.** It said an ESPHome proxy has a *Restart* button on its
+  device page. The ready-made Bluetooth proxy firmware from ESPHome has none:
+  its device page shows *Safe Mode Boot* and *Factory reset*, and someone
+  looking for a restart could press the second one, which does not clear the
+  condition and can erase the Wi-Fi settings the proxy was set up with. The
+  repair now says to cut the proxy's power for a few seconds, that a
+  *Restart* button works too if your own configuration defines one, and not to
+  press *Factory reset*. It also stops asserting that the proxy has a free
+  connection slot, which is not always known.
+- **Home Assistant 2025.8 with a local Bluetooth adapter no longer loses the
+  mesh after its first reconnect.** 0.10.0 reads each Bluetooth scanner's own
+  record of when it last heard the lamp. On Home Assistant 2025.8, the oldest
+  version this integration supports, only ESPHome proxies keep that record; a
+  Bluetooth adapter plugged into the Home Assistant machine does not, until
+  2025.9. The read raised on every reconnect through such an adapter, outside
+  any error handling, which stopped the retry loop for good: the lights stayed
+  unavailable until Home Assistant was restarted, and the diagnostics download
+  failed too. A scanner that keeps no record is now skipped. Nothing changes
+  on Home Assistant 2025.9 and later, nor for anyone who reaches the lamps
+  through ESPHome proxies only.
+
+  Not reproduced on a real setup: the maintainer runs a current Home Assistant
+  and ESPHome proxies only. Covered by a test that fails with the exact error
+  on 0.10.0.
+
+The 0.10.0 notes below are also corrected. They said *everything ran on a real
+mesh*, which was not true of two items, and one line still called the stuck
+proxy fix open in the release that shipped it.
+
 ## [0.10.0] — 2026-09-20
 
 Eight defects found by reading the whole integration again, none of them
-reported by anyone, and all three fixes of #31. Everything below has been run
-on a real mesh, except where it says otherwise.
+reported by anyone, and all three fixes of #31. Everything below ran on the
+maintainer's own mesh before release, except the two items that say they
+could not.
 
 ### Added
 
@@ -35,6 +73,10 @@ on a real mesh, except where it says otherwise.
   them: the integration reconnects within seconds instead of finishing a
   backoff that had grown to four minutes, which is what happened on 2026-09-20.
 
+  Not seen in the field yet: provoking the wedge takes the lamp unplugged while
+  the proxy holds its link. What did run live is the other half, a genuine
+  10-second failure that was correctly not counted as a refusal.
+
 ### Fixed
 
 - **A room stopped working once one of its lamps was disabled in Home
@@ -44,7 +86,8 @@ on a real mesh, except where it says otherwise.
   left. Disabling the lamps to keep only the room is an ordinary thing to do.
   The disabled member is now skipped for the state write and still counted in
   what the room shows. The tests missed it because every one of them replaces
-  that state write with a stub.
+  that state write with a stub. Not run on a real mesh: the maintainer's
+  network has no group. Covered by a test that failed before the fix.
 - **Reloading the entry could leave the lamp's only connection held by the
   coordinator that had just been stopped.** A state read still waiting its turn
   when the entry reloaded carried on against the old coordinator, which
@@ -120,9 +163,9 @@ on a real mesh, except where it says otherwise.
   four, except while backing off, where everything stays at one as it has been
   since 0.7.0.
 
-  Not validated against the proxy-wedge scenario that opened #31: that needs
-  the conditions of that outage, not a unit test. Item 3 (naming the stuck
-  proxy in the repair) is still open.
+  Validated live on 2026-09-20: with the lamp unplugged for three minutes, not
+  one connection attempt was made. Item 3 (naming the stuck proxy) ships in
+  this same release, see *Added*.
 
 ### Changed
 

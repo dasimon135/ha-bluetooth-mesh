@@ -90,6 +90,13 @@ def _advert_age(hass: HomeAssistant, info: BluetoothServiceInfoBleak, now: float
     which can take minutes before the advertising interval has been learned.
     Each scanner keeps its own timestamps, so ask them, but only once the cheap
     answer says "stale": this walks every device of every scanner.
+
+    Read defensively. In the habluetooth that Home Assistant 2025.8 ships
+    (4.0.2), ``discovered_device_timestamps`` exists on remote scanners only;
+    a local Bluetooth adapter has none until habluetooth 5 (HA 2025.9). Read
+    straight, it raised on every reconnect through a local adapter, outside
+    any handler, and the recovery loop died with it. A scanner that cannot
+    say simply leaves the merged entry's own age standing.
     """
     age = now - info.time
     if age <= PROXY_ADVERT_MAX_AGE:
@@ -97,7 +104,12 @@ def _advert_age(hass: HomeAssistant, info: BluetoothServiceInfoBleak, now: float
     for scanner_device in bluetooth.async_scanner_devices_by_address(
         hass, info.address, connectable=False
     ):
-        heard = scanner_device.scanner.discovered_device_timestamps.get(info.address)
+        timestamps = getattr(
+            scanner_device.scanner, "discovered_device_timestamps", None
+        )
+        if not isinstance(timestamps, dict):
+            continue
+        heard = timestamps.get(info.address)
         if heard is not None:
             age = min(age, now - heard)
     return age
