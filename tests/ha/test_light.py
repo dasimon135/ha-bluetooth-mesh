@@ -69,6 +69,8 @@ class FakeCoordinator:
         self.ctl_range = ctl_range
         # Whether the lamp answers a Set at all (False = every Set times out).
         self.acknowledge = True
+        # Whether a group Set can leave (False = no link to send it on).
+        self.group_link = True
         self.listeners: list = []
 
     def async_add_listener(self, callback_):
@@ -121,13 +123,15 @@ class FakeCoordinator:
         self.calls.append(("get_ctl_temperature_range", unicast))
         return self.ctl_range
 
-    async def async_set_group_onoff(self, group_address: int, on: bool) -> None:
+    async def async_set_group_onoff(self, group_address: int, on: bool) -> bool:
         self.calls.append(("set_group_onoff", group_address, on))
+        return self.group_link
 
     async def async_set_group_lightness(
         self, group_address: int, level_0_1: float
-    ) -> None:
+    ) -> bool:
         self.calls.append(("set_group_lightness", group_address, level_0_1))
+        return self.group_link
 
 
 def _fixture_network() -> Network:
@@ -1500,3 +1504,123 @@ async def test_removing_the_entity_cancels_the_read_in_flight(hass) -> None:
 
     assert task.cancelled()
     assert coordinator.calls == []
+
+
+def _mixed_group_network() -> Network:
+    """A room over one dimmer and one on/off-only relay, both subscribed."""
+
+    def node(unicast, uuid, name, model_ids):
+        return Node(
+            uuid=uuid,
+            unicast=unicast,
+            device_key=b"\x00" * 16,
+            cid=0x07E9,
+            name=name,
+            elements=(
+                Element(
+                    index=0,
+                    unicast=unicast,
+                    name=name,
+                    models=tuple(
+                        Model(
+                            model_id=model_id,
+                            bound_appkey_indexes=(0,),
+                            subscribe=(GROUP_ADDR,),
+                        )
+                        for model_id in model_ids
+                    ),
+                ),
+            ),
+        )
+
+    dimmer = node(0x0045, "aaaabbbb-cccc-dddd-eeee-ffff00001111", "Dimmer", (0x1000, 0x1300))
+    relay = node(0x0050, "aaaabbbb-cccc-dddd-eeee-ffff00002222", "Relay", (0x1000,))
+    return replace(
+        _fixture_network(),
+        nodes=(dimmer, relay),
+        groups=(Group(id="g1", name="Room", kind="group", address=GROUP_ADDR),),
+    )
+
+
+def _group_and_members(added):
+    group = next(light for light in added if isinstance(light, MeshGroupLight))
+    members = [light for light in added if isinstance(light, MeshLight)]
+    return group, members
+
+
+async def test_a_group_set_that_never_left_puts_the_members_back(hass) -> None:
+    """No link, no lamp changed: the room must not show a change it never made.
+
+    The members are pushed the new state before the Set goes out, so that the
+    whole room moves at once. When there was no link to send it on, that
+    push was the only thing that happened, and it stayed on screen over dark
+    lamps. It is now undone, down to an ``unknown`` that stays unknown.
+    """
+    added, coordinator = await _setup(hass, _two_output_network_with_group())
+    group, members = _group_and_members(added)
+    members[0]._is_on, members[0]._brightness = False, 40
+    before = [(m.is_on, m.brightness) for m in members]
+    coordinator.group_link = False
+
+    await group.async_turn_on(brightness=200)
+    assert [(m.is_on, m.brightness) for m in members] == before
+
+    await group.async_turn_off()
+    assert [(m.is_on, m.brightness) for m in members] == before
+
+
+async def test_a_mixed_group_switches_its_relays_on_before_dimming(hass) -> None:
+    """A relay has no lightness server: a Lightness Set alone never reaches it.
+
+    It was shown on all the same. The group now also sends Generic OnOff, and
+    sends it first: the other way round, a dimmer already lit by the lightness
+    would jump to its default level when OnOff arrived.
+    """
+    added, coordinator = await _setup(hass, _mixed_group_network())
+    group, members = _group_and_members(added)
+    dimmer = next(m for m in members if m.color_mode is not ColorMode.ONOFF)
+    relay = next(m for m in members if m.color_mode is ColorMode.ONOFF)
+
+    await group.async_turn_on(brightness=128)
+
+    assert coordinator.calls == [
+        ("set_group_onoff", GROUP_ADDR, True),
+        ("set_group_lightness", GROUP_ADDR, pytest.approx(128 / 255, abs=1e-6)),
+    ]
+    assert dimmer.is_on is True and dimmer.brightness == 128
+    assert relay.is_on is True and relay.brightness is None
+
+
+async def test_a_group_of_dimmers_still_takes_a_single_set(hass) -> None:
+    """The extra OnOff is for relays only; #33 was about ONE message."""
+    added, coordinator = await _setup(hass, _two_output_network_with_group())
+    group, _ = _group_and_members(added)
+
+    await group.async_turn_on(brightness=128)
+
+    assert [call[0] for call in coordinator.calls] == ["set_group_lightness"]
+
+
+async def test_a_mixed_group_whose_dimming_did_not_leave_stays_lit(hass) -> None:
+    """The OnOff that did leave lit every member; only the brightness is undone."""
+    added, coordinator = await _setup(hass, _mixed_group_network())
+    group, members = _group_and_members(added)
+    dimmer = next(m for m in members if m.color_mode is not ColorMode.ONOFF)
+    dimmer._is_on, dimmer._brightness = False, 40
+    answers = iter([True, False])  # OnOff leaves, then the link is gone
+
+    async def lightness_fails(group_address, level_0_1):
+        coordinator.calls.append(("set_group_lightness", group_address, level_0_1))
+        return next(answers)
+
+    async def onoff_leaves(group_address, on):
+        coordinator.calls.append(("set_group_onoff", group_address, on))
+        return next(answers)
+
+    coordinator.async_set_group_onoff = onoff_leaves  # type: ignore[method-assign]
+    coordinator.async_set_group_lightness = lightness_fails  # type: ignore[method-assign]
+
+    await group.async_turn_on(brightness=200)
+
+    assert all(m.is_on is True for m in members)
+    assert dimmer.brightness == 40

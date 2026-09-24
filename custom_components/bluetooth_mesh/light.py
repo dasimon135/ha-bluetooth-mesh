@@ -619,6 +619,15 @@ class MeshLight(LightEntity):
             self._brightness = brightness
         self._write_state()
 
+    def group_snapshot(self) -> tuple[bool | None, int | None]:
+        """What this light shows, so a group can put it back."""
+        return self._is_on, self._brightness
+
+    def restore_group_snapshot(self, snapshot: tuple[bool | None, int | None]) -> None:
+        """Undo :meth:`apply_group_state` for a group Set that never left."""
+        self._is_on, self._brightness = snapshot
+        self._write_state()
+
     async def async_turn_on(self, **kwargs) -> None:
         """Apply requested brightness and/or temperature and ensure the lamp is on.
 
@@ -794,26 +803,64 @@ class MeshGroupLight(LightEntity):
             return None
         return round(sum(lit) / len(lit))
 
-    def _push_to_members(self, on: bool, brightness: int | None) -> None:
+    def _push_to_members(self, on: bool, brightness: int | None) -> list:
+        """Show the command on every member at once; return what they showed.
+
+        A member that cannot dim is only ever told on or off: pushing a
+        brightness onto a relay would make up a value it does not have.
+        """
+        snapshots = [member.group_snapshot() for member in self._members]
         for member in self._members:
-            member.apply_group_state(on, brightness)
+            member.apply_group_state(
+                on, brightness if member.color_mode is not ColorMode.ONOFF else None
+            )
+        return snapshots
+
+    def _roll_back(self, snapshots: list) -> None:
+        """Put every member back: the Set never left, so no lamp changed."""
+        for member, snapshot in zip(self._members, snapshots, strict=True):
+            member.restore_group_snapshot(snapshot)
 
     async def async_turn_on(self, **kwargs) -> None:
+        """Switch the group on, in as few unacknowledged Sets as it takes.
+
+        A Light Lightness Set turns on and dims every member that can dim, and
+        is ignored by a member that cannot: an on/off relay has no lightness
+        server to hear it. So a group that mixes the two also gets a Generic
+        OnOff Set, and it goes FIRST. The other way round, a dimmer already lit
+        by the lightness would apply OnOff's own rule on top of it and jump to
+        its default lightness, undoing the brightness just asked for.
+        """
         drives_brightness = (
             ATTR_BRIGHTNESS in kwargs and self._attr_color_mode is ColorMode.BRIGHTNESS
         )
-        self._push_to_members(
+        snapshots = self._push_to_members(
             True, kwargs[ATTR_BRIGHTNESS] if drives_brightness else None
         )
 
-        if drives_brightness:
-            await self._coordinator.async_set_group_lightness(
-                self._group.address,
-                MeshLight._brightness_to_level(kwargs[ATTR_BRIGHTNESS]),
-            )
-        else:
-            await self._coordinator.async_set_group_onoff(self._group.address, True)
+        address = self._group.address
+        if not drives_brightness:
+            if not await self._coordinator.async_set_group_onoff(address, True):
+                self._roll_back(snapshots)
+            return
+
+        switched_on = False
+        if any(m.color_mode is ColorMode.ONOFF for m in self._members):
+            switched_on = await self._coordinator.async_set_group_onoff(address, True)
+            if not switched_on:
+                self._roll_back(snapshots)
+                return
+        if not await self._coordinator.async_set_group_lightness(
+            address, MeshLight._brightness_to_level(kwargs[ATTR_BRIGHTNESS])
+        ):
+            # Nothing was dimmed; the OnOff that did leave still lit them all.
+            self._roll_back(snapshots)
+            if switched_on:
+                self._push_to_members(True, None)
 
     async def async_turn_off(self, **kwargs) -> None:
-        self._push_to_members(False, None)
-        await self._coordinator.async_set_group_onoff(self._group.address, False)
+        snapshots = self._push_to_members(False, None)
+        if not await self._coordinator.async_set_group_onoff(
+            self._group.address, False
+        ):
+            self._roll_back(snapshots)

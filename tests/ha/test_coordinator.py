@@ -223,14 +223,16 @@ async def test_command_reuses_held_connection_persists_seq_frees_on_stop(hass) -
     assert client.disconnect.await_count >= 1
 
 
-async def test_async_set_group_onoff_sends_unacknowledged_and_returns_nothing(
+async def test_async_set_group_onoff_sends_unacknowledged_and_says_it_left(
     hass,
 ) -> None:
-    """A group Set is fire-and-forget: nothing to settle on, so no return value.
+    """A group Set is fire-and-forget: nothing to settle on, but it did leave.
 
     Unlike ``async_set_onoff``, which waits for the target's Status, a group
     address gets no single reply to wait for (ha-bluetooth-mesh#33) — an acked
-    Set there would get one Status per subscribed member instead.
+    Set there would get one Status per subscribed member instead. What it can
+    report is whether it was sent, so the group can put its members back when
+    it was not.
     """
     entry = _make_entry(hass)
     fake = FakeController()
@@ -240,7 +242,7 @@ async def test_async_set_group_onoff_sends_unacknowledged_and_returns_nothing(
 
         result = await coord.async_set_group_onoff(0xC028, True)
 
-        assert result is None
+        assert result is True
         assert fake.calls[-1] == ("set_group_onoff", 0xC028, True)
     await coord.async_stop()
 
@@ -254,7 +256,7 @@ async def test_async_set_group_lightness_sends_unacknowledged(hass) -> None:
 
         result = await coord.async_set_group_lightness(0xC028, 1.0)
 
-        assert result is None
+        assert result is True
         assert fake.calls[-1] == ("set_group_lightness", 0xC028, 1.0)
     await coord.async_stop()
 
@@ -2037,4 +2039,58 @@ async def test_a_successful_connect_forgets_the_streak(hass) -> None:
                 ir.async_get(hass).async_get_issue(DOMAIN, f"{kind}_{entry.entry_id}")
                 is None
             )
+    await coord.async_stop()
+
+
+async def test_a_group_set_with_no_link_says_it_did_not_leave(hass) -> None:
+    entry = _make_entry(hass)
+    with _patch_transport(FakeController(), address=None):
+        coord = MeshCoordinator(hass, entry)
+
+        assert await coord.async_set_group_onoff(0xC028, True) is False
+        assert await coord.async_set_group_lightness(0xC028, 0.5) is False
+    await coord.async_stop()
+
+
+async def test_a_group_set_on_a_dead_pump_says_it_did_not_leave(hass) -> None:
+    """A dead TX pump does not raise; only ``failed`` says nothing went out."""
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with _patch_transport(fake):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await _wait_for(lambda: coord._controller is fake)
+        fake.failed = True
+
+        assert await coord.async_set_group_onoff(0xC028, True) is False
+    await coord.async_stop()
+
+
+async def test_every_fresh_link_makes_the_lights_re_read(hass) -> None:
+    """A new link is when the lamp may have moved without us.
+
+    The slot was free before it (a drop, or a timed keep-alive handing it back
+    to the vendor app), so a change made from the app has to be read back. Up
+    to 0.10.1 only a return from UNAVAILABLE notified, and with a timed
+    keep-alive the app's changes were never shown. A command on the held link
+    still notifies nobody: that was the churn the old rule guarded against.
+    """
+    entry = _make_entry(hass)
+    fake = FakeController()
+    events: list[bool] = []
+    with _patch_transport(fake):
+        coord = MeshCoordinator(hass, entry)
+        coord.async_add_listener(lambda: events.append(coord.available))
+        await coord.async_start()
+        await _wait_for(lambda: coord._controller is fake)
+        assert events == [True]  # the first link
+
+        await coord.async_set_onoff(UNICAST, True)  # the held link: no event
+        assert events == [True]
+
+        async with coord._lock:
+            await coord._teardown()  # the slot is handed back
+        await coord.async_set_onoff(UNICAST, True)  # a fresh link
+
+        assert events == [True, True]  # still available, and told so
     await coord.async_stop()

@@ -6,6 +6,50 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.2] — 2026-09-24
+
+What Home Assistant shows now matches what the lamps are doing in three cases
+where it did not, all found by the second full read of the integration.
+
+### Fixed
+
+- **A room no longer shows a change that never reached a lamp.** A mesh group
+  shows the command on its members at once, before sending its single
+  message, so the whole room moves together. When there was no connection to
+  send it on, that was the only thing that happened, and the members stayed
+  on screen as switched over dark lamps. The members are now put back when the
+  message could not leave.
+- **A room that mixes dimmers with on/off-only relays switches the relays
+  too.** A brightness change was sent as a Light Lightness message alone, which
+  a relay has no way to hear: it was shown on and stayed off. Such a room now
+  also sends Generic OnOff, first: the other way round, a dimmer already lit
+  by the brightness would jump to its default level when the on/off message
+  arrived. A room of dimmers only still takes a single message.
+- **A change made from the vendor app is now read back after every
+  reconnection, not only after an outage.** With a timed keep-alive, the mode
+  meant for sharing the lamps with the app, Home Assistant hands the lamp back
+  after the idle time; a lamp changed from the app in between kept its old
+  state here until someone touched it from Home Assistant. Every lamp now
+  re-reads itself whenever a new connection is made, which is exactly when the
+  app may have been using the lamp.
+
+  This reverses a rule from 2026-07-26, when the integration connected for
+  every single command and a read per connection meant a read per click. The
+  connection is held now, so a new one is rare: after a drop, or after a timed
+  keep-alive handed the lamp back. A command sent over the held connection
+  still reads nothing back. The cost, with a timed keep-alive, is one short
+  read per lamp at the first command after the idle time.
+
+### Changed
+
+- The keep-alive option now says what a timed keep-alive costs in return: to
+  keep the lamp's single slot free, Home Assistant does not probe it in the
+  background, so a lamp switched off at the wall shows as available until the
+  next command fails.
+
+Not run on a real mesh: the two room fixes, since the maintainer's network has
+no room or group. Covered by tests that fail on 0.10.1.
+
 ## [0.10.1] — 2026-09-23
 
 Two fixes to what 0.10.0 introduced, both found by a second read of the whole

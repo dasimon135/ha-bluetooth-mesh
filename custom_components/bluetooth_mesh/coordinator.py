@@ -732,17 +732,7 @@ class MeshCoordinator:
         # fires this on OUR disconnects too; the handler tells them apart by
         # identity, since _teardown clears self._client before disconnecting.
         client.set_disconnected_callback(self._on_client_disconnected)
-        if address != self._proxy_address:
-            self._proxy_address = address
-            # `_set_available` below notifies on a transition, which already
-            # covers the first connect. Only an address that changes while we
-            # ALREADY believe we are available needs its own notification --
-            # without it the published address would keep naming a node we are
-            # no longer talking to. Kept conditional because a notification is
-            # not free: it makes every lamp re-read itself over the single
-            # proxy slot, which is what `_set_available` is careful to avoid.
-            if self._available:
-                self._notify_listeners()
+        self._proxy_address = address
         self._set_available()
         return controller
 
@@ -984,23 +974,35 @@ class MeshCoordinator:
             lambda c: c.set_lightness(unicast, level_0_1, timeout=STATUS_TIMEOUT)
         )
 
-    async def async_set_group_onoff(self, group_address: int, on: bool) -> None:
+    async def async_set_group_onoff(self, group_address: int, on: bool) -> bool:
         """Set Generic OnOff on a mesh group address in one unacknowledged Set.
 
         Unlike :meth:`async_set_onoff`, there is no Status to settle on — see
-        :meth:`btmesh.controller.MeshController.set_group_onoff` — so this
-        always returns ``None``. Callers that need the members' displayed
-        state to reflect the change update those entities themselves.
+        :meth:`btmesh.controller.MeshController.set_group_onoff`. What this does
+        report is whether the Set left at all: ``False`` when there was no link
+        to send it on, so the group can put its members back instead of showing
+        a change that never reached a lamp.
         """
-        await self._run_connected(lambda c: c.set_group_onoff(group_address, on))
+
+        async def send(controller) -> bool:
+            await controller.set_group_onoff(group_address, on)
+            return not controller.failed
+
+        return bool(await self._run_connected(send))
 
     async def async_set_group_lightness(
         self, group_address: int, level_0_1: float
-    ) -> None:
-        """Set Light Lightness (0..1) on a mesh group address, unacknowledged."""
-        await self._run_connected(
-            lambda c: c.set_group_lightness(group_address, level_0_1)
-        )
+    ) -> bool:
+        """Set Light Lightness (0..1) on a mesh group address, unacknowledged.
+
+        Returns whether the Set left, as :meth:`async_set_group_onoff` does.
+        """
+
+        async def send(controller) -> bool:
+            await controller.set_group_lightness(group_address, level_0_1)
+            return not controller.failed
+
+        return bool(await self._run_connected(send))
 
     async def async_set_ctl(
         self, unicast: int, level_0_1: float, kelvin: int
@@ -1152,13 +1154,20 @@ class MeshCoordinator:
     # --------------------------------------------------------------- availability
 
     def _set_available(self) -> None:
-        """Mark reachable: clear the fail count and any active repair issue.
+        """Mark reachable after a FRESH link: clear the misses, tell the lights.
 
-        Only an actual transition notifies listeners — this runs on every
-        successful connect, and re-reading every lamp each time would churn the
-        single proxy slot for nothing.
+        Called once per new link, never on a command that reuses the held one.
+        Every new link notifies, not only a return from unavailability, and
+        every light then re-reads itself: a new link is exactly the moment the
+        lamp's state may have moved without us. The slot was free before it,
+        either because the link dropped or because a timed keep-alive handed it
+        back, and the vendor app may have used it. Up to 0.10.1 only a return
+        from *unavailable* re-read, so with a timed keep-alive, the mode meant
+        for sharing the lamp with the app, a change made from the app was never
+        shown. That rule dates from 2026-07-26, when the integration connected
+        for every command and a re-read per connect meant a re-read per click;
+        the link is held now, so a fresh one is rare and the read is the point.
         """
-        was_available = self._available
         misses = self._fail_count
         self._available = True
         self._fail_count = 0
@@ -1172,8 +1181,7 @@ class MeshCoordinator:
         # not logged on the way down either.
         if misses >= UNREACHABLE_THRESHOLD:
             logger.info("mesh proxy reachable again after %d misses", misses)
-        if not was_available:
-            self._notify_listeners()
+        self._notify_listeners()
 
     def _set_unavailable(self) -> None:
         """Count a miss; flip to unavailable only once misses are sustained.
