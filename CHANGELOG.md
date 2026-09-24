@@ -6,6 +6,44 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.3] — 2026-09-24
+
+Five robustness fixes from the second full read of the integration. None of
+them changes what a working setup does day to day.
+
+### Fixed
+
+- **A new install no longer pre-ticks every Häfele lamp as inverted.** The
+  per-lamp colour-temperature option is seeded once from the old vendor rule
+  for entries that predate it, so that an upgrade flips nothing. A brand new
+  entry looked exactly like one of those, so every Häfele colour-temperature
+  lamp of a fresh install arrived mirrored, on the very guess issue #7 proved
+  wrong. The import now creates the entry with no lamp ticked. Existing
+  entries are untouched.
+- **The options form can be saved again after a lamp leaves the export.** A
+  lamp ticked as inverted and then removed from a re-imported `.connect`
+  file stayed selected in a list that no longer showed it, and Home Assistant
+  refused every save of the form, keep-alive and source address included. The
+  form now only preselects lamps it lists, and keeps the hidden address on
+  save rather than dropping a choice nobody could see.
+- **The "proxy stuck" repair gives way when the lamp disappears.** It names a
+  proxy that hears the lamp and refuses it. Once nothing hears the lamp any
+  more (unplugged, out of range), that no longer holds, but the repair stayed
+  on screen and kept sending people to restart a proxy. It is now replaced by
+  the ordinary "unreachable" repair, with its list of what Home Assistant
+  hears.
+- **A proxy that drops off Wi-Fi is no longer taken for one that restarted.**
+  The wait imposed by a stuck proxy's refusals is lifted when that proxy comes
+  back, which Home Assistant only shows as a new registration. A proxy that had
+  merely vanished from Home Assistant counted as well: the wait and the record
+  of its refusals were wiped the moment it disappeared, before anyone knew
+  whether it would come back healthy. They now last until it registers again.
+- **Moving the sequence counter to its new file can no longer lose it.** The
+  move made in 0.10.0 deleted the old file before writing the new one; a
+  failed write in between restarted the counter at zero, and the lamps then
+  drop every command as a replay until it climbs back. The old file is now
+  deleted only once the new one is written.
+
 ## [0.10.2] — 2026-09-24
 
 What Home Assistant shows now matches what the lamps are doing in three cases

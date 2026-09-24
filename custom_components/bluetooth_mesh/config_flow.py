@@ -109,6 +109,12 @@ class BluetoothMeshConfigFlow(ConfigFlow, domain=DOMAIN):
                 return self.async_create_entry(
                     title=network.name or "Bluetooth Mesh",
                     data={CONF_CONNECT_JSON: text},
+                    # Present and empty: no lamp is mirrored until the user
+                    # ticks it. Left absent, the setup took the entry for one
+                    # that predates the option and seeded the pre-0.5.1
+                    # vendor rule, pre-ticking every Häfele CTL lamp on a
+                    # fresh install, the very guess issue #7 proved wrong.
+                    options={CONF_INVERTED_CTL: []},
                 )
 
         return self.async_show_form(
@@ -182,9 +188,19 @@ class BluetoothMeshOptionsFlow(OptionsFlowWithReload):
             # read as "empty" but as "never configured" — so the next setup
             # would seed the vendor default back over the user's choice.
             if CONF_INVERTED_CTL in user_input:
-                data[CONF_INVERTED_CTL] = [
-                    int(value, 16) for value in user_input[CONF_INVERTED_CTL]
-                ]
+                listed = {node.unicast for node in self._ctl_nodes()}
+                data[CONF_INVERTED_CTL] = sorted(
+                    {int(value, 16) for value in user_input[CONF_INVERTED_CTL]}
+                    # An address the form could not show was not unticked:
+                    # keep it rather than drop a choice nobody saw.
+                    | {
+                        address
+                        for address in self.config_entry.options.get(
+                            CONF_INVERTED_CTL, []
+                        )
+                        if address not in listed
+                    }
+                )
             elif CONF_INVERTED_CTL in self.config_entry.options:
                 data[CONF_INVERTED_CTL] = self.config_entry.options[
                     CONF_INVERTED_CTL
@@ -215,9 +231,16 @@ class BluetoothMeshOptionsFlow(OptionsFlowWithReload):
             }
         )
         if ctl_nodes := self._ctl_nodes():
-            current_inverted = self.config_entry.options.get(
-                CONF_INVERTED_CTL, []
-            )
+            listed = {node.unicast for node in ctl_nodes}
+            # Only what the list can show. A stored address whose lamp has
+            # left the export (re-imported without it) made the default hold
+            # a value the selector does not offer, and the form then refused
+            # every submit, keep-alive and source address included.
+            current_inverted = [
+                address
+                for address in self.config_entry.options.get(CONF_INVERTED_CTL, [])
+                if address in listed
+            ]
             schema = schema.extend(
                 {
                     vol.Optional(

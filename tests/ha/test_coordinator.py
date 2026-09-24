@@ -2094,3 +2094,81 @@ async def test_every_fresh_link_makes_the_lights_re_read(hass) -> None:
 
         assert events == [True, True]  # still available, and told so
     await coord.async_stop()
+
+
+async def test_a_node_that_disappears_takes_the_stuck_repair_with_it(hass) -> None:
+    """A wedged proxy HEARS the node; once nothing does, the accusation is over.
+
+    Kept, the streak held proxy_stuck on screen for a lamp that had simply been
+    unplugged, and the outage repair, with the advert diagnostic, never came.
+    """
+    entry = _make_entry(hass)
+    with (
+        _patch_transport(FakeController(), ctor_side_effect=TimeoutError()),
+        _paths([_path()]),
+        _fake_clock(),
+    ):
+        coord = MeshCoordinator(hass, entry)
+        await _refuse(coord, coordinator_mod.STUCK_PROXY_FAILURES)
+        assert coord._proxy_is_stuck
+
+        with patch.object(coordinator_mod, "find_proxy_address", return_value=None):
+            assert await coord.async_set_onoff(UNICAST, True) is None
+
+        assert not coord._proxy_is_stuck
+        registry = ir.async_get(hass)
+        assert registry.async_get_issue(DOMAIN, f"proxy_stuck_{entry.entry_id}") is None
+        assert (
+            registry.async_get_issue(DOMAIN, f"proxy_unreachable_{entry.entry_id}")
+            is not None
+        )
+    await coord.async_stop()
+
+
+async def test_a_proxy_that_vanished_has_not_restarted(hass) -> None:
+    """No scanner under the source is a proxy that is gone, not one that is back.
+
+    Read as a restart, a proxy dropping off Wi-Fi wiped the wait and the
+    record of its refusals at once, before anything said it would come back
+    healthy.
+    """
+    entry = _make_entry(hass)
+    path = _path()
+    with (
+        _patch_transport(FakeController(), ctor_side_effect=TimeoutError()),
+        _paths([path]) as scanners,
+        _fake_clock(),
+    ):
+        coord = MeshCoordinator(hass, entry)
+        await _refuse(coord, coordinator_mod.STUCK_PROXY_FAILURES)
+        backoff = coord._backoff
+        assert backoff > 0
+
+        scanners[path.source] = None  # its API link to Home Assistant dropped
+        assert coord._proxy_restarted() is False
+        assert coord._proxy_is_stuck
+        assert coord._backoff == backoff
+
+        scanners[path.source] = object()  # and it registered again
+        assert coord._proxy_restarted() is True
+        assert coord._backoff == 0.0
+    await coord.async_stop()
+
+
+async def test_a_failed_move_keeps_the_legacy_cursor(hass) -> None:
+    """The old file goes only once the new one is written.
+
+    The other way round, a failed write lost the cursor, and a cursor back at
+    0 is every command dropped as a replay until it climbs past the old value.
+    """
+    entry = _make_entry(hass)
+    legacy = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.seq")
+    await legacy.async_save({"seq": 700, "iv_index": 3})
+    with _patch_transport(FakeController(), address=None):
+        coord = MeshCoordinator(hass, entry)
+        with patch.object(coord._store, "async_save", side_effect=OSError("full")):
+            await coord.async_start()
+
+        assert coord.seq == 700 + SEQ_SAFETY_MARGIN
+        assert (await legacy.async_load())["seq"] == 700
+    await coord.async_stop()
