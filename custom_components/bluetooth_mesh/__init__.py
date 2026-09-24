@@ -79,6 +79,12 @@ def _seed_inverted_ctl(
     CID, which is the honest default now that the CID is known not to predict
     the quirk; seeding newly-seen nodes instead would need a second stored set
     (the nodes already seeded) to avoid the very bug described above.
+
+    Only an entry that predates the option reaches the seed: since 0.10.3 the
+    import flow creates the entry with the option present and empty. Until
+    then a FRESH install looked exactly like an old one here, and had every
+    Häfele colour-temperature lamp pre-ticked on the strength of the rule
+    issue #7 disproved.
     """
     if CONF_INVERTED_CTL in entry.options:
         return

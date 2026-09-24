@@ -648,6 +648,14 @@ class MeshCoordinator:
         )
         if address is None:
             seen = discovered_proxies(self.hass)
+            # Nothing hears the node any more, so the streak of refusals no
+            # longer describes anything: a wedged proxy is one that HEARS the
+            # node and refuses it. Kept, it held the proxy_stuck repair on
+            # screen for a lamp that had simply been unplugged, still sending
+            # someone to restart a proxy, and the outage repair (with the
+            # advert diagnostic that tells "out of range" from "wrong keys")
+            # never replaced it.
+            self._forget_refusals()
             self._set_unavailable()
             # A miss here is routine while the lamp is simply unplugged or out
             # of range, and the probe carries on for as long as that lasts: on
@@ -1069,7 +1077,17 @@ class MeshCoordinator:
         if not data:
             data = await self._legacy_store.async_load()
             if data:
-                await self._legacy_store.async_remove()
+                # Written to its new home BEFORE the old one goes. The other
+                # way round, a crash or a failed write between the two lost
+                # the cursor, and a cursor restarted at 0 is every command
+                # dropped as a replay, in silence, until it climbs back. A
+                # write that fails leaves the old file for the next start.
+                try:
+                    await self._store.async_save(data)
+                except Exception:  # noqa: BLE001
+                    logger.debug("moving the SEQ cursor failed", exc_info=True)
+                else:
+                    await self._legacy_store.async_remove()
         if not data:
             return 0, self._network.iv_index
         return (
@@ -1259,7 +1277,12 @@ class MeshCoordinator:
         if self._refused_scanner is None or self._refused_path is None:
             return False
         current = scanner_by_source(self.hass, self._refused_path.source)
-        if current is self._refused_scanner:
+        if current is None or current is self._refused_scanner:
+            # None is a proxy that is GONE, not one that came back: its API
+            # link to Home Assistant dropped, and whether it rebooted is only
+            # known when it registers again. Counted as a restart, a proxy
+            # dropping off Wi-Fi wiped the wait and the record of its refusals
+            # at once, before anything said it would come back healthy.
             return False
         logger.info(
             "mesh proxy %s came back; dropping the wait its refusals imposed",

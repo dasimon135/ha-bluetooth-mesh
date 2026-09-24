@@ -495,3 +495,81 @@ async def test_options_flow_keeps_inverted_lamps_when_the_field_is_absent(
 
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
+
+
+async def test_a_fresh_import_mirrors_no_lamp(hass) -> None:
+    """A new entry says "no lamp inverted" in so many words.
+
+    Left absent, the option read as an entry that predates it, and the setup
+    seeded the pre-0.5.1 vendor rule: every Häfele CTL lamp of a brand new
+    install came pre-ticked, on the guess issue #7 proved wrong.
+    """
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": "user"}
+    )
+    with (
+        patch.object(coordinator_mod, "find_proxy_address", return_value=None),
+        patch.object(coordinator_mod, "discovered_proxies", return_value=[]),
+        patch.object(
+            coordinator_mod,
+            "async_register_proxy_callback",
+            return_value=lambda: None,
+        ),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_CONNECT_JSON: _connect_text()}
+        )
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        await hass.async_block_till_done()
+
+        entry = result["result"]
+        # After the setup, not only in the flow: the seed must have left it be.
+        assert entry.options[CONF_INVERTED_CTL] == []
+
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_options_form_survives_a_lamp_that_left_the_export(hass) -> None:
+    """A stored address the list cannot show must not lock the form.
+
+    Offered as a default, it was a value the selector does not list, and every
+    submit was refused, keep-alive included. It is kept on save all the same:
+    nobody unticked it, they could not see it.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CONNECT_JSON: _connect_text()},
+        options={CONF_INVERTED_CTL: [0x000C, 0x0042]},  # 0x0042 is not listed
+        unique_id="0F0E0D0C-0B0A-0908-0706-050403020100",
+    )
+    entry.add_to_hass(hass)
+
+    with (
+        patch.object(coordinator_mod, "find_proxy_address", return_value=None),
+        patch.object(coordinator_mod, "discovered_proxies", return_value=[]),
+        patch.object(
+            coordinator_mod,
+            "async_register_proxy_callback",
+            return_value=lambda: None,
+        ),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        field = next(
+            key
+            for key in result["data_schema"].schema
+            if str(key) == CONF_INVERTED_CTL
+        )
+        assert field.default() == ["000c"]
+
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {CONF_KEEPALIVE: 30, CONF_SRC_ADDR: 0, CONF_INVERTED_CTL: []},
+        )
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        assert entry.options[CONF_KEEPALIVE] == 30
+        assert entry.options[CONF_INVERTED_CTL] == [0x0042]
+
+        await hass.async_block_till_done()
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
