@@ -174,6 +174,15 @@ connected.
 
 ## Installation
 
+**From HACS (recommended).** This button opens the repository in your own Home
+Assistant. HACS asks whether to add it as a custom repository: accept, then
+download **Bluetooth Mesh** and restart Home Assistant. Then
+carry on from step 2 below.
+
+[![Open the Bluetooth Mesh repository inside your Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=dasimon135&repository=ha-bluetooth-mesh&category=integration)
+
+If the button does not reach your instance, step 1 adds it by hand:
+
 1. **Add the repository to HACS** as a custom repository
    (HACS → Integrations → ⋯ → Custom repositories), category **Integration**,
    then install *Bluetooth Mesh* and restart Home Assistant.
