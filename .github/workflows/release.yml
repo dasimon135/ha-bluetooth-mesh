@@ -1,0 +1,37 @@
+name: Release
+
+# Attaches bluetooth_mesh.zip to every published release. hacs.json sets zip_release,
+# so this archive is what HACS downloads, and GitHub counts each download:
+# that count is the only install signal a custom integration gets.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to attach the archive to
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  zip:
+    name: Attach bluetooth_mesh.zip
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ github.event.release.tag_name || inputs.tag }}
+      - name: Build the archive
+        # HACS extracts it straight into custom_components/bluetooth_mesh/, so the
+        # files sit at the root of the zip, not under the folder.
+        working-directory: custom_components/bluetooth_mesh
+        run: zip -r -X "$GITHUB_WORKSPACE/bluetooth_mesh.zip" . -x '*__pycache__*' '*.pyc'
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" bluetooth_mesh.zip --clobber
