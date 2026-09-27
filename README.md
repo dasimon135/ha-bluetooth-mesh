@@ -296,7 +296,8 @@ To get a useful answer on the first exchange, include:
 
 ### Staying informed
 
-New versions are announced here and nowhere else. To hear about one:
+New versions are announced here first. A short note may follow in the forum
+thread, but this page is the only complete record. To hear about one:
 
 - **HACS already offers you the update**, release notes included — nothing to do;
 - subscribe to `https://github.com/dasimon135/ha-bluetooth-mesh/releases.atom` in
