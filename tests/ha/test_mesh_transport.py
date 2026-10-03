@@ -32,6 +32,7 @@ from custom_components.bluetooth_mesh.mesh_transport import (
     async_connect_bearer,
     async_register_proxy_callback,
     find_proxy_address,
+    find_proxy_addresses,
 )
 
 # Two distinct 16-byte NetKeys → two distinct 8-byte Network IDs.
@@ -373,3 +374,50 @@ async def test_async_connect_bearer_forwards_the_attempt_budget(hass) -> None:
         assert est.await_args.kwargs["max_attempts"] == 4
         await async_connect_bearer(hass, "AA:BB:CC:DD:EE:FF", max_attempts=1)
         assert est.await_args.kwargs["max_attempts"] == 1
+
+
+def test_find_proxy_addresses_returns_every_match_in_snapshot_order(hass) -> None:
+    """Every node of the network, for holding one link per island."""
+    first = _fake_info("AA:BB:CC:DD:EE:01", {PROXY_SERVICE: _network_id_advert(NET_KEY)})
+    foreign = _fake_info(
+        "11:22:33:44:55:66", {PROXY_SERVICE: _network_id_advert(FOREIGN_NET_KEY)}
+    )
+    second = _fake_info("AA:BB:CC:DD:EE:02", {PROXY_SERVICE: _network_id_advert(NET_KEY)})
+    with patch.object(
+        mesh_transport.bluetooth,
+        "async_discovered_service_info",
+        return_value=[first, foreign, second],
+    ):
+        assert find_proxy_addresses(hass, NET_KEY) == [
+            "AA:BB:CC:DD:EE:01",
+            "AA:BB:CC:DD:EE:02",
+        ]
+
+
+def test_find_proxy_addresses_leaves_out_a_held_node(hass) -> None:
+    """A held node's last advert lingers; a second connect to it is refused."""
+    held = _fake_info("AA:BB:CC:DD:EE:01", {PROXY_SERVICE: _network_id_advert(NET_KEY)})
+    other = _fake_info("AA:BB:CC:DD:EE:02", {PROXY_SERVICE: _network_id_advert(NET_KEY)})
+    with patch.object(
+        mesh_transport.bluetooth,
+        "async_discovered_service_info",
+        return_value=[held, other],
+    ):
+        assert find_proxy_addresses(
+            hass, NET_KEY, exclude={"AA:BB:CC:DD:EE:01"}
+        ) == ["AA:BB:CC:DD:EE:02"]
+
+
+def test_find_proxy_addresses_applies_the_stale_advert_rule(hass) -> None:
+    fresh = _fake_info("AA:BB:CC:DD:EE:01", {PROXY_SERVICE: _network_id_advert(NET_KEY)})
+    stale = _fake_info(
+        "AA:BB:CC:DD:EE:02",
+        {PROXY_SERVICE: _network_id_advert(NET_KEY)},
+        time=monotonic() - PROXY_ADVERT_MAX_AGE - 5,
+    )
+    with patch.object(
+        mesh_transport.bluetooth,
+        "async_discovered_service_info",
+        return_value=[fresh, stale],
+    ):
+        assert find_proxy_addresses(hass, NET_KEY) == ["AA:BB:CC:DD:EE:01"]

@@ -39,6 +39,7 @@ class FakeCoordinator:
         self.seq = 0x1234
         self.keepalive_seconds = 0
         self.connected = True
+        self.proxy_addresses = ["AA:BB:CC:DD:EE:01"]
         self.beacon = None
         self.src_addr = 0x7FFF
         self.app_key_index = 0
@@ -102,6 +103,7 @@ async def test_dump_carries_what_support_actually_needs(hass) -> None:
     assert dump["state"]["available"] is True
     assert dump["state"]["connected"] is True
     assert dump["state"]["keepalive_seconds"] == 0
+    assert dump["state"]["proxy_links"] == ["AA:BB:CC:DD:EE:01"]
     assert "proxies_seen" in dump
 
 

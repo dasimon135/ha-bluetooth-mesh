@@ -27,6 +27,7 @@ from custom_components.bluetooth_mesh import config_flow
 from custom_components.bluetooth_mesh import coordinator as coordinator_mod
 from custom_components.bluetooth_mesh.btmesh.network_model import Network
 from custom_components.bluetooth_mesh.const import (
+    CONF_ALL_PROXIES,
     CONF_CONNECT_JSON,
     CONF_INVERTED_CTL,
     CONF_KEEPALIVE,
@@ -571,5 +572,52 @@ async def test_options_form_survives_a_lamp_that_left_the_export(hass) -> None:
         assert entry.options[CONF_INVERTED_CTL] == [0x0042]
 
         await hass.async_block_till_done()
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+@pytest.mark.parametrize(("ticked", "stored"), [(None, False), (True, True)])
+async def test_options_flow_connect_through_every_proxy_is_opt_in(
+    hass, ticked, stored
+) -> None:
+    """Off unless ticked: each extra link locks the vendor app out of a node.
+
+    An install that predates the option, or a user who never touches it, keeps
+    exactly one link -- the form offers it unticked and saving the form
+    without touching it stores it off.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_CONNECT_JSON: _connect_text()},
+        unique_id="0F0E0D0C-0B0A-0908-0706-050403020100",
+    )
+    entry.add_to_hass(hass)
+
+    with (
+        patch.object(coordinator_mod, "find_proxy_address", return_value=None),
+        patch.object(coordinator_mod, "discovered_proxies", return_value=[]),
+        patch.object(
+            coordinator_mod,
+            "async_register_proxy_callback",
+            return_value=lambda: None,
+        ),
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        field = next(
+            key for key in result["data_schema"].schema if key == CONF_ALL_PROXIES
+        )
+        assert field.default() is False
+
+        user_input = {CONF_KEEPALIVE: 0}
+        if ticked is not None:
+            user_input[CONF_ALL_PROXIES] = ticked
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], user_input
+        )
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        assert entry.options[CONF_ALL_PROXIES] is stored
+
+        await hass.async_block_till_done()
+        assert entry.runtime_data._all_proxies is stored
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()

@@ -165,6 +165,10 @@ async def async_get_config_entry_diagnostics(
         "state": {
             "available": coordinator.available,
             "connected": coordinator.connected,
+            # Every proxy node a link is held to, main one first. More than one
+            # only with "connect through every reachable proxy node"; a node
+            # missing here is an island nothing we send can reach.
+            "proxy_links": coordinator.proxy_addresses,
             "seq": coordinator.seq,
             # The unicast we transmit FROM. Sharing it with a node of the mesh
             # makes every message we send look like a replay to that node's
