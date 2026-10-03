@@ -2200,6 +2200,7 @@ def _patch_islands(controller, extra_addresses, *, failing=()):
             raise MeshTransportError(f"refused: {address}")
         clients[address] = _client()
         bearer = MagicMock(name=f"bearer-{address}")
+        bearer.start = AsyncMock()
         bearer.max_frame = 66
         bearer.failure = None
         return clients[address], bearer
@@ -2209,6 +2210,7 @@ def _patch_islands(controller, extra_addresses, *, failing=()):
         patch.object(
             coordinator_mod, "find_proxy_addresses", return_value=list(extra_addresses)
         ) as find_all,
+        patch.object(FakeController, "refresh_proxy_filter", create=True),
         patch.object(coordinator_mod, "async_connect_bearer", new=AsyncMock(side_effect=connect)),
         patch.object(coordinator_mod, "MeshController", return_value=controller) as ctor,
         patch.object(coordinator_mod, "discovered_proxies", return_value=[]),
@@ -2282,7 +2284,10 @@ async def test_an_island_that_refuses_is_left_out_not_fatal(hass) -> None:
         assert await coord.async_set_onoff(UNICAST, True) is True
 
         assert list(clients) == [PROXY_ADDR]
-        assert not isinstance(ctor.call_args.args[1], FanoutBearer)
+        # Still a fan-out, of one: the refusing island can join it later.
+        bearer = ctor.call_args.args[1]
+        assert isinstance(bearer, FanoutBearer)
+        assert len(bearer.bearers) == 1
         assert coord.available is True
         assert coord.proxy_addresses == [PROXY_ADDR]
     await coord.async_stop()
@@ -2309,4 +2314,80 @@ async def test_a_dropped_extra_link_reconnects_every_island(hass) -> None:
         )
         await _wait_for(lambda: coord._controller is not None)
         assert coord.proxy_addresses == [PROXY_ADDR, OTHER_PROXY_ADDR]
+    await coord.async_stop()
+
+
+async def _started_fanout(coord):
+    """The real FanoutBearer the coordinator built, started as the controller would."""
+    await coord._fanout.start(lambda *_: None)
+    return coord._fanout
+
+
+async def test_a_node_heard_late_joins_without_touching_the_held_link(hass) -> None:
+    """After a restart a weak node can take a minute to be heard again.
+
+    With keep-alive 0 nothing reconnects later, so before this the island
+    stayed unreachable until the entry was reloaded by hand (2026-10-03).
+    """
+    entry = _all_proxies_entry(hass)
+    fake = FakeController()
+    with _patch_islands(fake, []) as (clients, _, _):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await coord.async_set_onoff(UNICAST, True)
+        fanout = await _started_fanout(coord)
+        assert coord.proxy_addresses == [PROXY_ADDR]
+
+        coord._on_proxy_seen(OTHER_PROXY_ADDR)
+        await _wait_for(lambda: OTHER_PROXY_ADDR in coord.proxy_addresses)
+
+        assert coord.proxy_addresses == [PROXY_ADDR, OTHER_PROXY_ADDR]
+        assert len(fanout.bearers) == 2
+        assert coord._controller is fake  # the held link was not rebuilt
+        clients[PROXY_ADDR].disconnect.assert_not_awaited()
+        fake.refresh_proxy_filter.assert_called_once()  # new link's filter
+    await coord.async_stop()
+    clients[OTHER_PROXY_ADDR].disconnect.assert_awaited()
+
+
+async def test_a_refusing_late_node_is_not_dialled_on_every_advert(hass) -> None:
+    """Adverts arrive several times a second; one try per LATE_LINK_RETRY."""
+    entry = _all_proxies_entry(hass)
+    fake = FakeController()
+    with _patch_islands(fake, [], failing={OTHER_PROXY_ADDR}):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await coord.async_set_onoff(UNICAST, True)
+        await _started_fanout(coord)
+        connects = coordinator_mod.async_connect_bearer.await_count
+
+        coord._on_proxy_seen(OTHER_PROXY_ADDR)
+        await _wait_for(
+            lambda: coordinator_mod.async_connect_bearer.await_count > connects
+        )
+        await _wait_for(lambda: not coord._lock.locked())
+        for _ in range(5):
+            coord._on_proxy_seen(OTHER_PROXY_ADDR)
+        await asyncio.sleep(0.05)
+
+        assert coordinator_mod.async_connect_bearer.await_count == connects + 1
+        assert coord.proxy_addresses == [PROXY_ADDR]
+        assert coord._controller is fake
+    await coord.async_stop()
+
+
+async def test_late_joining_stays_off_without_the_option(hass) -> None:
+    entry = _make_entry(hass)
+    fake = FakeController()
+    with _patch_islands(fake, []) as (clients, _, _):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await coord.async_set_onoff(UNICAST, True)
+        connects = coordinator_mod.async_connect_bearer.await_count
+
+        coord._on_proxy_seen(OTHER_PROXY_ADDR)
+        await asyncio.sleep(0.05)
+
+        assert coordinator_mod.async_connect_bearer.await_count == connects
+        assert list(clients) == [PROXY_ADDR]
     await coord.async_stop()

@@ -256,6 +256,17 @@ class MeshController:
         except Exception as exc:  # noqa: BLE001 - never fail the connection
             logger.warning("could not configure the proxy filter: %s", exc)
 
+    def refresh_proxy_filter(self) -> None:
+        """Claim the proxy filter again, on every link the bearer holds now.
+
+        For a link added after :meth:`start` (``FanoutBearer.add``): it starts
+        with an empty accept list, so nothing comes back through it until this
+        runs. Re-sending to the links already configured is harmless: setting
+        the type clears the list and the next message refills it, both queued
+        on the same ordered pump.
+        """
+        self._configure_filter()
+
     def _send_proxy_config(self, message: bytes) -> None:
         """Queue one proxy configuration message on the shared TX pump."""
         self._pump.put(

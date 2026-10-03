@@ -161,3 +161,52 @@ async def test_controller_reports_failed_only_when_every_link_failed():
         assert controller.failed
     finally:
         await controller.stop()
+
+
+async def test_add_starts_the_link_and_sends_through_it_too():
+    """A node heard after the links went up joins without disturbing them."""
+    a, late = FakeBearer(), FakeBearer()
+    received = []
+    fanout = FanoutBearer([a])
+    await fanout.start(lambda t, p: received.append(p))
+
+    await fanout.add(late)
+    await fanout.send(MSG_TYPE_NETWORK_PDU, b"\x01")
+    late.on_message(MSG_TYPE_NETWORK_PDU, b"from-late")
+
+    assert a.sent == late.sent == [(MSG_TYPE_NETWORK_PDU, b"\x01")]
+    assert received == [b"from-late"]
+    assert fanout.bearers == [a, late]
+
+
+async def test_add_of_a_link_that_cannot_start_raises_and_adds_nothing():
+    a = FakeBearer()
+    fanout = FanoutBearer([a])
+    await fanout.start(lambda *_: None)
+
+    with pytest.raises(BearerError):
+        await fanout.add(FakeBearer(fail_start=True))
+    assert fanout.bearers == [a]
+
+
+async def test_add_before_start_is_refused():
+    with pytest.raises(BearerError):
+        await FanoutBearer([FakeBearer()]).add(FakeBearer())
+
+
+async def test_refresh_proxy_filter_claims_the_filter_on_every_link():
+    """A late link starts with an empty accept list; it must be claimed too."""
+    a, late = FakeBearer(), FakeBearer()
+    fanout = FanoutBearer([a])
+    controller = MeshController(Network.from_connect_file(FIXTURE), fanout)
+    await controller.start()
+    try:
+        await controller._pump.flush()
+        await fanout.add(late)
+        controller.refresh_proxy_filter()
+        await controller._pump.flush()
+        # Two proxy-config PDUs per claim: set the type, add our address.
+        assert len(late.sent) == 2
+        assert len(a.sent) == 4
+    finally:
+        await controller.stop()

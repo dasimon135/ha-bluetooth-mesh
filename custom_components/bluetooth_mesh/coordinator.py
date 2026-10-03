@@ -180,6 +180,12 @@ STATUS_TIMEOUT = 1.5
 # silent node is itself the answer we are after.
 PROBE_TIMEOUT = 3.0
 
+# With CONF_ALL_PROXIES: the least time between two attempts to join the same
+# not-yet-linked node when it advertises. Adverts arrive several times a
+# second; a node that refuses would otherwise be dialled on every one of them,
+# which is the 2026-09-10 storm aimed at a single node.
+LATE_LINK_RETRY = 60.0
+
 # Default seconds to HOLD the proxy connection open after the last command
 # before dropping it to free the lamp's single proxy slot. Opening a proxy
 # connection over an ESPHome BLE proxy costs several seconds, so holding it makes
@@ -291,6 +297,11 @@ class MeshCoordinator:
         )
         # Every proxy node a link is held to, main one first (diagnostics).
         self._proxy_addresses: list[str] = []
+        # The fan-out the controller sends through, so a node heard only after
+        # the links went up can join it (see _maybe_join_late).
+        self._fanout: FanoutBearer | None = None
+        # Monotonic instant of the last late-join attempt per node address.
+        self._late_link_attempts: dict[str, float] = {}
         self._idle_unsub: CALLBACK_TYPE | None = None
         self._idle_timeout: int = int(
             entry.options.get(CONF_KEEPALIVE, DEFAULT_KEEPALIVE)
@@ -591,6 +602,8 @@ class MeshCoordinator:
         the dominant path of the storm, the one that made the fixed probe
         interval irrelevant.
         """
+        if self._maybe_join_late(address):
+            return
         if self._stopped or (self._available and not self._wants_link()):
             return
         if self._lock.locked():
@@ -602,6 +615,60 @@ class MeshCoordinator:
         self.hass.async_create_background_task(
             self._async_probe(), f"{DOMAIN} discovery probe"
         )
+
+    def _maybe_join_late(self, address: str) -> bool:
+        """With CONF_ALL_PROXIES, link a node that advertises after we connected.
+
+        Returns True when the advert is ours to handle -- links are up and the
+        fan-out exists -- whether or not a join was started, so the recovery
+        path below does not also act on it. A node already linked, a join while
+        the lock is busy, and a node tried within LATE_LINK_RETRY are ignored.
+        """
+        if (
+            self._stopped
+            or not self._all_proxies
+            or self._fanout is None
+            or self._controller is None
+        ):
+            return False
+        if address in self._proxy_addresses or self._lock.locked():
+            return True
+        last = self._late_link_attempts.get(address)
+        now = monotonic()
+        if last is not None and now - last < LATE_LINK_RETRY:
+            return True
+        self._late_link_attempts[address] = now
+        self.hass.async_create_background_task(
+            self._async_join_late(address), f"{DOMAIN} join {address}"
+        )
+        return True
+
+    async def _async_join_late(self, address: str) -> None:
+        """Open a link to ``address`` and add it to the running fan-out."""
+        async with self._lock:
+            if (
+                self._stopped
+                or self._fanout is None
+                or self._controller is None
+                or address in self._proxy_addresses
+            ):
+                return
+            client = None
+            try:
+                async with asyncio.timeout(CONNECT_TIMEOUT):
+                    client, bearer = await async_connect_bearer(
+                        self.hass, address, max_attempts=1
+                    )
+                await self._fanout.add(bearer)
+            except Exception as exc:  # noqa: BLE001 - leave the others alone
+                await self._disconnect(client)
+                logger.debug("late mesh proxy link to %s failed: %s", address, exc)
+                return
+            self._extra_clients.append(client)
+            client.set_disconnected_callback(self._on_client_disconnected)
+            self._proxy_addresses.append(address)
+            self._controller.refresh_proxy_filter()
+            logger.info("mesh proxy %s joined the held links", address)
 
     async def _probe_callback(self, _now) -> None:
         self._probe_unsub = None
@@ -714,12 +781,14 @@ class MeshCoordinator:
                 )
             # Outside the main link's timeout: each extra link has its own,
             # and a slow one must not cost the main link the time it needs.
+            fanout = None
             if self._all_proxies:
                 extras = await self._connect_extra_links(address)
-                if extras:
-                    bearer = FanoutBearer(
-                        [bearer, *(extra_bearer for _, _, extra_bearer in extras)]
-                    )
+                # A fan-out even over one link: a node not heard yet can
+                # still join it later without the working link being torn down.
+                bearer = fanout = FanoutBearer(
+                    [bearer, *(extra_bearer for _, _, extra_bearer in extras)]
+                )
             async with asyncio.timeout(CONNECT_TIMEOUT):
                 controller = MeshController(
                     self._network, bearer, src_addr=self._src_addr,
@@ -759,6 +828,7 @@ class MeshCoordinator:
         self._client = client
         self._controller = controller
         self._extra_clients = [extra_client for _, extra_client, _ in extras]
+        self._fanout = fanout
         # start() has already spent SEQ numbers: claiming the proxy filter is
         # two network PDUs. Until now the cursor only came back after a command,
         # so a link that carried none (a probe that hands the slot back, a
@@ -803,11 +873,9 @@ class MeshCoordinator:
         behind ``held`` stops advertising once linked, but its last advert can
         linger in HA's snapshot, so it is excluded by address.
 
-        Returns ``(address, client, bearer)`` triples. A node that only starts
-        advertising after this ran joins at the next reconnect, not straight
-        away: adverts arrive several times a second, and reconnecting on them
-        would tear down a working link every time a node refused (the storm of
-        2026-09-10, in a new place).
+        Returns ``(address, client, bearer)`` triples. A node that is only
+        heard after this ran joins the running fan-out when it advertises (see
+        :meth:`_maybe_join_late`), without touching the links already up.
         """
         extras = []
         for address in find_proxy_addresses(
@@ -948,6 +1016,7 @@ class MeshCoordinator:
         controller, client = self._controller, self._client
         extras, self._extra_clients = self._extra_clients, []
         self._controller = self._client = None
+        self._fanout = None
         if client is not None and getattr(client, "is_connected", True):
             # Still up, so it ends here. A link that already dropped was
             # stamped by the drop handler, at the time it actually ended.

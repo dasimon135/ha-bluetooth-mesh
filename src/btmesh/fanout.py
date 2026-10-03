@@ -49,6 +49,7 @@ class FanoutBearer:
             raise ValueError("FanoutBearer needs at least one bearer")
         self._bearers = list(bearers)
         self._last_error: BaseException | None = None
+        self._on_message: Callable[[int, bytes], None] | None = None
 
     @property
     def bearers(self) -> list[Any]:
@@ -86,6 +87,7 @@ class FanoutBearer:
         Raises only when none of them could: a link that never subscribed
         delivers nothing, but the others still reach their own islands.
         """
+        self._on_message = on_message
         started = []
         for bearer in self._bearers:
             try:
@@ -98,6 +100,24 @@ class FanoutBearer:
         if not started:
             raise BearerError(f"no proxy link could start: {self._last_error}")
         self._bearers = started
+
+    async def add(self, bearer: Any) -> None:
+        """Start ``bearer`` and send through it too from now on.
+
+        For a node that was not heard when the links went up: after a restart
+        the scanner can take a minute to hear a weak node again, and with
+        keep-alive 0 nothing reconnects later, so that island stayed out of
+        reach until someone reloaded the entry. Joining it here leaves the
+        working links alone. A bearer that cannot start raises and is not added.
+
+        The new link's proxy filter is the caller's job (see
+        :meth:`btmesh.controller.MeshController.refresh_proxy_filter`): its
+        accept list starts empty, so until then it forwards nothing back.
+        """
+        if self._on_message is None:
+            raise BearerError("add() before start(): nowhere to deliver to")
+        await bearer.start(self._on_message)
+        self._bearers.append(bearer)
 
     async def stop(self) -> None:
         """Stop every child; one failing to stop does not skip the rest."""
