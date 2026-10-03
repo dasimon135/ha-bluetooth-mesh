@@ -6,6 +6,14 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The manifest no longer lists `cryptography`.** Home Assistant ships it
+  itself (2026.9.4 pins 48.0.1), and hassfest now rejects a custom
+  integration that declares one of Home Assistant's own dependencies. The
+  library keeps `cryptography>=42` in `pyproject.toml` for installs outside
+  Home Assistant.
+
 ## [0.10.3] — 2026-09-24
 
 Five robustness fixes from the second full read of the integration. None of
