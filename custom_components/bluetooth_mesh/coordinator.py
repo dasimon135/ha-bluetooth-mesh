@@ -46,12 +46,15 @@ from homeassistant.helpers.storage import Store
 
 from .btmesh.controller import MeshController
 from .btmesh.crypto import k3
+from .btmesh.fanout import FanoutBearer
 from .btmesh.network_model import UNICAST_MAX, UNICAST_MIN, Network
 from .const import (
+    CONF_ALL_PROXIES,
     CONF_CONNECT_JSON,
     CONF_KEEPALIVE,
     CONF_SRC_ADDR,
     CONTROLLED_MODEL_IDS,
+    DEFAULT_ALL_PROXIES,
     DEFAULT_KEEPALIVE,
     DEFAULT_SRC_ADDR,
     DOMAIN,
@@ -64,6 +67,7 @@ from .mesh_transport import (
     connect_paths,
     discovered_proxies,
     find_proxy_address,
+    find_proxy_addresses,
     scanner_by_source,
 )
 
@@ -278,6 +282,15 @@ class MeshCoordinator:
         # None while disconnected.
         self._client = None
         self._controller: MeshController | None = None
+        # With CONF_ALL_PROXIES, the links held to every OTHER proxy node,
+        # alongside self._client. Each is a node's single slot, so teardown
+        # frees them with the main one.
+        self._extra_clients: list = []
+        self._all_proxies: bool = bool(
+            entry.options.get(CONF_ALL_PROXIES, DEFAULT_ALL_PROXIES)
+        )
+        # Every proxy node a link is held to, main one first (diagnostics).
+        self._proxy_addresses: list[str] = []
         self._idle_unsub: CALLBACK_TYPE | None = None
         self._idle_timeout: int = int(
             entry.options.get(CONF_KEEPALIVE, DEFAULT_KEEPALIVE)
@@ -423,6 +436,11 @@ class MeshCoordinator:
         lands somewhere else, which is the only moment it becomes wrong.
         """
         return self._proxy_address
+
+    @property
+    def proxy_addresses(self) -> list[str]:
+        """Every proxy node a link is held to now, main one first."""
+        return list(self._proxy_addresses) if self._controller is not None else []
 
     @property
     def connected(self) -> bool:
@@ -683,6 +701,7 @@ class MeshCoordinator:
         # up, so _teardown() cannot free it — this local reference is the only
         # way back to it, and leaking it would lock out both HA and the app.
         client = None
+        extras: list = []
         started = monotonic()
         try:
             async with asyncio.timeout(CONNECT_TIMEOUT):
@@ -693,6 +712,15 @@ class MeshCoordinator:
                         1 if automatic or self._backoff else CONNECT_ATTEMPTS
                     ),
                 )
+            # Outside the main link's timeout: each extra link has its own,
+            # and a slow one must not cost the main link the time it needs.
+            if self._all_proxies:
+                extras = await self._connect_extra_links(address)
+                if extras:
+                    bearer = FanoutBearer(
+                        [bearer, *(extra_bearer for _, _, extra_bearer in extras)]
+                    )
+            async with asyncio.timeout(CONNECT_TIMEOUT):
                 controller = MeshController(
                     self._network, bearer, src_addr=self._src_addr,
                     seq=self._seq, tid=self._tid, iv_index=self._iv_index,
@@ -701,6 +729,8 @@ class MeshCoordinator:
                 await controller.start()
         except Exception as exc:  # noqa: BLE001 - transport/GATT/connect
             await self._disconnect(client)
+            for _, extra_client, _ in extras:
+                await self._disconnect(extra_client)
             # Before _set_unavailable: that one raises the repair, and which
             # repair to raise depends on what this failure adds to the streak.
             self._note_refusal(address, monotonic() - started)
@@ -728,6 +758,7 @@ class MeshCoordinator:
 
         self._client = client
         self._controller = controller
+        self._extra_clients = [extra_client for _, extra_client, _ in extras]
         # start() has already spent SEQ numbers: claiming the proxy filter is
         # two network PDUs. Until now the cursor only came back after a command,
         # so a link that carried none (a probe that hands the slot back, a
@@ -740,7 +771,10 @@ class MeshCoordinator:
         # fires this on OUR disconnects too; the handler tells them apart by
         # identity, since _teardown clears self._client before disconnecting.
         client.set_disconnected_callback(self._on_client_disconnected)
+        for extra_client in self._extra_clients:
+            extra_client.set_disconnected_callback(self._on_client_disconnected)
         self._proxy_address = address
+        self._proxy_addresses = [address, *(a for a, _, _ in extras)]
         self._set_available()
         return controller
 
@@ -759,6 +793,42 @@ class MeshCoordinator:
             self._link_ended_at is not None
             and monotonic() - self._link_ended_at < PROXY_ADVERT_MAX_AGE
         )
+
+    async def _connect_extra_links(self, held: str) -> list:
+        """Open a link to every other proxy node of the network (CONF_ALL_PROXIES).
+
+        Best-effort, one attempt each: a node that refuses or times out is left
+        out and the rest carry on, because the main link already works and an
+        island we cannot reach now is no reason to give up the others. The node
+        behind ``held`` stops advertising once linked, but its last advert can
+        linger in HA's snapshot, so it is excluded by address.
+
+        Returns ``(address, client, bearer)`` triples. A node that only starts
+        advertising after this ran joins at the next reconnect, not straight
+        away: adverts arrive several times a second, and reconnecting on them
+        would tear down a working link every time a node refused (the storm of
+        2026-09-10, in a new place).
+        """
+        extras = []
+        for address in find_proxy_addresses(
+            self.hass,
+            self._network.net_key,
+            max_age=None if self._held_the_slot_recently() else PROXY_ADVERT_MAX_AGE,
+            exclude={held},
+        ):
+            client = None
+            try:
+                async with asyncio.timeout(CONNECT_TIMEOUT):
+                    client, bearer = await async_connect_bearer(
+                        self.hass, address, max_attempts=1
+                    )
+            except Exception as exc:  # noqa: BLE001 - one island, not all
+                await self._disconnect(client)
+                logger.debug("extra mesh proxy link to %s failed: %s", address, exc)
+                continue
+            logger.debug("extra mesh proxy link to %s up", address)
+            extras.append((address, client, bearer))
+        return extras
 
     async def _run_connected(self, call):
         """Reuse (or open) the held proxy connection and run ``call(controller)``.
@@ -829,7 +899,7 @@ class MeshCoordinator:
         (11 s that morning, through the proxy habluetooth preferred at -94 dBm).
         Re-establish the link in the background instead.
         """
-        if self._stopped or client is not self._client:
+        if self._stopped or not self._holds(client):
             return  # our own teardown, or a client we already replaced
         self._link_ended_at = monotonic()
         if not self.hass.is_running:
@@ -848,9 +918,20 @@ class MeshCoordinator:
             self._async_reconnect(client), f"{DOMAIN} reconnect after drop"
         )
 
+    def _holds(self, client) -> bool:
+        """True if ``client`` is one of the links held now, main or extra.
+
+        A drop of any of them reconnects them all: with keep-alive 0 the user
+        asked for every island to stay reachable, and rebuilding the set is
+        what brings the dropped one back.
+        """
+        return client is self._client or any(
+            client is extra for extra in self._extra_clients
+        )
+
     async def _async_reconnect(self, client) -> None:
         async with self._lock:
-            if self._stopped or client is not self._client:
+            if self._stopped or not self._holds(client):
                 return  # a command got there first and already reconnected
             await self._teardown()
             await self._ensure_connected(automatic=True)
@@ -865,6 +946,7 @@ class MeshCoordinator:
         hold :attr:`_lock` (except the idle callback, which takes it first).
         """
         controller, client = self._controller, self._client
+        extras, self._extra_clients = self._extra_clients, []
         self._controller = self._client = None
         if client is not None and getattr(client, "is_connected", True):
             # Still up, so it ends here. A link that already dropped was
@@ -876,6 +958,8 @@ class MeshCoordinator:
             except Exception:  # noqa: BLE001
                 logger.debug("controller stop failed", exc_info=True)
         await self._disconnect(client)
+        for extra in extras:
+            await self._disconnect(extra)
 
     @staticmethod
     async def _disconnect(client) -> None:

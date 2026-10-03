@@ -23,6 +23,7 @@ from homeassistant.config_entries import (
 )
 from homeassistant.core import callback
 from homeassistant.helpers.selector import (
+    BooleanSelector,
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
@@ -37,10 +38,12 @@ from homeassistant.helpers.selector import (
 
 from .btmesh.network_model import Network, NetworkModelError
 from .const import (
+    CONF_ALL_PROXIES,
     CONF_CONNECT_JSON,
     CONF_INVERTED_CTL,
     CONF_KEEPALIVE,
     CONF_SRC_ADDR,
+    DEFAULT_ALL_PROXIES,
     DEFAULT_KEEPALIVE,
     DEFAULT_SRC_ADDR,
     DOMAIN,
@@ -181,6 +184,9 @@ class BluetoothMeshOptionsFlow(OptionsFlowWithReload):
             data = {
                 CONF_KEEPALIVE: int(user_input[CONF_KEEPALIVE]),
                 CONF_SRC_ADDR: int(user_input[CONF_SRC_ADDR]),
+                CONF_ALL_PROXIES: bool(
+                    user_input.get(CONF_ALL_PROXIES, DEFAULT_ALL_PROXIES)
+                ),
             }
             # The field is absent from the form when the network has no CTL
             # lamp. Carry the stored value through rather than letting it go:
@@ -228,6 +234,12 @@ class BluetoothMeshOptionsFlow(OptionsFlowWithReload):
                         min=0, max=0x7FFF, step=1, mode=NumberSelectorMode.BOX,
                     )
                 ),
+                vol.Required(
+                    CONF_ALL_PROXIES,
+                    default=self.config_entry.options.get(
+                        CONF_ALL_PROXIES, DEFAULT_ALL_PROXIES
+                    ),
+                ): BooleanSelector(),
             }
         )
         if ctl_nodes := self._ctl_nodes():
