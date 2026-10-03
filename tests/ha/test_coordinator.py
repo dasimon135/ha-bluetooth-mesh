@@ -2391,3 +2391,32 @@ async def test_late_joining_stays_off_without_the_option(hass) -> None:
         assert coordinator_mod.async_connect_bearer.await_count == connects
         assert list(clients) == [PROXY_ADDR]
     await coord.async_stop()
+
+
+async def test_a_node_never_announced_again_is_found_on_the_snapshot(hass) -> None:
+    """HA calls advert callbacks only when the content changes.
+
+    A mesh node repeats one Network ID advert, so a node first heard before the
+    links went up is never announced again (2026-10-03, after a restart). The
+    periodic tick reads the snapshot instead, with no callback involved.
+    """
+    entry = _all_proxies_entry(hass)
+    fake = FakeController()
+    with _patch_islands(fake, []) as (_, _, find_all):
+        coord = MeshCoordinator(hass, entry)
+        await coord.async_start()
+        await coord.async_set_onoff(UNICAST, True)
+        await _started_fanout(coord)
+        assert coord.proxy_addresses == [PROXY_ADDR]
+        assert coord._late_look_unsub is not None  # the one-off first look
+
+        find_all.return_value = [OTHER_PROXY_ADDR]
+        coord._cancel_probe()  # stand in for the timer firing
+        await coord._probe_callback(None)
+        await _wait_for(lambda: OTHER_PROXY_ADDR in coord.proxy_addresses)
+
+        assert find_all.call_args.kwargs["exclude"] == {PROXY_ADDR}
+        assert coord.proxy_addresses == [PROXY_ADDR, OTHER_PROXY_ADDR]
+        assert coord._controller is fake
+    await coord.async_stop()
+    assert coord._late_look_unsub is None

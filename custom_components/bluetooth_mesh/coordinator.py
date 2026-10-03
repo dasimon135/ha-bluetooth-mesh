@@ -186,6 +186,14 @@ PROBE_TIMEOUT = 3.0
 # which is the 2026-09-10 storm aimed at a single node.
 LATE_LINK_RETRY = 60.0
 
+# With CONF_ALL_PROXIES: how long after the links go up to look once for a node
+# that was not heard in time. Home Assistant calls an advert callback only when
+# the advert's CONTENT changes, and a mesh node repeats one Network ID advert
+# for ever, so a node first heard before the links were up is never announced
+# again; the snapshot has to be read instead. Seen on 2026-10-03: after a
+# restart the weaker box was heard over a minute late and never joined.
+LATE_LINK_FIRST_LOOK = 30.0
+
 # Default seconds to HOLD the proxy connection open after the last command
 # before dropping it to free the lamp's single proxy slot. Opening a proxy
 # connection over an ESPHome BLE proxy costs several seconds, so holding it makes
@@ -302,6 +310,7 @@ class MeshCoordinator:
         self._fanout: FanoutBearer | None = None
         # Monotonic instant of the last late-join attempt per node address.
         self._late_link_attempts: dict[str, float] = {}
+        self._late_look_unsub: CALLBACK_TYPE | None = None
         self._idle_unsub: CALLBACK_TYPE | None = None
         self._idle_timeout: int = int(
             entry.options.get(CONF_KEEPALIVE, DEFAULT_KEEPALIVE)
@@ -515,6 +524,7 @@ class MeshCoordinator:
         """Cancel timers, drop the held connection, and clear the repair issue."""
         self._stopped = True
         self._cancel_probe()
+        self._cancel_late_look()
         self._cancel_idle()
         if self._discovery_unsub is not None:
             self._discovery_unsub()
@@ -670,8 +680,34 @@ class MeshCoordinator:
             self._controller.refresh_proxy_filter()
             logger.info("mesh proxy %s joined the held links", address)
 
+    def _join_late_nodes(self) -> None:
+        """Read the advert snapshot for nodes not linked yet, and join them.
+
+        The advert callback alone cannot be relied on (see
+        LATE_LINK_FIRST_LOOK); _maybe_join_late keeps the per-node retry limit.
+        """
+        if not self._all_proxies or self._fanout is None or self._stopped:
+            return
+        for address in find_proxy_addresses(
+            self.hass, self._network.net_key, exclude=set(self._proxy_addresses)
+        ):
+            self._maybe_join_late(address)
+
+    @callback
+    def _late_look_callback(self, _now) -> None:
+        self._late_look_unsub = None
+        self._join_late_nodes()
+
+    def _cancel_late_look(self) -> None:
+        if self._late_look_unsub is not None:
+            self._late_look_unsub()
+            self._late_look_unsub = None
+
     async def _probe_callback(self, _now) -> None:
         self._probe_unsub = None
+        # While links are up, the periodic tick is also when a node that was
+        # missed gets another look: its advert callback will not fire again.
+        self._join_late_nodes()
         # Only probe to RECOVER when we believe we are unavailable; while
         # available we rely on real commands + the held connection, so we never
         # churn the lamp's slot behind the user's back.
@@ -845,6 +881,11 @@ class MeshCoordinator:
             extra_client.set_disconnected_callback(self._on_client_disconnected)
         self._proxy_address = address
         self._proxy_addresses = [address, *(a for a, _, _ in extras)]
+        if fanout is not None:
+            self._cancel_late_look()
+            self._late_look_unsub = async_call_later(
+                self.hass, LATE_LINK_FIRST_LOOK, self._late_look_callback
+            )
         self._set_available()
         return controller
 
