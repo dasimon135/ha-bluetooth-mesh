@@ -1043,3 +1043,25 @@ async def test_a_late_subscribe_failure_marks_the_controller_failed():
         assert isinstance(controller.failure, RuntimeError)
     finally:
         await controller.stop()
+
+
+async def test_a_status_the_lamp_publishes_unasked_is_handed_to_the_caller():
+    """A wall switch changes the lamp; its published Status is the only trace."""
+    controller, bearer, _ = make_setup()
+    heard = []
+    controller.on_status = lambda *args: heard.append(args)
+    await controller.start()
+    try:
+        device = bearer.device
+        device.send_access(0x7FFF, encode_opcode(OP_GENERIC_ONOFF_STATUS) + b"\x01")
+        device.send_access(
+            0x7FFF,
+            encode_opcode(OP_LIGHT_LIGHTNESS_STATUS)
+            + (0x1000).to_bytes(2, "little")  # present, mid-fade
+            + (0x8000).to_bytes(2, "little")  # target
+            + b"\x0a",
+        )
+        await asyncio.sleep(0.05)
+        assert heard == [(UNICAST, True, None), (UNICAST, None, 0x8000)]
+    finally:
+        await controller.stop()

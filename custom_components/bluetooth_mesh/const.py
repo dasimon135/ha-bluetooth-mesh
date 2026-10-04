@@ -17,6 +17,15 @@ CONF_CONNECT_JSON = "connect_json"
 CONF_KEEPALIVE = "keepalive_seconds"
 DEFAULT_KEEPALIVE = 0
 
+# Options-flow key: hold a link to EVERY reachable proxy node, not just one.
+# For a mesh whose nodes cannot hear each other (two boxes either side of a
+# divider, seen 2026-10-03): through one link only that node's island answers,
+# and the vendor app shows the same. Off by default because each link takes a
+# node's single proxy slot -- with all of them held, the vendor app has no node
+# left to connect to.
+CONF_ALL_PROXIES = "all_proxies"
+DEFAULT_ALL_PROXIES = False
+
 # Options-flow key: the unicast address the integration transmits FROM.
 # 0 means "derive it" — the top of the unicast range, stepping down past any
 # address the imported network already uses.

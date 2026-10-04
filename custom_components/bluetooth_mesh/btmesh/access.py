@@ -17,6 +17,13 @@ __all__ = [
     "AccessError",
     # Foundation opcodes
     "OP_CONFIG_APPKEY_ADD",
+    "OP_CONFIG_MODEL_PUBLICATION_GET",
+    "OP_CONFIG_MODEL_PUBLICATION_SET",
+    "OP_CONFIG_MODEL_PUBLICATION_STATUS",
+    "PublicationStatus",
+    "config_model_publication_get",
+    "config_model_publication_set",
+    "parse_config_model_publication_status",
     "OP_CONFIG_COMPOSITION_DATA_STATUS",
     "OP_CONFIG_APPKEY_STATUS",
     "OP_CONFIG_COMPOSITION_DATA_GET",
@@ -114,6 +121,9 @@ OP_CONFIG_MODEL_APP_BIND = 0x803D
 OP_CONFIG_MODEL_APP_STATUS = 0x803E
 OP_CONFIG_RELAY_GET = 0x8026
 OP_CONFIG_RELAY_STATUS = 0x8028
+OP_CONFIG_MODEL_PUBLICATION_SET = 0x03
+OP_CONFIG_MODEL_PUBLICATION_GET = 0x8018
+OP_CONFIG_MODEL_PUBLICATION_STATUS = 0x8019
 # Generic OnOff model opcodes (Mesh Model spec §7.1, Zephyr mesh sample).
 OP_GENERIC_ONOFF_GET = 0x8201
 OP_GENERIC_ONOFF_SET = 0x8202
@@ -267,6 +277,27 @@ class LightCtlTemperatureRangeStatus(NamedTuple):
     status_code: int
     range_min: int
     range_max: int
+
+
+class PublicationStatus(NamedTuple):
+    """Config Model Publication Status (spec §4.3.2.18).
+
+    Where a model sends its own messages unprompted: a server with a publish
+    address set reports every state change there, which is the only way a
+    change made at the device (a wired wall switch) is heard by anyone else.
+    ``publish_address`` 0x0000 means publication is off.
+    """
+
+    status: int
+    element_address: int
+    publish_address: int
+    appkey_index: int
+    credential_flag: bool
+    ttl: int
+    period: int
+    retransmit_count: int
+    retransmit_interval_steps: int
+    model_id: int
 
 
 class RelayStatus(NamedTuple):
@@ -451,6 +482,70 @@ def config_model_app_bind_vendor(
         + appkey_idx.to_bytes(2, "little")
         + company_id.to_bytes(2, "little")
         + model_id.to_bytes(2, "little")
+    )
+
+
+def _model_identifier(model_id: int) -> bytes:
+    """A SIG model id as 2 octets, a vendor one (company<<16 | id) as 4 (LE each)."""
+    if 0 <= model_id <= 0xFFFF:
+        return model_id.to_bytes(2, "little")
+    if 0 <= model_id <= 0xFFFFFFFF:
+        return (model_id >> 16).to_bytes(2, "little") + (model_id & 0xFFFF).to_bytes(
+            2, "little"
+        )
+    raise AccessError(f"model ID out of range: {model_id:#x}")
+
+
+def config_model_publication_get(element_addr: int, model_id: int) -> bytes:
+    """Config Model Publication Get (spec §4.3.2.15); answered with a Status."""
+    if not 0 <= element_addr <= 0xFFFF:
+        raise AccessError(f"element address out of range: {element_addr:#x}")
+    return (
+        encode_opcode(OP_CONFIG_MODEL_PUBLICATION_GET)
+        + element_addr.to_bytes(2, "little")
+        + _model_identifier(model_id)
+    )
+
+
+def config_model_publication_set(
+    element_addr: int,
+    publish_addr: int,
+    model_id: int,
+    *,
+    appkey_idx: int = 0,
+    ttl: int = 0xFF,
+    period: int = 0,
+    retransmit_count: int = 0,
+    retransmit_interval_steps: int = 0,
+    credential_flag: bool = False,
+) -> bytes:
+    """Config Model Publication Set (spec §4.3.2.16), non-virtual address.
+
+    ``ttl`` 0xFF means "use the node's default TTL". ``publish_addr`` 0x0000
+    turns publication off.
+    """
+    for name, value in (("element", element_addr), ("publish", publish_addr)):
+        if not 0 <= value <= 0xFFFF:
+            raise AccessError(f"{name} address out of range: {value:#x}")
+    _check_key_index("AppKeyIndex", appkey_idx)
+    if not 0 <= ttl <= 0xFF or 0x80 <= ttl <= 0xFE:
+        raise AccessError(f"publish TTL out of range: {ttl:#x}")
+    if not 0 <= period <= 0xFF:
+        raise AccessError(f"publish period out of range: {period:#x}")
+    if not 0 <= retransmit_count <= 7:
+        raise AccessError(f"retransmit count out of range: {retransmit_count}")
+    if not 0 <= retransmit_interval_steps <= 0x1F:
+        raise AccessError(
+            f"retransmit interval steps out of range: {retransmit_interval_steps}"
+        )
+    key_and_flag = appkey_idx | (int(credential_flag) << 12)
+    return (
+        encode_opcode(OP_CONFIG_MODEL_PUBLICATION_SET)
+        + element_addr.to_bytes(2, "little")
+        + publish_addr.to_bytes(2, "little")
+        + key_and_flag.to_bytes(2, "little")
+        + bytes([ttl, period, retransmit_count | (retransmit_interval_steps << 3)])
+        + _model_identifier(model_id)
     )
 
 
@@ -790,6 +885,32 @@ def parse_light_ctl_temperature_status(
         target_temperature=int.from_bytes(params[4:6], "little"),
         target_delta_uv=int.from_bytes(params[6:8], "little", signed=True),
         remaining_time=params[8],
+    )
+
+
+def parse_config_model_publication_status(payload: bytes) -> PublicationStatus:
+    """Parse a Config Model Publication Status (spec §4.3.2.18)."""
+    params = _expect_params(payload, OP_CONFIG_MODEL_PUBLICATION_STATUS, (12, 14))
+    key_and_flag = int.from_bytes(params[5:7], "little")
+    retransmit = params[9]
+    model = params[10:]
+    if len(model) == 2:
+        model_id = int.from_bytes(model, "little")
+    else:
+        model_id = (int.from_bytes(model[:2], "little") << 16) | int.from_bytes(
+            model[2:], "little"
+        )
+    return PublicationStatus(
+        status=params[0],
+        element_address=int.from_bytes(params[1:3], "little"),
+        publish_address=int.from_bytes(params[3:5], "little"),
+        appkey_index=key_and_flag & 0xFFF,
+        credential_flag=bool(key_and_flag & 0x1000),
+        ttl=params[7],
+        period=params[8],
+        retransmit_count=retransmit & 0x07,
+        retransmit_interval_steps=(retransmit >> 3) & 0x1F,
+        model_id=model_id,
     )
 
 

@@ -14,6 +14,7 @@ index; addressing is by element unicast, taken from that same static model.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 from .access import (
     OP_CONFIG_COMPOSITION_DATA_STATUS,
@@ -155,6 +156,13 @@ class MeshController:
         # link and reconnect.
         self._pump.on_error = self._on_pump_error
         self._src = src_addr
+        # Called as ``on_status(src, onoff, lightness)`` for every OnOff or
+        # Lightness Status that arrives, asked for or not (one of the two is
+        # None). A lamp whose server has a publish address reports changes made
+        # at the device itself -- a wired wall switch -- this way, and nothing
+        # else would ever tell us about them.
+        self.on_status: Callable[[int, bool | None, int | None], None] | None = None
+        self._node.on_message = self._on_access
         # Proxy address-filter state (see _configure_filter).
         self._filter_status: FilterStatus | None = None
         # The Generic OnOff / Lightness / CTL Set messages carry a TID; the node
@@ -172,6 +180,21 @@ class MeshController:
         await self._bearer.start(self._on_message)
         self._pump.start()
         self._configure_filter()
+
+    def _on_access(self, msg: ReceivedMessage) -> None:
+        if self.on_status is None:
+            return
+        try:
+            if msg.opcode == OP_GENERIC_ONOFF_STATUS:
+                status = parse_generic_onoff_status(_full_payload(msg))
+                on = _settled(status.present_onoff, status.target_onoff)
+                self.on_status(msg.src, bool(on), None)
+            elif msg.opcode == OP_LIGHT_LIGHTNESS_STATUS:
+                status = parse_light_lightness_status(_full_payload(msg))
+                level = _settled(status.present_lightness, status.target_lightness)
+                self.on_status(msg.src, None, level)
+        except AccessError as exc:
+            logger.debug("unparseable status from %#06x: %s", msg.src, exc)
 
     async def stop(self) -> None:
         """Stop the TX pump and the bearer (reverse of :meth:`start`)."""
@@ -255,6 +278,17 @@ class MeshController:
             self._send_proxy_config(add_addresses([self._src]))
         except Exception as exc:  # noqa: BLE001 - never fail the connection
             logger.warning("could not configure the proxy filter: %s", exc)
+
+    def refresh_proxy_filter(self) -> None:
+        """Claim the proxy filter again, on every link the bearer holds now.
+
+        For a link added after :meth:`start` (``FanoutBearer.add``): it starts
+        with an empty accept list, so nothing comes back through it until this
+        runs. Re-sending to the links already configured is harmless: setting
+        the type clears the list and the next message refills it, both queued
+        on the same ordered pump.
+        """
+        self._configure_filter()
 
     def _send_proxy_config(self, message: bytes) -> None:
         """Queue one proxy configuration message on the shared TX pump."""

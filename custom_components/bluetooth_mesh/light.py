@@ -348,8 +348,31 @@ class MeshLight(LightEntity):
         self.async_on_remove(
             self._coordinator.async_add_listener(self._handle_availability)
         )
+        for unicast in {self._onoff_unicast, self._lightness_unicast}:
+            self.async_on_remove(
+                self._coordinator.async_add_status_listener(
+                    unicast, self._handle_status
+                )
+            )
         if self._coordinator.available:
             self._schedule_refresh()
+
+    @callback
+    def _handle_status(self, onoff: bool | None, lightness: int | None) -> None:
+        """Take what the lamp reported as its state.
+
+        Most of these answer our own commands, which already settle the cache;
+        the ones that matter arrive unasked, after a wall switch changed the
+        lamp (2026-10-04: HA showed the library shelf off while it was lit).
+        Lightness 0 is off, as the Light Lightness server defines it.
+        """
+        if onoff is not None:
+            self._is_on = onoff
+        if lightness is not None and self._attr_color_mode is not ColorMode.ONOFF:
+            self._is_on = lightness > 0
+            if lightness > 0:
+                self._brightness = self._level_to_brightness(lightness)
+        self._write_state()
 
     @callback
     def _write_state(self) -> None:

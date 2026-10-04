@@ -147,6 +147,21 @@ The rest of the mesh network
 
 One GATT connection serves the whole network: the stack maintains a single
 tunnel to one proxy node, and the mesh relays messages to every other node.
+
+**When the nodes cannot hear each other** (say, two boxes either side of a
+wall), one tunnel reaches only part of the network. The option *Connect through
+every reachable proxy node* then holds a tunnel to each node it can, at most
+four (the first plus the three strongest others), and sends every message
+through all of them. That has two costs:
+
+- each tunnel takes the node's only proxy slot, so the vendor app cannot
+  connect to any node while Home Assistant holds them;
+- each tunnel also takes a connection slot on the ESPHome Bluetooth proxy that
+  carries it. ESPHome offers three by default (`bluetooth_proxy:
+  connection_slots`), shared with every other Bluetooth device that connects
+  through that proxy, so plan for one slot per linked node.
+
+Leave it off unless some lamps never respond while others do.
 No BlueZ meshd, no dedicated ESP32 firmware — it works on Home Assistant OS in
 a VM with no local radio.
 

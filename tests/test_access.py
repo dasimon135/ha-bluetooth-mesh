@@ -521,3 +521,36 @@ def test_parse_light_ctl_temperature_range_status_rejects_a_wrong_length():
 
     with pytest.raises(AccessError):
         parse_light_ctl_temperature_range_status(bytes.fromhex("8263" "00" "2003"))
+
+
+def test_config_model_publication_set_bytes():
+    """Generic OnOff Server on 0x0049 publishing to 0x7FFF, TTL 5 (§4.3.2.16)."""
+    from btmesh.access import config_model_publication_set
+
+    assert config_model_publication_set(
+        0x0049, 0x7FFF, 0x1000, ttl=5, retransmit_count=1, retransmit_interval_steps=2
+    ) == bytes.fromhex("03" "4900" "ff7f" "0000" "05" "00" "11" "0010")
+
+
+def test_config_model_publication_get_bytes_vendor():
+    from btmesh.access import config_model_publication_get
+
+    assert config_model_publication_get(0x0049, 0x07E91000) == bytes.fromhex(
+        "8018" "4900" "e907" "0010"
+    )
+
+
+def test_parse_config_model_publication_status():
+    from btmesh.access import parse_config_model_publication_status
+
+    status = parse_config_model_publication_status(
+        bytes.fromhex("8019" "00" "4900" "ff7f" "0010" "05" "00" "11" "0013")
+    )
+    assert status.status == 0
+    assert status.element_address == 0x0049
+    assert status.publish_address == 0x7FFF
+    assert status.appkey_index == 0
+    assert status.credential_flag is True
+    assert (status.ttl, status.period) == (5, 0)
+    assert (status.retransmit_count, status.retransmit_interval_steps) == (1, 2)
+    assert status.model_id == 0x1300

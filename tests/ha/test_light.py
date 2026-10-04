@@ -72,6 +72,7 @@ class FakeCoordinator:
         # Whether a group Set can leave (False = no link to send it on).
         self.group_link = True
         self.listeners: list = []
+        self.status_listeners: dict[int, list] = {}
 
     def async_add_listener(self, callback_):
         """Mirror the real coordinator: notified on availability changes."""
@@ -81,6 +82,15 @@ class FakeCoordinator:
     def fire(self) -> None:
         for callback_ in list(self.listeners):
             callback_()
+
+    def async_add_status_listener(self, unicast: int, callback_):
+        """Mirror the real coordinator: told what a lamp reported."""
+        self.status_listeners.setdefault(unicast, []).append(callback_)
+        return lambda: self.status_listeners[unicast].remove(callback_)
+
+    def report(self, unicast: int, onoff=None, lightness=None) -> None:
+        for callback_ in list(self.status_listeners.get(unicast, ())):
+            callback_(onoff, lightness)
 
     async def async_set_onoff(self, unicast: int, on: bool) -> bool:
         self.calls.append(("set_onoff", unicast, on))
@@ -1624,3 +1634,24 @@ async def test_a_mixed_group_whose_dimming_did_not_leave_stays_lit(hass) -> None
 
     assert all(m.is_on is True for m in members)
     assert dimmer.brightness == 40
+
+
+async def test_a_status_the_lamp_publishes_updates_the_light(hass) -> None:
+    """A wall switch changed the lamp; HA showed the old state (2026-10-04)."""
+    light, coordinator = _light()
+    light.hass = hass
+    light.entity_id = "light.mesh_test"
+    await light.async_added_to_hass()
+    await hass.async_block_till_done()
+    assert light.is_on is True
+
+    coordinator.report(UNICAST, onoff=False)
+    assert light.is_on is False
+
+    coordinator.report(UNICAST, lightness=0x8000)
+    assert light.is_on is True
+    assert light.brightness == 128
+
+    coordinator.report(UNICAST, lightness=0)
+    assert light.is_on is False
+    assert light.brightness == 128  # kept for the next turn-on, hidden while off

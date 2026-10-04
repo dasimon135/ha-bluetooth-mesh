@@ -18,6 +18,7 @@ scope (it only ever runs inside Home Assistant).
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 from dataclasses import dataclass
 from time import monotonic
 from typing import TYPE_CHECKING, Callable
@@ -54,6 +55,7 @@ __all__ = [
     "connect_paths",
     "scanner_by_source",
     "find_proxy_address",
+    "find_proxy_addresses",
     "async_connect_bearer",
     "async_register_proxy_callback",
     "discovered_proxies",
@@ -137,11 +139,27 @@ def find_proxy_address(
 ) -> str | None:
     """Address of a connectable mesh proxy advertising ``net_key``'s Network ID.
 
+    The first of :func:`find_proxy_addresses`, or ``None`` when there is none.
+    """
+    addresses = find_proxy_addresses(hass, net_key, max_age=max_age)
+    return addresses[0] if addresses else None
+
+
+def find_proxy_addresses(
+    hass: HomeAssistant,
+    net_key: bytes,
+    *,
+    max_age: float | None = PROXY_ADVERT_MAX_AGE,
+    exclude: Collection[str] = (),
+    strongest_first: bool = False,
+) -> list[str]:
+    """Every connectable mesh proxy advertising ``net_key``'s Network ID.
+
     Computes ``network_id = k3(net_key)`` and scans HA's **full** advertisement
     snapshot (:func:`bluetooth.async_discovered_service_info` with
-    ``connectable=False``) for a node advertising a 0x1828 Network-ID matching
-    it, returning the first match HA can currently connect through (its
-    per-advert ``connectable`` flag is set).
+    ``connectable=False``) for nodes advertising a 0x1828 Network-ID matching
+    it, keeping those HA can currently connect through (their per-advert
+    ``connectable`` flag is set), in snapshot order.
 
     Why scan the full snapshot rather than the ``connectable=True`` view: HA keeps
     the connectable-only history and the full history as separate structures that
@@ -152,7 +170,7 @@ def find_proxy_address(
     :func:`discovered_proxies`, so discovery agrees with the diagnostic instead of
     contradicting it. Actual connectability is re-verified at connect time by
     :func:`async_ble_device_from_address`. The snapshot is point-in-time; the
-    coordinator retries, so a transient ``None`` is expected.
+    coordinator retries, so a transient empty list is expected.
 
     A match nobody has heard for more than ``max_age`` seconds is skipped rather
     than returned: the entry can still read ``connectable=yes`` well after the
@@ -160,11 +178,20 @@ def find_proxy_address(
     bleak attempt nobody can win (ha-bluetooth-mesh#31). ``None`` lifts the
     rule, for a caller that knows why the advert is old (see
     :data:`PROXY_ADVERT_MAX_AGE`).
+
+    ``exclude`` drops addresses the caller already holds a link to: a held
+    node stops advertising, but its last advert stays in the snapshot for up
+    to ``max_age``, and a second connect to it can only be refused.
+
+    ``strongest_first`` orders the result by advert RSSI, strongest first, for
+    a caller that keeps only some of them: every powered lamp is a proxy node,
+    and the ones kept should be the ones most likely to hold a link.
     """
     network_id = k3(net_key)
     now = monotonic()
+    found: list[tuple[str, int]] = []
     for info in bluetooth.async_discovered_service_info(hass, connectable=False):
-        if not _matches_network_id(info, network_id):
+        if info.address in exclude or not _matches_network_id(info, network_id):
             continue
         age = _advert_age(hass, info, now)
         if max_age is not None and age > max_age:
@@ -179,13 +206,17 @@ def find_proxy_address(
                 "mesh proxy %s advertises Network ID %s (connectable)",
                 info.address, network_id.hex(),
             )
-            return info.address
+            rssi = getattr(info, "rssi", None)
+            found.append((info.address, rssi if isinstance(rssi, int) else -127))
+            continue
         logger.debug(
             "mesh proxy %s advertises Network ID %s but only via a "
             "non-connectable scanner; skipping",
             info.address, network_id.hex(),
         )
-    return None
+    if strongest_first:
+        found.sort(key=lambda match: -match[1])
+    return [address for address, _ in found]
 
 
 def discovered_proxies(hass: HomeAssistant) -> list[tuple[str, str]]:
