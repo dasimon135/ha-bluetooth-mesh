@@ -2187,7 +2187,7 @@ def _client():
 
 
 @contextlib.contextmanager
-def _patch_islands(controller, extra_addresses, *, failing=()):
+def _patch_islands(controller, extra_addresses, *, failing=(), failing_start=()):
     """Two-or-more-island transport: one client per address, some refusing.
 
     Yields ``{address: client}`` for every address a link was opened to, and the
@@ -2200,7 +2200,11 @@ def _patch_islands(controller, extra_addresses, *, failing=()):
             raise MeshTransportError(f"refused: {address}")
         clients[address] = _client()
         bearer = MagicMock(name=f"bearer-{address}")
-        bearer.start = AsyncMock()
+        bearer.start = AsyncMock(
+            side_effect=MeshTransportError(f"no subscribe: {address}")
+            if address in failing_start
+            else None
+        )
         bearer.max_frame = 66
         bearer.failure = None
         return clients[address], bearer
@@ -2560,6 +2564,61 @@ async def test_a_dropped_main_link_hands_its_role_to_the_next(hass) -> None:
         assert coord._client is clients[OTHER_PROXY_ADDR]
         assert coord.proxy_address == OTHER_PROXY_ADDR
         assert coord.proxy_addresses == [OTHER_PROXY_ADDR]
+    await coord.async_stop()
+
+
+class _BearerStartingController(FakeController):
+    """Starts the bearer it was built on, as the real controller does."""
+
+    bearer = None
+
+    async def start(self) -> None:
+        await self.bearer.start(lambda *_: None)
+        await super().start()
+
+
+def _built_on(fake):
+    def build(_network, bearer, **_kwargs):
+        fake.bearer = bearer
+        return fake
+
+    return build
+
+
+@pytest.mark.parametrize("failing", [OTHER_PROXY_ADDR, PROXY_ADDR])
+async def test_a_link_that_fails_to_start_is_not_held(hass, failing) -> None:
+    """A link dropped inside start() must not be put back afterwards.
+
+    Review of #49: the held links were assigned from what was connected before
+    start(), so a child that failed to subscribe stayed listed (holding a slot,
+    never retried by late join, counted against the cap), and a failed main
+    link left self._client pointing at a client being disconnected.
+    """
+    entry = _all_proxies_entry(hass)
+    fake = _BearerStartingController()
+    survivor = PROXY_ADDR if failing == OTHER_PROXY_ADDR else OTHER_PROXY_ADDR
+    with (
+        _patch_islands(fake, [OTHER_PROXY_ADDR], failing_start={failing}) as (
+            clients,
+            _,
+            _,
+        ),
+        patch.object(coordinator_mod, "MeshController", side_effect=_built_on(fake)),
+    ):
+        coord = MeshCoordinator(hass, entry)
+        coord._stopped = False
+        async with coord._lock:
+            controller = await coord._ensure_connected()
+        await hass.async_block_till_done()
+
+        assert controller is fake
+        assert coord.proxy_addresses == [survivor]
+        assert coord.proxy_address == survivor
+        assert coord._client is clients[survivor]
+        assert coord._extra_clients == []
+        clients[failing].disconnect.assert_awaited()
+        clients[survivor].disconnect.assert_not_awaited()
+        assert failing in coord._late_link_attempts  # late join may retry it
     await coord.async_stop()
 
 

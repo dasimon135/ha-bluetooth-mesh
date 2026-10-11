@@ -955,6 +955,16 @@ class MeshCoordinator:
                 logger.debug("mesh connect failed: %s", detail)
             return None
 
+        if fanout is not None:
+            # Held links are what survived start(), not what was connected
+            # before it: a link that failed to subscribe was already dropped
+            # (and is being disconnected) by _on_link_dropped while nothing was
+            # held yet, so listing it from `extras` again kept a dead slot, and
+            # a dead main link made the next command tear everything down
+            # (review of #49).
+            links = [self._link_by_bearer[b] for b in fanout.bearers]
+            address, client = links[0]
+            extras = [(a, c, None) for a, c in links[1:]]
         self._client = client
         self._controller = controller
         self._extra_clients = [extra_client for _, extra_client, _ in extras]
