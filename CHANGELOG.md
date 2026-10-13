@@ -6,8 +6,50 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-10-13
+
+One new option, for a mesh whose nodes cannot hear each other, contributed by
+[@gilgamezh](https://github.com/gilgamezh) in
+[#49](https://github.com/dasimon135/ha-bluetooth-mesh/pull/49). It is off by
+default: an install that never touches it keeps exactly one link, as before.
+
+### Added
+
+- **Every part of a mesh is reachable, even when its nodes cannot hear each
+  other.** Two Häfele boxes either side of a room divider can share one
+  network and still be two radio islands. Through the single proxy link this
+  integration held, only the lamps of the box carrying that link answered; the
+  other box's lamps never did, and the vendor app behaves the same way. The
+  new option *Connect through every reachable proxy node* holds a link to each
+  node that offers one, at most four (the first plus the three strongest
+  others), and sends every command through all of them. A node heard after the
+  links went up joins them without the working links being dropped, and one
+  that refuses is tried again at most once a minute.
+
+  It has two costs, which is why it is off by default. Each link takes the
+  node's only proxy slot, so the Häfele app cannot connect to any node while
+  Home Assistant holds them. Each link also takes a connection slot on the
+  ESPHome Bluetooth proxy that carries it (three by default, shared with every
+  other Bluetooth device using that proxy). Turn it on only if some lamps never
+  respond while others do.
+
+  Diagnostics now list the held links as `state.proxy_links`.
+
+  **Hardware validation.** The multi-island path was validated by @gilgamezh
+  on two Mesh Boxes (firmware 6.0.5) behind an ESPHome proxy, on Home
+  Assistant 2026.9.4: both boxes acknowledge commands, both links come back
+  after a restart, and a box released by the vendor app joins the running links
+  about 30 seconds later. It cannot be exercised on the maintainer's install,
+  which has a single box. With the option off, this release ran there on
+  2026-10-13: the lamp reconnected after a restart, its state was read back,
+  and on/off, brightness and colour temperature behave as before.
+
 ### Changed
 
+- **HACS now downloads a zip attached to the release** instead of an archive
+  of the repository. Nothing changes in what gets installed; the difference is
+  that GitHub counts these downloads, which is the only way to know how many
+  people use this integration.
 - **The manifest no longer lists `cryptography`.** Home Assistant ships it
   itself (2026.9.4 pins 48.0.1), and hassfest now rejects a custom
   integration that declares one of Home Assistant's own dependencies. The
