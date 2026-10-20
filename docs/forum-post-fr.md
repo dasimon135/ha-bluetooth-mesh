@@ -78,7 +78,7 @@ les commandes quasi instantanées.
 
 ### Installation
 
-HACS → dépôt personnalisé (catégorie *Intégration*) → installer → redémarrer →
+HACS → chercher *Bluetooth Mesh* (dans le magasin par défaut) → installer → redémarrer →
 ajouter l'intégration et coller votre export `.connect`. Détails et captures dans
 le README.
 
