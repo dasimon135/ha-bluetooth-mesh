@@ -3,7 +3,7 @@
 [![Release](https://img.shields.io/github/v/release/dasimon135/ha-bluetooth-mesh)](https://github.com/dasimon135/ha-bluetooth-mesh/releases)
 [![Tests](https://github.com/dasimon135/ha-bluetooth-mesh/actions/workflows/tests.yml/badge.svg)](https://github.com/dasimon135/ha-bluetooth-mesh/actions/workflows/tests.yml)
 [![Validate](https://github.com/dasimon135/ha-bluetooth-mesh/actions/workflows/validate.yml/badge.svg)](https://github.com/dasimon135/ha-bluetooth-mesh/actions/workflows/validate.yml)
-[![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
+[![HACS Default](https://img.shields.io/badge/HACS-Default-41BDF5.svg)](https://github.com/hacs/integration)
 [![License](https://img.shields.io/github/license/dasimon135/ha-bluetooth-mesh)](LICENSE)
 
 Control **Bluetooth Mesh lighting** from Home Assistant — Häfele Connect Mesh
@@ -126,7 +126,7 @@ split:
    network obfuscation), network/transport/access layers, proxy-PDU
    segmentation/reassembly, a provisioner, and a GATT bearer that runs over
    `bleak` / `habluetooth` (so it works through ESPHome Bluetooth proxies).
-2. **`bluetooth_mesh`** (`custom_components/bluetooth_mesh/`) — a HACS custom
+2. **`bluetooth_mesh`** (`custom_components/bluetooth_mesh/`) — a custom
    integration: config flow, storage, a connection coordinator, and Home
    Assistant entities (starting with `light`).
 
@@ -189,18 +189,14 @@ connected.
 
 ## Installation
 
-**From HACS (recommended).** This button opens the repository in your own Home
-Assistant. HACS asks whether to add it as a custom repository: accept, then
-download **Bluetooth Mesh** and restart Home Assistant. Then
-carry on from step 2 below.
+Bluetooth Mesh is in the default HACS store, so there is no custom repository
+to add. This button opens it in HACS on your own Home Assistant:
 
 [![Open the Bluetooth Mesh repository inside your Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=dasimon135&repository=ha-bluetooth-mesh&category=integration)
 
-If the button does not reach your instance, step 1 adds it by hand:
-
-1. **Add the repository to HACS** as a custom repository
-   (HACS → Integrations → ⋯ → Custom repositories), category **Integration**,
-   then install *Bluetooth Mesh* and restart Home Assistant.
+1. **Download *Bluetooth Mesh*** from that page and restart Home Assistant. If
+   the button does not reach your instance, open HACS and search for
+   *Bluetooth Mesh* instead.
 2. **Export your network** from the vendor app as a `.connect` file.
 3. **Add the integration** (Settings → Devices & Services → Add Integration →
    *Bluetooth Mesh*) and paste the contents of the `.connect` file when

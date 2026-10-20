@@ -78,7 +78,7 @@ makes commands feel instant.
 
 ### Install
 
-HACS → custom repository (category *Integration*) → install → restart → add the
+HACS → search for *Bluetooth Mesh* (it is in the default store) → install → restart → add the
 integration and paste your `.connect` export. Details and screenshots in the
 README.
 
